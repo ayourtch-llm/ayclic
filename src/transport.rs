@@ -32,13 +32,8 @@ pub trait CiscoTransport: Send + std::fmt::Debug {
 
 // === Telnet transport wrapper ===
 
+#[derive(Debug)]
 pub struct TelnetTransport(pub(crate) aytelnet::CiscoTelnet);
-
-impl std::fmt::Debug for TelnetTransport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TelnetTransport").finish()
-    }
-}
 
 #[async_trait]
 impl CiscoTransport for TelnetTransport {

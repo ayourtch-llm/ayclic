@@ -19,7 +19,7 @@ use tracing::{error, info};
 const TARGET: &str = "192.168.0.130";
 const USERNAME: &str = "ayourtch";
 const PASSWORD: &str = "cisco123";
-const ACL_SIZE: u32 = 5000;
+const DEFAULT_ACL_SIZE: u32 = 100;
 
 /// Generate a single ACL entry for the given index (0-based).
 /// Returns the line WITHOUT leading space or sequence number —
@@ -71,7 +71,7 @@ fn generate_ace(i: u32) -> String {
 
 /// Build the config snippet to create the ACL.
 /// First removes any existing ACL, then creates the full one.
-fn build_create_config(acl_name: &str) -> String {
+fn build_create_config(acl_name: &str, count: u32) -> String {
     let mut lines = Vec::new();
 
     // Remove existing ACL first
@@ -81,7 +81,7 @@ fn build_create_config(acl_name: &str) -> String {
     lines.push(format!("ip access-list extended {}", acl_name));
 
     // Generate ACEs with sequence numbers 10, 20, 30, ...
-    for i in 0..ACL_SIZE {
+    for i in 0..count {
         let seq = (i + 1) * 10;
         let ace = generate_ace(i);
         lines.push(format!(" {} {}", seq, ace));
@@ -155,13 +155,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.len() < 3 {
         eprintln!("Usage:");
-        eprintln!("  {} create-test <aclname>", args[0]);
+        eprintln!("  {} create-test <aclname> [count]", args[0]);
         eprintln!("  {} delete <aclname>", args[0]);
+        eprintln!();
+        eprintln!("  count: number of ACL entries (default {})", DEFAULT_ACL_SIZE);
         std::process::exit(1);
     }
 
     let command = &args[1];
     let acl_name = &args[2];
+    let acl_size: u32 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_ACL_SIZE);
 
     // Connect with 5-minute read timeout (applying large configs takes time)
     eprintln!("Connecting to {} ...", TARGET);
@@ -180,9 +186,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "create-test" => {
             eprintln!(
                 "Generating {} ACL entries for '{}'...",
-                ACL_SIZE, acl_name
+                acl_size, acl_name
             );
-            let config = build_create_config(acl_name);
+            let config = build_create_config(acl_name, acl_size);
             let line_count = config.lines().count();
             eprintln!(
                 "Config snippet: {} lines, {} bytes",
@@ -351,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_generate_ace_all_unique() {
-        let mut aces: Vec<String> = (0..ACL_SIZE).map(generate_ace).collect();
+        let mut aces: Vec<String> = (0..DEFAULT_ACL_SIZE).map(generate_ace).collect();
         let total = aces.len();
         aces.sort();
         aces.dedup();
@@ -360,24 +366,25 @@ mod tests {
 
     #[test]
     fn test_build_create_config_structure() {
-        let config = build_create_config("TEST_ACL");
+        let config = build_create_config("TEST_ACL", DEFAULT_ACL_SIZE);
         let lines: Vec<&str> = config.lines().collect();
 
         // First line: delete existing
         assert_eq!(lines[0], "no ip access-list extended TEST_ACL");
         // Second line: create ACL
         assert_eq!(lines[1], "ip access-list extended TEST_ACL");
-        // Remaining: 5000 ACEs with sequence numbers
-        assert_eq!(lines.len(), 2 + ACL_SIZE as usize);
+        // Remaining: DEFAULT_ACL_SIZE ACEs with sequence numbers
+        assert_eq!(lines.len(), 2 + DEFAULT_ACL_SIZE as usize);
         // First ACE has seq 10
         assert!(lines[2].starts_with(" 10 "));
-        // Last ACE has seq 50000
-        assert!(lines[5001].starts_with(" 50000 "));
+        // Last ACE has seq = DEFAULT_ACL_SIZE * 10
+        let last_seq = format!(" {} ", DEFAULT_ACL_SIZE * 10);
+        assert!(lines[1 + DEFAULT_ACL_SIZE as usize].starts_with(&last_seq));
     }
 
     #[test]
     fn test_build_create_config_sequence_numbers() {
-        let config = build_create_config("TEST");
+        let config = build_create_config("TEST", DEFAULT_ACL_SIZE);
         for (i, line) in config.lines().skip(2).enumerate() {
             let expected_seq = (i as u32 + 1) * 10;
             let trimmed = line.trim();

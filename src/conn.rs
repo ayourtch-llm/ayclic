@@ -14,7 +14,8 @@ use tracing::{debug, info};
 
 use crate::error::CiscoIosError;
 use crate::transport::{
-    receive_until_match, CiscoTransport, SshTransport, TelnetTransport,
+    ios_prompt_actions, receive_until_match, run_interactive, CiscoTransport, PromptAction,
+    SshTransport, TelnetTransport,
 };
 
 /// Determine the local IP address that can reach a given target.
@@ -420,6 +421,33 @@ impl CiscoIosConn {
             .map_err(|e| CiscoIosError::HttpUploadError(format!("Invalid UTF-8: {}", e)))
     }
 
+    /// Execute an interactive command, auto-responding to IOS prompts.
+    ///
+    /// Like `run_cmd`, but also handles intermediate prompts such as
+    /// `]?`, `[confirm]`, `(yes/no)` by automatically sending the
+    /// appropriate response. Useful for `copy`, `delete`, etc.
+    ///
+    /// Custom prompt/response pairs can be provided; if `None`, uses
+    /// the standard IOS confirmation prompts.
+    pub async fn run_cmd_chat(
+        &mut self,
+        cmd: &str,
+        extra_prompts: Option<&[(&str, PromptAction)]>,
+    ) -> Result<String, CiscoIosError> {
+        debug!("run_cmd_chat on {}: {}", self.config.target, cmd);
+        let prompts = match extra_prompts {
+            Some(custom) => custom.to_vec(),
+            None => ios_prompt_actions(),
+        };
+        run_interactive(
+            self.transport.as_mut(),
+            cmd,
+            &prompts,
+            self.config.read_timeout,
+        )
+        .await
+    }
+
     /// Atomically apply a configuration snippet to the device.
     ///
     /// This method:
@@ -457,23 +485,14 @@ impl CiscoIosConn {
         let http_url = format!("http://{}:{}/{}", ip, port, flash_file);
         info!("config_atomic: serving config at {}", http_url);
 
-        // Suppress interactive prompts for copy commands
-        self.run_cmd("configure terminal").await?;
-        self.run_cmd("file prompt quiet").await?;
-        self.run_cmd("end").await?;
-
         // Download file from our HTTP server to flash
+        // run_cmd_chat auto-responds to IOS confirmation prompts (]?, [confirm], etc.)
         let copy_cmd = format!("copy {} {}", http_url, flash_path);
-        let copy_to_flash = self.run_cmd(&copy_cmd).await?;
+        let copy_to_flash = self.run_cmd_chat(&copy_cmd, None).await?;
         info!("copy to flash output: {}", copy_to_flash);
 
         // Wait for HTTP server to finish
         let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
-
-        // Restore default file prompt behavior
-        self.run_cmd("configure terminal").await?;
-        self.run_cmd("no file prompt quiet").await?;
-        self.run_cmd("end").await?;
 
         // Verify MD5 of the file on flash
         let verify_cmd = format!("verify /md5 {}", flash_path);
@@ -499,17 +518,9 @@ impl CiscoIosConn {
         info!("config_atomic: MD5 verified ({}), applying config", expected_md5);
 
         // Apply config: copy from flash to running-config
-        self.run_cmd("configure terminal").await?;
-        self.run_cmd("file prompt quiet").await?;
-        self.run_cmd("end").await?;
-
         let copy_output = self
-            .run_cmd(&format!("copy {} running-config", flash_path))
+            .run_cmd_chat(&format!("copy {} running-config", flash_path), None)
             .await?;
-
-        self.run_cmd("configure terminal").await?;
-        self.run_cmd("no file prompt quiet").await?;
-        self.run_cmd("end").await?;
 
         // Clean up temp file from flash
         let delete_cmd = format!("delete /force {}", flash_path);

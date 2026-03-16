@@ -134,6 +134,121 @@ pub async fn receive_until_match(
     }
 }
 
+/// What to do when a pattern is matched during interactive command execution.
+#[derive(Debug, Clone)]
+pub enum PromptAction {
+    /// The command is done — return the accumulated output.
+    Done,
+    /// Send this response to the device and continue waiting.
+    Respond(Vec<u8>),
+}
+
+/// Execute a command interactively, handling intermediate prompts.
+///
+/// Sends `cmd` (with trailing newline), then watches for any of the given
+/// patterns. When a `Done` pattern matches, the accumulated output is returned.
+/// When a `Respond` pattern matches, the response is sent and matching continues.
+///
+/// This enables handling IOS interactive commands like `copy` (which prompts
+/// for confirmation) without needing `file prompt quiet`.
+///
+/// # Arguments
+///
+/// * `transport` — the device connection
+/// * `cmd` — command to send (newline is appended automatically)
+/// * `prompt_actions` — list of `(pattern, action)` pairs; order matters for
+///   aho-corasick (first match in the data wins)
+/// * `timeout` — overall timeout for the entire interaction
+///
+/// # Example
+///
+/// ```ignore
+/// let output = run_interactive(
+///     transport,
+///     "copy flash:file running-config",
+///     &[
+///         ("#", PromptAction::Done),
+///         ("]?", PromptAction::Respond(b"\n".to_vec())),
+///         ("[confirm]", PromptAction::Respond(b"\n".to_vec())),
+///     ],
+///     Duration::from_secs(30),
+/// ).await?;
+/// ```
+pub async fn run_interactive(
+    transport: &mut dyn CiscoTransport,
+    cmd: &str,
+    prompt_actions: &[(&str, PromptAction)],
+    timeout: Duration,
+) -> Result<String, CiscoIosError> {
+    let patterns: Vec<&str> = prompt_actions.iter().map(|(p, _)| *p).collect();
+    let matcher = AhoCorasick::new(&patterns)
+        .map_err(|e| CiscoIosError::HttpUploadError(format!("Invalid pattern: {}", e)))?;
+
+    // Send the command
+    transport
+        .send(format!("{}\n", cmd).as_bytes())
+        .await?;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut buffer = Vec::new();
+
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(CiscoIosError::Timeout {
+                accumulated: buffer,
+            });
+        }
+        let remaining = deadline - now;
+
+        match receive_until_match(transport, &matcher, remaining, buffer).await {
+            Ok((data, pattern_idx)) => {
+                let (_, action) = &prompt_actions[pattern_idx];
+                match action {
+                    PromptAction::Done => {
+                        return String::from_utf8(data).map_err(|e| {
+                            CiscoIosError::HttpUploadError(format!("Invalid UTF-8: {}", e))
+                        });
+                    }
+                    PromptAction::Respond(response) => {
+                        debug!(
+                            "Interactive prompt matched pattern {:?}, sending response",
+                            patterns[pattern_idx]
+                        );
+                        transport.send(response).await?;
+                        // Advance past the match so it doesn't re-trigger
+                        let mat = matcher.find(&data).unwrap();
+                        buffer = data[mat.end()..].to_vec();
+                    }
+                }
+            }
+            Err(CiscoIosError::Timeout { accumulated }) => {
+                return Err(CiscoIosError::Timeout { accumulated });
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Common IOS interactive prompt actions: auto-confirm `]?` and `[confirm]`.
+pub const IOS_CONFIRM_PROMPTS: &[(&str, &[u8])] = &[
+    ("]?", b"\n"),
+    ("[confirm]", b"\n"),
+    ("(yes/no)", b"yes\n"),
+    ("(yes/no)?", b"yes\n"),
+];
+
+/// Build a prompt_actions list for interactive IOS commands.
+/// Includes `#` as Done, plus the standard confirmation auto-responses.
+pub fn ios_prompt_actions() -> Vec<(&'static str, PromptAction)> {
+    let mut actions: Vec<(&str, PromptAction)> = Vec::new();
+    actions.push(("#", PromptAction::Done));
+    for (pattern, response) in IOS_CONFIRM_PROMPTS {
+        actions.push((pattern, PromptAction::Respond(response.to_vec())));
+    }
+    actions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,17 +259,23 @@ mod tests {
     struct MockTransport {
         chunks: Vec<Vec<u8>>,
         index: usize,
+        sent: Vec<Vec<u8>>,
     }
 
     impl MockTransport {
         fn new(chunks: Vec<Vec<u8>>) -> Self {
-            Self { chunks, index: 0 }
+            Self {
+                chunks,
+                index: 0,
+                sent: Vec::new(),
+            }
         }
     }
 
     #[async_trait]
     impl CiscoTransport for MockTransport {
-        async fn send(&mut self, _data: &[u8]) -> Result<(), CiscoIosError> {
+        async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
+            self.sent.push(data.to_vec());
             Ok(())
         }
 
@@ -392,5 +513,144 @@ mod tests {
         .unwrap();
 
         assert_eq!(idx, 1);
+    }
+
+    // === run_interactive tests ===
+
+    #[tokio::test]
+    async fn test_interactive_simple_command() {
+        // Simple command, no interactive prompts — just waits for #
+        let mut transport = MockTransport::new(vec![
+            b"show version\nCisco IOS\nRouter#".to_vec(),
+        ]);
+        let prompts = ios_prompt_actions();
+        let output = run_interactive(
+            &mut transport,
+            "show version",
+            &prompts,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(output.contains("Cisco IOS"));
+        assert!(output.contains("Router#"));
+        // First sent item is the command
+        assert_eq!(transport.sent[0], b"show version\n");
+    }
+
+    #[tokio::test]
+    async fn test_interactive_confirmation_prompt() {
+        // copy command: device asks "]?" then completes with #
+        let mut transport = MockTransport::new(vec![
+            b"Destination filename [file.cfg]?".to_vec(),
+            b"\n92 bytes copied\nRouter#".to_vec(),
+        ]);
+        let prompts = ios_prompt_actions();
+        let output = run_interactive(
+            &mut transport,
+            "copy flash:file running-config",
+            &prompts,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(output.contains("92 bytes copied"));
+        // Should have sent: command, then \n for the ]? prompt
+        assert_eq!(transport.sent[0], b"copy flash:file running-config\n");
+        assert_eq!(transport.sent[1], b"\n");
+    }
+
+    #[tokio::test]
+    async fn test_interactive_multiple_prompts() {
+        // Command with two confirmation prompts before completion
+        let mut transport = MockTransport::new(vec![
+            b"Source filename [file]?".to_vec(),
+            b"\nDestination filename [dest]?".to_vec(),
+            b"\nDone!\nRouter#".to_vec(),
+        ]);
+        let prompts = ios_prompt_actions();
+        let output = run_interactive(
+            &mut transport,
+            "copy src dest",
+            &prompts,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(output.contains("Done!"));
+        // command + two auto-responses
+        assert_eq!(transport.sent.len(), 3);
+        assert_eq!(transport.sent[1], b"\n");
+        assert_eq!(transport.sent[2], b"\n");
+    }
+
+    #[tokio::test]
+    async fn test_interactive_yes_no_prompt() {
+        let mut transport = MockTransport::new(vec![
+            b"Proceed with delete? (yes/no)".to_vec(),
+            b"\nDeleted\nRouter#".to_vec(),
+        ]);
+        let prompts = ios_prompt_actions();
+        let output = run_interactive(
+            &mut transport,
+            "delete flash:file",
+            &prompts,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(output.contains("Deleted"));
+        assert_eq!(transport.sent[1], b"yes\n");
+    }
+
+    #[tokio::test]
+    async fn test_interactive_custom_prompts() {
+        let mut transport = MockTransport::new(vec![
+            b"Enter secret: ".to_vec(),
+            b"\nOK\nRouter#".to_vec(),
+        ]);
+        let prompts = vec![
+            ("#", PromptAction::Done),
+            ("Enter secret: ", PromptAction::Respond(b"mysecret\n".to_vec())),
+        ];
+        let output = run_interactive(
+            &mut transport,
+            "setup",
+            &prompts,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert!(output.contains("OK"));
+        assert_eq!(transport.sent[1], b"mysecret\n");
+    }
+
+    #[tokio::test]
+    async fn test_interactive_timeout() {
+        let mut transport = MockTransport::new(vec![
+            b"waiting...".to_vec(),
+            // no more data → timeout
+        ]);
+        let prompts = ios_prompt_actions();
+        let err = run_interactive(
+            &mut transport,
+            "slow-cmd",
+            &prompts,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            CiscoIosError::Timeout { accumulated } => {
+                assert!(String::from_utf8_lossy(&accumulated).contains("waiting..."));
+            }
+            other => panic!("Expected Timeout, got: {:?}", other),
+        }
     }
 }

@@ -22,4 +22,7 @@ pub enum CiscoIosError {
 
     #[error("HTTP upload error: {0}")]
     HttpUploadError(String),
+
+    #[error("Operation timed out ({} bytes accumulated)", accumulated.len())]
+    Timeout { accumulated: Vec<u8> },
 }

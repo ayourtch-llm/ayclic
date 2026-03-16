@@ -13,6 +13,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 md-5 = "0.10"
 digest = "0.10"
 axum = "0.8"
+aho-corasick = "1"
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

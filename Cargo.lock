@@ -107,6 +107,8 @@ dependencies = [
 name = "ayclic"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
+ "async-trait",
  "axum",
  "ayssh",
  "aytelnet",

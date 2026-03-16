@@ -2,6 +2,7 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aho_corasick::AhoCorasick;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
@@ -12,6 +13,9 @@ use tokio::net::TcpListener;
 use tracing::{debug, info};
 
 use crate::error::CiscoIosError;
+use crate::transport::{
+    receive_until_match, CiscoTransport, SshTransport, TelnetTransport,
+};
 
 /// Determine the local IP address that can reach a given target.
 /// Uses the UDP-connect trick: bind a UDP socket, "connect" to the target
@@ -197,6 +201,19 @@ pub fn build_tclsh_write_commands(filename: &str, config: &str) -> Vec<String> {
     cmds
 }
 
+/// Initialize a Cisco IOS session: send `term len 0` and wait for prompt.
+/// Used after transport-level connection + auth is complete.
+async fn ios_init(
+    transport: &mut dyn CiscoTransport,
+    read_timeout: Duration,
+) -> Result<(), CiscoIosError> {
+    let prompt = AhoCorasick::new(&["#"]).unwrap();
+    transport.send(b"term len 0\n").await?;
+    // Wait for prompt (ignore the output)
+    let _ = receive_until_match(transport, &prompt, read_timeout, vec![]).await;
+    Ok(())
+}
+
 /// Connection method for Cisco IOS devices
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionType {
@@ -236,22 +253,27 @@ impl Default for CiscoIosConfig {
     }
 }
 
-/// Inner connection - either telnet or SSH
-#[derive(Debug)]
-enum InnerConn {
-    Telnet(aytelnet::CiscoConn),
-    Ssh(ayssh::CiscoConn),
-}
-
 /// Unified Cisco IOS connection supporting both Telnet and SSH
 ///
 /// Provides a single type that can connect to Cisco IOS devices via
 /// telnet, SSH password, SSH public key, or SSH keyboard-interactive
 /// authentication. All methods share the same `run_cmd` / `disconnect` API.
-#[derive(Debug)]
+///
+/// Internally uses the `CiscoTransport` trait for a unified send/receive
+/// codepath across all protocols. Pattern matching uses aho-corasick
+/// for efficient multi-pattern detection.
 pub struct CiscoIosConn {
     config: CiscoIosConfig,
-    inner: InnerConn,
+    transport: Box<dyn CiscoTransport>,
+}
+
+impl std::fmt::Debug for CiscoIosConn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CiscoIosConn")
+            .field("config", &self.config)
+            .field("transport", &self.transport)
+            .finish()
+    }
 }
 
 impl CiscoIosConn {
@@ -292,18 +314,19 @@ impl CiscoIosConn {
 
         info!("Connecting to {} via {:?}", target, conntype);
 
-        let inner = match conntype {
+        let transport: Box<dyn CiscoTransport> = match conntype {
             ConnectionType::Telnet => {
-                let conn = aytelnet::CiscoConn::with_timeouts(
-                    target,
-                    aytelnet::ConnectionType::CiscoTelnet,
-                    username,
-                    password,
-                    timeout,
-                    read_timeout,
-                )
-                .await?;
-                InnerConn::Telnet(conn)
+                // Use CiscoTelnet directly — it handles TCP + telnet negotiation + auth + term len 0
+                let mut client = aytelnet::CiscoTelnet::new(target, username, password)
+                    .with_timeout(timeout)
+                    .with_read_timeout(read_timeout)
+                    .with_prompt("Router#")
+                    .with_prompt("Switch#")
+                    .with_prompt("config#")
+                    .with_prompt("cli#");
+                client.connect().await.map_err(CiscoIosError::Telnet)?;
+                // connect() already does term len 0, no need for ios_init
+                Box::new(TelnetTransport(client))
             }
             ConnectionType::Ssh => {
                 let conn = ayssh::CiscoConn::with_timeouts(
@@ -315,7 +338,8 @@ impl CiscoIosConn {
                     read_timeout,
                 )
                 .await?;
-                InnerConn::Ssh(conn)
+                // ayssh::CiscoConn::new already does term len 0 + prompt wait
+                Box::new(SshTransport(conn))
             }
             ConnectionType::SshKbdInteractive => {
                 let conn = ayssh::CiscoConn::with_timeouts(
@@ -327,7 +351,7 @@ impl CiscoIosConn {
                     read_timeout,
                 )
                 .await?;
-                InnerConn::Ssh(conn)
+                Box::new(SshTransport(conn))
             }
             ConnectionType::SshKey => unreachable!(),
         };
@@ -344,7 +368,7 @@ impl CiscoIosConn {
                 timeout,
                 read_timeout,
             },
-            inner,
+            transport,
         })
     }
 
@@ -370,17 +394,30 @@ impl CiscoIosConn {
                 timeout: Duration::from_secs(30),
                 read_timeout: Duration::from_secs(30),
             },
-            inner: InnerConn::Ssh(conn),
+            transport: Box::new(SshTransport(conn)),
         })
     }
 
-    /// Execute a command on the connected device and return its output
+    /// Execute a command on the connected device and return its output.
+    ///
+    /// Sends the command, then waits for the `#` prompt using aho-corasick
+    /// pattern matching over the transport. This is the single unified
+    /// codepath for both telnet and SSH.
     pub async fn run_cmd(&mut self, cmd: &str) -> Result<String, CiscoIosError> {
         debug!("run_cmd on {}: {}", self.config.target, cmd);
-        match &mut self.inner {
-            InnerConn::Telnet(conn) => Ok(conn.run_cmd(cmd).await?),
-            InnerConn::Ssh(conn) => Ok(conn.run_cmd(cmd).await?),
-        }
+        let prompt = AhoCorasick::new(&["#"]).unwrap();
+        self.transport
+            .send(format!("{}\n", cmd).as_bytes())
+            .await?;
+        let (data, _) = receive_until_match(
+            self.transport.as_mut(),
+            &prompt,
+            self.config.read_timeout,
+            vec![],
+        )
+        .await?;
+        String::from_utf8(data)
+            .map_err(|e| CiscoIosError::HttpUploadError(format!("Invalid UTF-8: {}", e)))
     }
 
     /// Atomically apply a configuration snippet to the device.
@@ -488,10 +525,7 @@ impl CiscoIosConn {
     /// Disconnect from the device
     pub async fn disconnect(&mut self) -> Result<(), CiscoIosError> {
         info!("Disconnecting from {}", self.config.target);
-        match &mut self.inner {
-            InnerConn::Telnet(conn) => Ok(conn.disconnect().await?),
-            InnerConn::Ssh(conn) => Ok(conn.disconnect().await?),
-        }
+        self.transport.close().await
     }
 
     /// Get the target address

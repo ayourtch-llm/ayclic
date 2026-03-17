@@ -1,3 +1,4 @@
+use aycalc::{CalcVal, CallFunc, GetVar};
 use log::{debug, error, info, log_enabled, trace, Level};
 pub use pest::iterators::Pair;
 pub use pest::Parser;
@@ -1066,5 +1067,220 @@ impl TextFSMPlus {
             None => self.records.clone(),
             Some(DataRecordConversion::LowercaseKeys) => Self::lowercase_keys(&self.records),
         }
+    }
+}
+
+// --- aycalc integration ---
+
+/// GetVar implementation over the TextFSM value table.
+/// Looks up captured and preset values by name.
+struct ValueTableVars<'a> {
+    record: &'a DataRecord,
+}
+
+impl<'a> GetVar for ValueTableVars<'a> {
+    fn get_var_value(&self, varname: &str) -> Result<CalcVal, aycalc::Error> {
+        match self.record.get(varname) {
+            Some(Value::Single(s)) => Ok(CalcVal::String(s.clone())),
+            Some(Value::List(l)) => Ok(CalcVal::String(l.join(","))),
+            None => Err(aycalc::Error::VariableNotFound(varname.to_string())),
+        }
+    }
+}
+
+/// No-op CallFunc — no custom functions registered.
+/// Users can provide their own via drive_with().
+pub struct NoFuncs;
+
+impl CallFunc for NoFuncs {
+    fn call_func(&self, funcname: &str, _args: &Vec<CalcVal>) -> Result<CalcVal, aycalc::Error> {
+        Err(aycalc::Error::FunctionNotFound(funcname.to_string()))
+    }
+}
+
+/// Result of processing a line in interactive mode.
+#[derive(Debug, PartialEq, Clone)]
+pub enum InteractiveAction {
+    /// No action needed, continue reading.
+    None,
+    /// Send this text to the stream.
+    Send(String),
+    /// Interaction completed successfully.
+    Done,
+    /// Error encountered.
+    Error(Option<String>),
+}
+
+impl TextFSMPlus {
+    /// Expand a send text expression using aycalc.
+    /// Simple variable references like `${Password}` are looked up directly.
+    /// Complex expressions like `${compute_response(Challenge, Key)}` are
+    /// evaluated by aycalc with the current value table as GetVar context.
+    pub fn expand_send_text(&self, text: &str, funcs: &impl CallFunc) -> String {
+        let vars = ValueTableVars {
+            record: &self.curr_record,
+        };
+        // Extract ${...} expressions manually to support arbitrary aycalc
+        // expressions (which may contain spaces, operators, function calls).
+        let mut result = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '$' {
+                if chars.peek() == Some(&'{') {
+                    chars.next(); // consume '{'
+                    let mut expr = String::new();
+                    let mut depth = 1;
+                    for ch in chars.by_ref() {
+                        match ch {
+                            '{' => {
+                                depth += 1;
+                                expr.push(ch);
+                            }
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                expr.push(ch);
+                            }
+                            _ => expr.push(ch),
+                        }
+                    }
+                    // Evaluate expression via aycalc (handles both simple
+                    // variable lookups and complex expressions)
+                    match aycalc::eval_with(&expr, &vars, funcs) {
+                        Ok(val) => result.push_str(&val.to_string()),
+                        Err(e) => {
+                            error!("aycalc eval error for '{}': {:?}", &expr, e);
+                            result.push_str(&format!("${{{}}}", &expr));
+                        }
+                    }
+                } else if chars.peek() == Some(&'$') {
+                    chars.next(); // consume second '$'
+                    result.push('$');
+                } else {
+                    result.push('$');
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+        // Strip surrounding quotes if the whole text was quoted
+        // (e.g., Send "enable" should send enable, not "enable")
+        if result.starts_with('"') && result.ends_with('"') && result.len() >= 2 {
+            result = result[1..result.len() - 1].to_string();
+        }
+        result
+    }
+
+    /// Process a line in interactive mode.
+    /// Returns the action to take (Send, Done, Error, or None).
+    pub fn parse_line_interactive(
+        &mut self,
+        aline: &str,
+        funcs: &impl CallFunc,
+    ) -> InteractiveAction {
+        let curr_state = self.curr_state.clone();
+
+        if let Some(ref curr_state) = self.parser.states.get(&curr_state) {
+            for rule in &curr_state.rules {
+                let mut transition: RuleTransition = Default::default();
+                transition.line_action = LineAction::Continue;
+                let mut capture_matched = false;
+                let mut tmp_datarec = DataRecord::new();
+                let mut tmp_filldown_rec = DataRecord::new();
+
+                match &rule.maybe_regex {
+                    Some(MultiRegex::Classic(rx)) => {
+                        for caps in rx.captures_iter(aline) {
+                            for name in &rule.match_variables {
+                                let maybe_value =
+                                    caps.name(name).map(|x| x.as_str().to_string());
+                                self.insert_value(
+                                    "INTERACTIVE",
+                                    &mut tmp_datarec,
+                                    &mut tmp_filldown_rec,
+                                    name,
+                                    maybe_value,
+                                    aline,
+                                );
+                            }
+                            capture_matched = true;
+                        }
+                    }
+                    Some(MultiRegex::Fancy(rx)) => {
+                        for caps in rx.captures_iter(aline) {
+                            for name in &rule.match_variables {
+                                if let Ok(ref caps) = caps {
+                                    let maybe_value =
+                                        caps.name(name).map(|x| x.as_str().to_string());
+                                    self.insert_value(
+                                        "INTERACTIVE",
+                                        &mut tmp_datarec,
+                                        &mut tmp_filldown_rec,
+                                        name,
+                                        maybe_value,
+                                        aline,
+                                    );
+                                }
+                            }
+                            capture_matched = true;
+                        }
+                    }
+                    x => {
+                        panic!("Regex {:?} on rule is not supported", &x);
+                    }
+                }
+
+                if capture_matched {
+                    // Merge captured values into curr_record
+                    for (name, v) in tmp_datarec.fields {
+                        self.curr_record.append_value(name, v);
+                    }
+                    for (name, v) in tmp_filldown_rec.fields {
+                        self.filldown_record.append_value(name, v);
+                    }
+                    transition = rule.transition.clone();
+                }
+
+                match &transition.line_action {
+                    LineAction::Next(Some(NextState::Done)) => {
+                        self.curr_state = "Done".to_string();
+                        return InteractiveAction::Done;
+                    }
+                    LineAction::Next(Some(NextState::Error(msg))) => {
+                        return InteractiveAction::Error(msg.clone());
+                    }
+                    LineAction::Next(Some(NextState::NamedState(name))) => {
+                        self.set_curr_state(name);
+                        return InteractiveAction::None;
+                    }
+                    LineAction::Next(None) => {
+                        return InteractiveAction::None;
+                    }
+                    LineAction::Send(text, next) => {
+                        let expanded = self.expand_send_text(text, funcs);
+                        if let Some(next_state) = next {
+                            match next_state {
+                                NextState::Done => {
+                                    self.curr_state = "Done".to_string();
+                                }
+                                NextState::NamedState(name) => {
+                                    self.set_curr_state(name);
+                                }
+                                NextState::Error(msg) => {
+                                    return InteractiveAction::Error(msg.clone());
+                                }
+                            }
+                        }
+                        return InteractiveAction::Send(expanded);
+                    }
+                    LineAction::Continue => {}
+                }
+            }
+        } else {
+            panic!("State {} not found!", &self.curr_state);
+        }
+        InteractiveAction::None
     }
 }

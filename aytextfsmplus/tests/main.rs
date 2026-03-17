@@ -389,6 +389,167 @@ Start
     }
 
     #[test]
+    fn test_expand_send_text_simple_variable() {
+        let template = r#"
+Value Preset Username ()
+
+Start
+  ^Username:\s* -> Send ${Username} Done
+"#;
+        let fsm = TextFSMPlus::from_str(template)
+            .with_preset("Username", "admin");
+        let expanded = fsm.expand_send_text("${Username}", &aytextfsmplus::NoFuncs);
+        assert_eq!(expanded, "admin");
+    }
+
+    #[test]
+    fn test_expand_send_text_quoted_literal() {
+        let template = r#"
+Value Preset Username ()
+
+Start
+  ^> -> Send "enable" Done
+"#;
+        let fsm = TextFSMPlus::from_str(template);
+        let expanded = fsm.expand_send_text("\"enable\"", &aytextfsmplus::NoFuncs);
+        assert_eq!(expanded, "enable");
+    }
+
+    #[test]
+    fn test_expand_send_text_with_aycalc_string_concat() {
+        let template = r#"
+Value Preset A ()
+Value Preset B ()
+
+Start
+  ^calc -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        fsm.set_preset("A", "hello");
+        fsm.set_preset("B", "world");
+        // String values get concatenated by aycalc
+        let expanded = fsm.expand_send_text("${A + B}", &aytextfsmplus::NoFuncs);
+        assert_eq!(expanded, "helloworld");
+    }
+
+    #[test]
+    fn test_expand_send_text_with_aycalc_arithmetic() {
+        let template = r#"
+Value Preset A ()
+
+Start
+  ^calc -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        fsm.set_preset("A", "10");
+        // Pure arithmetic works when not involving string variables
+        let expanded = fsm.expand_send_text("${2 + 40}", &aytextfsmplus::NoFuncs);
+        assert_eq!(expanded, "42");
+    }
+
+    #[test]
+    fn test_interactive_action_send() {
+        let template = r#"
+Value Preset Username ()
+
+Start
+  ^Username:\s* -> Send ${Username} WaitPassword
+
+WaitPassword
+  ^Password:\s* -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template)
+            .with_preset("Username", "admin");
+        let action = fsm.parse_line_interactive("Username: ", &aytextfsmplus::NoFuncs);
+        assert_eq!(action, InteractiveAction::Send("admin".to_string()));
+        assert_eq!(fsm.curr_state, "WaitPassword");
+    }
+
+    #[test]
+    fn test_interactive_action_done() {
+        let template = r#"
+Value Hostname (\S+)
+
+Start
+  ^${Hostname}# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoFuncs);
+        assert_eq!(action, InteractiveAction::Done);
+        assert_eq!(fsm.curr_state, "Done");
+    }
+
+    #[test]
+    fn test_interactive_action_error() {
+        let template = r#"
+Start
+  ^% -> Error "auth failed"
+  ^# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        let action = fsm.parse_line_interactive("% Login invalid", &aytextfsmplus::NoFuncs);
+        assert_eq!(
+            action,
+            InteractiveAction::Error(Some("\"auth failed\"".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_interactive_multi_state_flow() {
+        let template = r#"
+Value Preset Username ()
+Value Preset Password ()
+Value Hostname (\S+)
+
+Start
+  ^Username:\s* -> Send ${Username} WaitPassword
+
+WaitPassword
+  ^Password:\s* -> Send ${Password} WaitPrompt
+
+WaitPrompt
+  ^${Hostname}# -> Done
+  ^% -> Error "login failed"
+"#;
+        let mut fsm = TextFSMPlus::from_str(template)
+            .with_preset("Username", "admin")
+            .with_preset("Password", "secret123");
+
+        let action = fsm.parse_line_interactive("Username: ", &aytextfsmplus::NoFuncs);
+        assert_eq!(action, InteractiveAction::Send("admin".to_string()));
+        assert_eq!(fsm.curr_state, "WaitPassword");
+
+        let action = fsm.parse_line_interactive("Password: ", &aytextfsmplus::NoFuncs);
+        assert_eq!(action, InteractiveAction::Send("secret123".to_string()));
+        assert_eq!(fsm.curr_state, "WaitPrompt");
+
+        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoFuncs);
+        assert_eq!(action, InteractiveAction::Done);
+    }
+
+    #[test]
+    fn test_interactive_capture_and_reuse() {
+        let template = r#"
+Value Hostname (\S+)
+
+Start
+  ^${Hostname}> -> Send "enable" Enable
+
+Enable
+  ^${Hostname}# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+
+        let action = fsm.parse_line_interactive("Router1>", &aytextfsmplus::NoFuncs);
+        assert_eq!(action, InteractiveAction::Send("enable".to_string()));
+        assert_eq!(fsm.curr_state, "Enable");
+
+        // Hostname was captured, now the Enable state should match it
+        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoFuncs);
+        assert_eq!(action, InteractiveAction::Done);
+    }
+
+    #[test]
     fn test_full_interactive_template_parses() {
         let template = r#"
 Value Preset Username ()

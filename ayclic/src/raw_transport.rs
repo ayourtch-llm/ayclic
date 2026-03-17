@@ -203,6 +203,154 @@ impl RawTransport for RawSshTransport {
     }
 }
 
+// === Logging transport wrapper ===
+
+/// Direction of data in a transcript entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptDirection {
+    /// Data sent to the remote end.
+    Sent,
+    /// Data received from the remote end.
+    Received,
+}
+
+/// A single entry in the session transcript.
+#[derive(Debug, Clone)]
+pub struct TranscriptEntry {
+    /// Direction of the data.
+    pub direction: TranscriptDirection,
+    /// The raw bytes.
+    pub data: Vec<u8>,
+    /// When this entry was recorded.
+    pub timestamp: std::time::Instant,
+}
+
+/// A transport wrapper that records all sent/received data.
+///
+/// Wraps any `RawTransport` and captures a full transcript of the
+/// session. The transcript is available via `transcript()` at any
+/// time — during the session, after errors, or after disconnect.
+///
+/// # Example
+///
+/// ```ignore
+/// let inner = RawSshTransport::connect(addr, auth).await?;
+/// let mut transport = LoggingTransport::new(inner);
+///
+/// // ... use transport normally ...
+///
+/// // After the session, inspect what happened:
+/// for entry in transport.transcript() {
+///     match entry.direction {
+///         TranscriptDirection::Sent => print!(">>> "),
+///         TranscriptDirection::Received => print!("<<< "),
+///     }
+///     println!("{}", String::from_utf8_lossy(&entry.data));
+/// }
+/// ```
+pub struct LoggingTransport {
+    inner: Box<dyn RawTransport>,
+    transcript: Vec<TranscriptEntry>,
+}
+
+impl std::fmt::Debug for LoggingTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoggingTransport")
+            .field("inner", &self.inner)
+            .field("transcript_entries", &self.transcript.len())
+            .finish()
+    }
+}
+
+impl LoggingTransport {
+    /// Wrap a transport with logging.
+    pub fn new(inner: Box<dyn RawTransport>) -> Self {
+        Self {
+            inner,
+            transcript: Vec::new(),
+        }
+    }
+
+    /// Get the full transcript.
+    pub fn transcript(&self) -> &[TranscriptEntry] {
+        &self.transcript
+    }
+
+    /// Take the transcript, leaving an empty one in its place.
+    pub fn take_transcript(&mut self) -> Vec<TranscriptEntry> {
+        std::mem::take(&mut self.transcript)
+    }
+
+    /// Get the transcript as a human-readable string.
+    pub fn transcript_string(&self) -> String {
+        let mut out = String::new();
+        for entry in &self.transcript {
+            let prefix = match entry.direction {
+                TranscriptDirection::Sent => ">>> ",
+                TranscriptDirection::Received => "<<< ",
+            };
+            out.push_str(prefix);
+            out.push_str(&String::from_utf8_lossy(&entry.data));
+            if !entry.data.ends_with(b"\n") {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Get only the sent data as a string.
+    pub fn sent_string(&self) -> String {
+        self.transcript
+            .iter()
+            .filter(|e| e.direction == TranscriptDirection::Sent)
+            .map(|e| String::from_utf8_lossy(&e.data).into_owned())
+            .collect()
+    }
+
+    /// Get only the received data as a string.
+    pub fn received_string(&self) -> String {
+        self.transcript
+            .iter()
+            .filter(|e| e.direction == TranscriptDirection::Received)
+            .map(|e| String::from_utf8_lossy(&e.data).into_owned())
+            .collect()
+    }
+
+    /// Extract the inner transport (e.g., to return to a pool).
+    /// The transcript is lost unless you call `take_transcript()` first.
+    pub fn into_inner(self) -> Box<dyn RawTransport> {
+        self.inner
+    }
+}
+
+#[async_trait]
+impl RawTransport for LoggingTransport {
+    async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
+        self.transcript.push(TranscriptEntry {
+            direction: TranscriptDirection::Sent,
+            data: data.to_vec(),
+            timestamp: std::time::Instant::now(),
+        });
+        self.inner.send(data).await
+    }
+
+    async fn receive(&mut self, timeout: Duration) -> Result<Vec<u8>, CiscoIosError> {
+        let data = self.inner.receive(timeout).await?;
+        if !data.is_empty() {
+            self.transcript.push(TranscriptEntry {
+                direction: TranscriptDirection::Received,
+                data: data.clone(),
+                timestamp: std::time::Instant::now(),
+            });
+        }
+        Ok(data)
+    }
+
+    async fn close(&mut self) -> Result<(), CiscoIosError> {
+        self.inner.close().await
+    }
+}
+
 /// Mock transport for testing the feed() integration loop
 /// without real network connections.
 #[cfg(test)]
@@ -269,6 +417,83 @@ mod tests {
 
         let chunk3 = transport.receive(Duration::from_secs(1)).await.unwrap();
         assert!(chunk3.is_empty()); // timeout
+    }
+
+    #[tokio::test]
+    async fn test_logging_transport_records_transcript() {
+        let inner = MockTransport::new(vec![
+            b"Username: ".to_vec(),
+            b"Router1#".to_vec(),
+        ]);
+
+        let mut transport = LoggingTransport::new(Box::new(inner));
+
+        // Send some data
+        transport.send(b"admin").await.unwrap();
+        transport.send(b"\n").await.unwrap();
+
+        // Receive data
+        let chunk1 = transport.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(chunk1, b"Username: ");
+
+        let chunk2 = transport.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(chunk2, b"Router1#");
+
+        // Empty receive (timeout) should NOT be recorded
+        let chunk3 = transport.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(chunk3.is_empty());
+
+        // Check transcript
+        let transcript = transport.transcript();
+        assert_eq!(transcript.len(), 4); // 2 sends + 2 receives (not the empty one)
+        assert_eq!(transcript[0].direction, TranscriptDirection::Sent);
+        assert_eq!(transcript[0].data, b"admin");
+        assert_eq!(transcript[1].direction, TranscriptDirection::Sent);
+        assert_eq!(transcript[1].data, b"\n");
+        assert_eq!(transcript[2].direction, TranscriptDirection::Received);
+        assert_eq!(transcript[2].data, b"Username: ");
+        assert_eq!(transcript[3].direction, TranscriptDirection::Received);
+        assert_eq!(transcript[3].data, b"Router1#");
+    }
+
+    #[tokio::test]
+    async fn test_logging_transport_transcript_string() {
+        let inner = MockTransport::new(vec![
+            b"Password: ".to_vec(),
+        ]);
+
+        let mut transport = LoggingTransport::new(Box::new(inner));
+        transport.send(b"secret\n").await.unwrap();
+        transport.receive(Duration::from_secs(1)).await.unwrap();
+
+        let s = transport.transcript_string();
+        assert!(s.contains(">>> secret"));
+        assert!(s.contains("<<< Password: "));
+    }
+
+    #[tokio::test]
+    async fn test_logging_transport_sent_received_strings() {
+        let inner = MockTransport::new(vec![
+            b"prompt#".to_vec(),
+        ]);
+
+        let mut transport = LoggingTransport::new(Box::new(inner));
+        transport.send(b"show ver\n").await.unwrap();
+        transport.receive(Duration::from_secs(1)).await.unwrap();
+
+        assert_eq!(transport.sent_string(), "show ver\n");
+        assert_eq!(transport.received_string(), "prompt#");
+    }
+
+    #[tokio::test]
+    async fn test_logging_transport_take_transcript() {
+        let inner = MockTransport::new(vec![b"data".to_vec()]);
+        let mut transport = LoggingTransport::new(Box::new(inner));
+        transport.receive(Duration::from_secs(1)).await.unwrap();
+
+        let taken = transport.take_transcript();
+        assert_eq!(taken.len(), 1);
+        assert!(transport.transcript().is_empty()); // emptied
     }
 
     #[tokio::test]

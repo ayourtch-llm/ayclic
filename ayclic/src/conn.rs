@@ -13,10 +13,41 @@ use tokio::net::TcpListener;
 use tracing::{debug, info};
 
 use crate::error::CiscoIosError;
+use crate::generic_conn::GenericCliConn;
+use crate::path::{ConnectionPath, EstablishedPath, Hop, TransportSpec};
+use crate::raw_transport::SshAuth;
 use crate::transport::{
     ios_prompt_actions, receive_until_match, run_interactive, CiscoTransport, PromptAction,
     SshTransport, TelnetTransport,
 };
+
+/// Adapter that wraps a `Box<dyn RawTransport>` as a `CiscoTransport`.
+/// This bridges the new vendor-neutral transport layer with the existing
+/// Cisco-specific code that expects `CiscoTransport`.
+struct RawTransportAdapter(Box<dyn crate::raw_transport::RawTransport>);
+
+impl std::fmt::Debug for RawTransportAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawTransportAdapter")
+            .field("inner", &self.0)
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl CiscoTransport for RawTransportAdapter {
+    async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
+        self.0.send(data).await
+    }
+
+    async fn receive(&mut self, timeout: Duration) -> Result<Vec<u8>, CiscoIosError> {
+        self.0.receive(timeout).await
+    }
+
+    async fn close(&mut self) -> Result<(), CiscoIosError> {
+        self.0.close().await
+    }
+}
 
 /// Determine the local IP address that can reach a given target.
 /// Uses the UDP-connect trick: bind a UDP socket, "connect" to the target
@@ -426,6 +457,46 @@ impl CiscoIosConn {
             },
             transport: Box::new(SshTransport(conn)),
         })
+    }
+
+    /// Create from a `GenericCliConn`.
+    ///
+    /// The connection should already be authenticated and at a device
+    /// prompt. This constructor bridges the vendor-neutral `GenericCliConn`
+    /// with the Cisco-specific `CiscoIosConn` functionality.
+    pub fn from_generic(conn: GenericCliConn, target: &str) -> Self {
+        let transport = conn.into_transport();
+        Self {
+            config: CiscoIosConfig {
+                target: target.to_string(),
+                ..Default::default()
+            },
+            transport: Box::new(RawTransportAdapter(transport)),
+        }
+    }
+
+    /// Connect via a `ConnectionPath` (multi-hop, template-driven).
+    ///
+    /// The path should include all necessary Transport and Interactive
+    /// hops to reach the device and authenticate. After the path
+    /// completes, the device should be at a privileged prompt (`#`).
+    ///
+    /// Example:
+    /// ```ignore
+    /// let path = ConnectionPath::new(vec![
+    ///     Hop::Transport(TransportSpec::Ssh { target, auth }),
+    ///     Hop::Interactive(cisco_login_template),
+    /// ]);
+    /// let conn = CiscoIosConn::from_path(path, "10.1.1.1", &NoVars, &NoFuncs).await?;
+    /// ```
+    pub async fn from_path(
+        path: ConnectionPath,
+        target: &str,
+        vars: &(impl aycalc::GetVar + Sync),
+        funcs: &(impl aycalc::CallFunc + Sync),
+    ) -> Result<Self, CiscoIosError> {
+        let conn = GenericCliConn::connect(path, vars, funcs).await?;
+        Ok(Self::from_generic(conn, target))
     }
 
     /// Execute a command on the connected device and return its output.

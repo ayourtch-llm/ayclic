@@ -4,18 +4,33 @@ pub use pest::Parser;
 use pest_derive::Parser;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use indexmap::IndexMap;
 use std::collections::HashMap;
 
 pub mod cli_table;
 pub mod varsubst;
 pub use cli_table::CliTable;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataRecord {
     #[serde(flatten)]
-    pub fields: HashMap<String, Value>,
+    pub fields: IndexMap<String, Value>,
     #[serde(skip_deserializing)]
     pub record_key: Option<String>,
+}
+
+impl PartialEq for DataRecord {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare by content only, ignoring field insertion order,
+        // since our output uses template declaration order while
+        // YAML-deserialized records use YAML file order.
+        if self.fields.len() != other.fields.len() {
+            return false;
+        }
+        self.fields
+            .iter()
+            .all(|(k, v)| other.fields.get(k) == Some(v))
+    }
 }
 
 impl DataRecord {
@@ -126,7 +141,7 @@ impl DataRecord {
     pub fn remove(&mut self, key: &str) {
         self.fields.remove(key);
     }
-    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, String, Value> {
+    pub fn keys(&self) -> indexmap::map::Keys<'_, String, Value> {
         self.fields.keys()
     }
 
@@ -134,7 +149,7 @@ impl DataRecord {
         self.fields.get(key)
     }
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, String, Value> {
+    pub fn iter(&self) -> indexmap::map::Iter<'_, String, Value> {
         self.fields.iter()
     }
 }
@@ -157,9 +172,9 @@ pub enum Value {
 #[derive(Parser, Debug, Default, Clone)]
 #[grammar = "textfsm.pest"]
 pub struct TextFSMParser {
-    pub values: HashMap<String, ValueDefinition>,
+    pub values: IndexMap<String, ValueDefinition>,
     pub mandatory_values: Vec<String>,
-    pub states: HashMap<String, StateCompiled>,
+    pub states: IndexMap<String, StateCompiled>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -363,7 +378,7 @@ impl TextFSMParser {
 
     pub fn compile_state_rule(
         rule: &StateRule,
-        values: &HashMap<String, ValueDefinition>,
+        values: &IndexMap<String, ValueDefinition>,
     ) -> Result<StateRuleCompiled, String> {
         let mut expanded_rule_match: String = format!("");
         let rule_match = rule.rule_match.clone();
@@ -446,7 +461,7 @@ impl TextFSMParser {
     }
     pub fn parse_and_compile_state_definition(
         pair: &Pair<'_, Rule>,
-        values: &HashMap<String, ValueDefinition>,
+        values: &IndexMap<String, ValueDefinition>,
     ) -> Result<StateCompiled, String> {
         let mut name: Option<String> = None;
         // Self::print_pair(20, pair);
@@ -479,7 +494,7 @@ impl TextFSMParser {
         Ok(StateCompiled { name, rules })
     }
     /*
-    pub fn parse_state_defs(pair: &Pair<'_, Rule>, values: &HashMap<String, ValueDefinition>) {
+    pub fn parse_state_defs(pair: &Pair<'_, Rule>, values: &IndexMap<String, ValueDefinition>) {
         // println!("=== STATE DEFINITIONS ===");
         for pair in pair.clone().into_inner() {
             match pair.as_rule() {
@@ -561,8 +576,8 @@ impl TextFSMParser {
     }
     pub fn parse_value_defs(
         pair: &Pair<'_, Rule>,
-    ) -> Result<(HashMap<String, ValueDefinition>, Vec<String>), String> {
-        let mut vals = HashMap::new();
+    ) -> Result<(IndexMap<String, ValueDefinition>, Vec<String>), String> {
+        let mut vals = IndexMap::new();
         let mut mandatory_values: Vec<String> = vec![];
         for pair in pair.clone().into_inner() {
             if Rule::value_definition == pair.as_rule() {
@@ -582,8 +597,8 @@ impl TextFSMParser {
         let template = format!("{}\n\n\n", template);
 
         let mut seen_eoi = false;
-        let mut values: HashMap<String, ValueDefinition> = HashMap::new();
-        let mut states: HashMap<String, StateCompiled> = HashMap::new();
+        let mut values: IndexMap<String, ValueDefinition> = IndexMap::new();
+        let mut states: IndexMap<String, StateCompiled> = IndexMap::new();
         let mut mandatory_values: Vec<String> = vec![];
 
         let end_state = NextState::NamedState(format!("End"));
@@ -878,23 +893,22 @@ impl TextFSM {
                                 new_rec = self.filldown_record.clone();
                                 /* swap with the current record */
                                 std::mem::swap(&mut new_rec, &mut self.curr_record);
-                                // Set the values that aren't set yet - FIXME: this feature should be
-                                // possible to be disabled as "" and nothing are very different things.
+                                // Rebuild record in template declaration order,
+                                // filling missing values with empty defaults.
+                                let mut ordered_rec = DataRecord::new();
+                                ordered_rec.record_key = new_rec.record_key.clone();
                                 for (_k, v) in &self.parser.values {
-                                    if new_rec.get(&v.name).is_none() {
+                                    let val = new_rec.fields.get(&v.name).cloned().unwrap_or_else(|| {
                                         if self.is_list_value(&v.name).expect("is list?") {
-                                            new_rec
-                                                .fields
-                                                .insert(v.name.clone(), Value::List(vec![]));
+                                            Value::List(vec![])
                                         } else {
-                                            new_rec
-                                                .fields
-                                                .insert(v.name.clone(), Value::Single(format!("")));
+                                            Value::Single(format!(""))
                                         }
-                                    }
+                                    });
+                                    ordered_rec.fields.insert(v.name.clone(), val);
                                 }
-                                trace!("RECORD: {:?}", &new_rec);
-                                self.records.push(new_rec);
+                                trace!("RECORD: {:?}", &ordered_rec);
+                                self.records.push(ordered_rec);
                             } else {
                                 trace!("RECORD: no required fields set, discarding");
                                 // Still must clear curr_record even when discarding,

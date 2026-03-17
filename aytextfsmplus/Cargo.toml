@@ -14,3 +14,4 @@ log = "*"
 env_logger = "*"
 csv = "*"
 aycalc = { path = "../../aycalc" }
+indexmap = { version = "2.13.0", features = ["serde"] }

@@ -1,6 +1,6 @@
 # Connection Path Architecture
 
-## Status: REVIEWED — All design decisions resolved
+## Status: Phase 1-2 IMPLEMENTED, Phase 3-5 planned
 
 ## Problem Statement
 
@@ -63,14 +63,14 @@ This covers: device login, enable mode, typing `ssh` in a shell, confirming
 host keys, navigating console server menus — anything that is "send text,
 match text" on an already-open stream.
 
-Interactive hops are powered by a state-machine engine (see below).
+Interactive hops are powered by the `aytextfsmplus` state-machine engine.
 
 ### Hop and ConnectionPath
 
 ```rust
 enum Hop {
     Transport(Transport),
-    Interactive(InteractiveTemplate),
+    Interactive(TextFSMPlus),  // was InteractiveTemplate in earlier drafts
 }
 
 struct ConnectionPath {
@@ -82,21 +82,32 @@ A `ConnectionPath` is an ordered list of hops. The runtime processes them
 sequentially. Each Transport hop establishes (or changes) the underlying
 stream; each Interactive hop drives text-based interaction on it.
 
-## State Machine Engine
+## State Machine Engine (`aytextfsmplus` crate)
 
-### Design Principle: TextFSM Superset
+### Implementation Status: COMPLETE
 
-The engine implements full TextFSM semantics and extends them with two
-additions for driving interactive sessions. This means:
+The engine is implemented in the `aytextfsmplus` workspace crate, forked
+from `textfsm-rs` and extended. It lives alongside `ayclic` in the same
+Cargo workspace.
 
-- Standard TextFSM templates (e.g., from ntc-templates) work unmodified
-  for **parsing** command output.
-- Extended templates add the ability to **send** data, enabling interactive
-  session driving with the same engine.
+### TextFSM Compatibility
+
+**1790/1818 ntc-templates tests pass (98.5%).** The remaining 28 failures
+are all caused by stale YAML test data in the ntc-templates repository
+(YAML expects fields from older template versions). Zero parser bugs,
+zero ordering issues.
+
+Key fixes applied during implementation:
+- `Continue.Record` now correctly clears `curr_record` even when a record
+  is discarded due to missing Required values.
+- Required values must be non-empty to satisfy the requirement (matching
+  Python TextFSM behavior).
+- `IndexMap` used throughout for deterministic field ordering matching
+  template declaration order.
 
 ### TextFSM Semantics (Preserved)
 
-The following TextFSM features are supported with identical behavior:
+All standard TextFSM features are supported with identical behavior:
 
 #### Value Declarations
 
@@ -152,8 +163,8 @@ Three additions to the TextFSM model:
 
 Sends text to the stream. The text inside `${...}` is evaluated as an
 **aycalc expression** (see below), allowing captured values, preset values,
-and computed results to be sent. After sending, behaves like `Next` (consume,
-advance).
+and computed results to be sent. In Parse mode, `Send` is treated like
+`Next` (no stream to send to).
 
 Simple variable references (`${Password}`) work as expected — they're just
 trivial aycalc expressions that resolve to a variable lookup. But the full
@@ -173,7 +184,8 @@ Value Preset VariableName (regex)
 
 A Preset value is populated before the engine runs, from externally supplied
 parameters. This is how credentials, commands, and other caller-supplied data
-enter the template without being hardcoded.
+enter the template without being hardcoded. Set via `set_preset()` or the
+builder-style `with_preset()`.
 
 #### 3. `Done` State
 
@@ -189,41 +201,102 @@ stream is ready for use."
 ### Expression Evaluation with aycalc
 
 All `${...}` expansions in Send actions are evaluated as expressions by the
-[aycalc](https://github.com/ayourtch/aycalc/) embeddable calculator. The
-integration works through aycalc's two extension traits:
+[aycalc](https://github.com/ayourtch/aycalc/) embeddable calculator.
 
-- **`GetVar`**: Implemented over the TextFSM value table (captured + preset
-  values). A mutable context that accumulates values as the state machine
-  runs — each regex capture updates the table, and subsequent expressions
-  can reference newly captured values.
+The `${...}` extraction handles arbitrary expressions including spaces,
+operators, function calls, and nested braces — not limited to simple
+variable names.
+
+The integration works through aycalc's two extension traits, both supplied
+by the caller (matching aycalc's own API pattern for full flexibility):
+
+- **`GetVar`**: Variable resolution. The engine provides `ValueTableVars`
+  which chains the internal TextFSM value table (captured + preset values)
+  with an optional caller-supplied external `GetVar`. This means the value
+  table is checked first, with fallback to external variables. `NoVars` is
+  provided as a default for simple cases.
 - **`CallFunc`**: Caller-supplied custom functions for computed credentials
-  (challenge-response, TOTP, hashing, string manipulation, etc.).
+  (challenge-response, TOTP, hashing, string manipulation, etc.). `NoFuncs`
+  is provided as a default.
 
 This means:
-- Simple cases (`${Password}`) are just variable lookups — zero overhead
-  over plain substitution.
+- Simple cases (`${Password}`) are just variable lookups.
 - Dynamic cases (`${compute_response(Challenge, SharedSecret)}`) get full
   expression power, including arithmetic, string operations, and custom
   functions.
-- The aycalc context is **mutable** and accumulates state during execution,
-  so values captured early in the interaction are available to expressions
-  in later states.
+- The value table accumulates state during execution, so values captured
+  early in the interaction are available to expressions in later states.
+- The caller can provide additional variables and functions beyond what
+  the template captures.
 
-### Engine Modes
+### Engine API
 
-The same compiled template can operate in two modes:
+The engine (`TextFSMPlus`) provides three levels of API:
 
-| Mode | Input | Processing | Output |
-|------|-------|-----------|--------|
-| **Parse** | Block of text (e.g., `show` output) | Line-by-line | `Vec<Record>` (structured rows) |
-| **Interactive** | Live async byte stream | Stream-oriented, pattern matching on accumulated data | Side effects (Send), terminal state |
+#### Parse Mode (standard TextFSM)
 
-In Parse mode, the engine behaves exactly like standard TextFSM: process
-lines, capture values, emit records.
+```rust
+let mut fsm = TextFSMPlus::from_str(template);      // or from_file()
+let records = fsm.parse_file("output.txt", None);    // Vec<DataRecord>
+```
 
-In Interactive mode, the engine reads from a stream, matches patterns against
-accumulated data (not line-delimited — prompts don't end with newlines), and
-can Send responses.
+Line-by-line processing, emits structured records. Compatible with
+ntc-templates.
+
+#### Interactive Mode — Line-Oriented
+
+```rust
+let mut fsm = TextFSMPlus::from_str(template)
+    .with_preset("Username", "admin")
+    .with_preset("Password", "secret");
+
+let action = fsm.parse_line_interactive("Username: ", &vars, &funcs);
+// Returns InteractiveAction::Send("admin"), ::Done, ::Error, or ::None
+```
+
+Processes complete lines. Good for testing and simple integrations.
+
+#### Interactive Mode — Buffer-Oriented (`feed()`)
+
+```rust
+let mut fsm = TextFSMPlus::from_str(template)
+    .with_preset("Username", "admin");
+
+let result = fsm.feed(buffer, &vars, &funcs);
+// Returns FeedResult { action: InteractiveAction, consumed: usize }
+```
+
+Step-at-a-time API for stream-oriented usage:
+- Accepts accumulated byte buffer (not line-delimited)
+- Returns action + bytes consumed
+- Caller controls the I/O loop, buffer management, and transport
+
+The caller's loop:
+1. Read bytes from stream, append to buffer
+2. Call `fsm.feed(&buffer, &vars, &funcs)`
+3. Remove `consumed` bytes from front of buffer
+4. If `Send(text)` — write text to stream
+5. If `Done` — success, stream is ready
+6. If `Error(msg)` — fail
+7. If `None` with `consumed == 0` — read more data, repeat
+
+Captured values are accessible via `fsm.curr_record` at any time.
+
+### InteractiveAction and FeedResult
+
+```rust
+enum InteractiveAction {
+    None,               // No action, continue reading
+    Send(String),       // Send this text to the stream
+    Done,               // Interactive session completed successfully
+    Error(Option<String>), // Error with optional diagnostic message
+}
+
+struct FeedResult {
+    action: InteractiveAction,
+    consumed: usize,    // Bytes to remove from front of buffer
+}
+```
 
 ## Template Examples
 
@@ -272,11 +345,24 @@ CheckEnable
 
 Usage:
 ```rust
-let template = InteractiveTemplate::from_file("cisco_ios_login.textfsm")?;
-template.set_preset("Username", "admin");
-template.set_preset("Password", "secret123");
-template.set_preset("EnableSecret", "enable_secret");
-template.drive(&mut stream).await?;
+let mut fsm = TextFSMPlus::from_file("cisco_ios_login.textfsm")
+    .with_preset("Username", "admin")
+    .with_preset("Password", "secret123")
+    .with_preset("EnableSecret", "enable_secret");
+
+// Step-at-a-time with feed():
+loop {
+    let n = stream.read(&mut tmp).await?;
+    buffer.extend_from_slice(&tmp[..n]);
+    let result = fsm.feed(&buffer, &NoVars, &NoFuncs);
+    buffer.drain(..result.consumed);
+    match result.action {
+        InteractiveAction::Send(text) => stream.write_all(text.as_bytes()).await?,
+        InteractiveAction::Done => break,
+        InteractiveAction::Error(msg) => return Err(msg.into()),
+        InteractiveAction::None => continue,
+    }
+}
 ```
 
 ### Interactive: SSH Jump Host
@@ -350,7 +436,7 @@ let path = ConnectionPath {
 
         // Hop 2: In bastion shell, SSH to target device (interactive)
         Hop::Interactive(
-            InteractiveTemplate::from_file("ssh_jump.textfsm")?
+            TextFSMPlus::from_file("ssh_jump.textfsm")
                 .with_preset("TargetUser", "operator")
                 .with_preset("TargetHost", "10.200.0.5")
                 .with_preset("JumpPassword", "hunter2")
@@ -358,7 +444,7 @@ let path = ConnectionPath {
 
         // Hop 3: Device login and enable (interactive)
         Hop::Interactive(
-            InteractiveTemplate::from_file("cisco_ios_login.textfsm")?
+            TextFSMPlus::from_file("cisco_ios_login.textfsm")
                 .with_preset("Username", "admin")
                 .with_preset("Password", "device_pass")
                 .with_preset("EnableSecret", "enable_pass")
@@ -374,8 +460,8 @@ let mut conn = CiscoIosConn::from_stream(stream);
 let output = conn.run_cmd("show version").await?;
 
 // Parse output using standard ntc-templates
-let template = Template::from_file("cisco_ios_show_version.textfsm")?;
-let records = template.parse(&output)?;
+let mut parser = TextFSMPlus::from_file("cisco_ios_show_version.textfsm");
+let records = parser.parse_file("output.txt", None);
 ```
 
 ## Execution Runtime
@@ -391,11 +477,25 @@ for hop in path.hops {
             // Opens a new TCP connection + runs protocol
             current_stream = Some(transport.connect().await?);
         }
-        Hop::Interactive(template) => {
-            // Drives interaction on the current stream
+        Hop::Interactive(mut fsm) => {
+            // Drive interaction using feed() step-at-a-time API
             let stream = current_stream.as_mut()
                 .ok_or(Error::NoStream)?;
-            template.drive(stream).await?;
+            let mut buffer = Vec::new();
+            loop {
+                let n = stream.read(&mut tmp).await?;
+                buffer.extend_from_slice(&tmp[..n]);
+                let result = fsm.feed(&buffer, &vars, &funcs);
+                buffer.drain(..result.consumed);
+                match result.action {
+                    InteractiveAction::Send(text) => {
+                        stream.write_all(text.as_bytes()).await?;
+                    }
+                    InteractiveAction::Done => break,
+                    InteractiveAction::Error(msg) => return Err(msg.into()),
+                    InteractiveAction::None => continue,
+                }
+            }
             // Stream is unchanged — same bytes, new logical context
         }
     }
@@ -424,28 +524,37 @@ When the `EstablishedPath` is dropped, transports are closed in reverse order.
 
 ### Where Things Live
 
-| Component | Crate |
-|-----------|-------|
-| Telnet protocol | `aytelnet` (unchanged) |
-| SSH protocol | `ayssh` (unchanged) |
-| Expression evaluation | `aycalc` (unchanged, used via `GetVar`/`CallFunc` traits) |
-| TextFSM engine | `ayclic` (new module: `fsm`) |
-| Transport enum + connect logic | `ayclic` (new module: `path`) |
-| InteractiveTemplate | `ayclic` (uses `fsm` engine + `aycalc`) |
-| ConnectionPath + runtime | `ayclic` (new module: `path`) |
-| CiscoIosConn | `ayclic` (updated to accept `EstablishedPath`) |
+| Component | Crate | Status |
+|-----------|-------|--------|
+| Telnet protocol | `aytelnet` (external, unchanged) | Done |
+| SSH protocol | `ayssh` (external, unchanged) | Done |
+| Expression evaluation | `aycalc` (external, unchanged) | Done |
+| TextFSM+ engine | `aytextfsmplus` (workspace member) | **Done** |
+| Transport enum + connect logic | `ayclic` (new module: `path`) | Planned |
+| ConnectionPath + runtime | `ayclic` (new module: `path`) | Planned |
+| CiscoIosConn | `ayclic` (updated to accept `EstablishedPath`) | Planned |
 
 ### Migration Path
 
-1. **Phase 1**: Implement the TextFSM engine (`fsm` module) with Parse mode.
+1. **Phase 1**: Implement the TextFSM engine with Parse mode.
    Validate against ntc-templates.
+   **Status: DONE** — `aytextfsmplus` crate, 1790/1818 ntc-templates pass.
+
 2. **Phase 2**: Add Interactive extensions (Send, Preset, Done). Implement
-   `InteractiveTemplate::drive()`.
+   `feed()` step-at-a-time API with aycalc integration.
+   **Status: DONE** — 56 tests, full aycalc integration, `GetVar`/`CallFunc`
+   flexibility matching aycalc's own API.
+
 3. **Phase 3**: Implement `ConnectionPath`, `Hop`, `Transport` types and the
-   connection runtime.
+   connection runtime in `ayclic`.
+   **Status: Planned.**
+
 4. **Phase 4**: Update `CiscoIosConn` to accept `ConnectionPath` or
    `EstablishedPath` as an alternative to direct connection parameters.
+   **Status: Planned.**
+
 5. **Phase 5**: Write template libraries for common login/jump patterns.
+   **Status: Planned.**
 
 Existing direct-connection API (`CiscoIosConn::new()` etc.) remains supported
 as a convenience — it's equivalent to a single-hop ConnectionPath.
@@ -464,19 +573,27 @@ recompiling — useful for slow environments (lab over VPN) vs. fast (local
 network). Templates can specify a default timeout that overrides the global.
 Individual states can override the template default for specific slow steps.
 
+**Implementation note**: Not yet implemented. The `feed()` API is timeout-agnostic
+— the caller controls timing in their I/O loop. Timeout logic will be added
+when a convenience `drive()` wrapper is built on top of `feed()`.
+
 ### D2. Stream vs. line matching in Interactive mode
 
 **Decision**: Line-by-line in Parse mode (standard TextFSM), accumulated
 buffer matching in Interactive mode.
 
-In Interactive mode, every time new bytes arrive, the engine re-runs the
-current state's rules against the accumulated buffer. When a rule matches,
-data up to the match point is consumed and the engine proceeds. This is the
-same approach used by the existing `receive_until_match` implementation.
+**Implementation**: Both modes are implemented.
+- `parse_line()` / `parse_file()`: line-by-line Parse mode.
+- `parse_line_interactive()`: line-oriented Interactive mode (for testing).
+- `feed()`: buffer-oriented Interactive mode (for real streams).
 
-Start with regex matching (correctness first). Compiling rules to aho-corasick
-is a natural optimization for later — the existing codebase already proves
-this approach works.
+The `feed()` method matches regex patterns against the accumulated buffer.
+Note that `^` anchors match at the start of the buffer, not at line
+boundaries within it. The caller manages buffer accumulation and trimming
+using the `consumed` count returned by `feed()`.
+
+Compiling rules to aho-corasick is a natural optimization for later — the
+existing `ayclic` codebase already proves this approach works.
 
 ### D3. SSH ProxyJump optimization
 
@@ -490,9 +607,9 @@ experience demonstrating the need. For future considerations only.
 **Decision**: `from_str(&str)` is the primitive API — parse a template from
 its text content. `from_file(path)` is a convenience method built on top.
 
-This layering allows templates to be loaded from any source (filesystem,
-database, embedded resources, network) since everything ultimately provides
-a string to `from_str()`. Additional loading mechanisms are deferred.
+**Implementation**: Both are implemented on `TextFSMPlus` and
+`TextFSMPlusParser`. Leading newlines are automatically trimmed for
+ergonomic use with Rust raw string literals.
 
 ### D5. Credential management and computed values
 
@@ -500,14 +617,14 @@ a string to `from_str()`. Additional loading mechanisms are deferred.
 responsibility — where they come from is outside scope). Dynamic/computed
 credentials use aycalc expressions in Send actions.
 
-The aycalc context is **mutable** and maintained during state machine
-execution. The `GetVar` trait is implemented over the TextFSM value table
-(captured + preset values). The `CallFunc` trait is caller-supplied for
-custom computation (challenge-response, TOTP, hashing, etc.).
-
-This means templates never hardcode secrets, simple cases are just variable
-lookups, and complex cases (OTP, challenge-response) get full expression
-power through registered functions.
+**Implementation**: Fully implemented.
+- `set_preset()` and `with_preset()` (builder pattern) for static values.
+- `${...}` in Send actions evaluated by aycalc with full expression support.
+- `GetVar` chains internal value table with caller-supplied external provider.
+- `CallFunc` is caller-supplied for custom functions.
+- Both `GetVar` and `CallFunc` are passed to `expand_send_text()`, `feed()`,
+  and `parse_line_interactive()`, matching aycalc's own API flexibility.
+- `NoVars` and `NoFuncs` provided as defaults for simple cases.
 
 ### D6. Error recovery
 
@@ -516,9 +633,8 @@ execution stops and the error (including the template-defined message) is
 returned to the caller. No automatic recovery (Ctrl-C, disconnect, retry)
 is attempted.
 
-Rationale: automated recovery is fragile, especially multiple hops deep.
-The template's `Error` messages provide diagnostic information. The caller
-decides whether to retry with a fresh `ConnectionPath`.
+**Implementation**: `InteractiveAction::Error(Option<String>)` carries the
+template-defined error message. The caller decides whether to retry.
 
 ### D7. Value sharing across hops
 
@@ -527,6 +643,11 @@ aycalc context instance. The architecture provides the mechanism (a mutable
 aycalc context that persists across the `ConnectionPath` execution). Whether
 values are shared across hops or isolated per-hop is a policy decision made
 by whoever implements the `GetVar` trait — not prescribed by the architecture.
+
+**Implementation**: `curr_record` is public on `TextFSMPlus`, so captured
+values are always accessible. The `ValueTableVars` wrapper chains the
+internal value table with an external `GetVar`, allowing cross-hop sharing
+when the caller passes a shared context.
 
 ## Future Considerations
 
@@ -539,3 +660,9 @@ demonstrates the need:
 - **Embedded templates**: `include_str!` for built-in templates compiled into
   the binary.
 - **Serial/Netconf transports**: Additional `Transport` variants.
+- **aho-corasick optimization**: Compile interactive rules to aho-corasick
+  for faster multi-pattern matching in `feed()`.
+- **Multiline regex in feed()**: Support `(?m)` flag or automatic line
+  splitting so `^` matches after newlines within accumulated buffers.
+- **DEFAULT_TIMEOUT_SECONDS**: Global atomic timeout default (not yet
+  implemented — `feed()` is timeout-agnostic by design).

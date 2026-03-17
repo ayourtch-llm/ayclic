@@ -1,6 +1,6 @@
 # Connection Path Architecture
 
-## Status: DRAFT — Review Requested
+## Status: REVIEWED — All design decisions resolved
 
 ## Problem Statement
 
@@ -142,17 +142,28 @@ TextFSM options with standard behavior.
 
 ### Extensions for Interactive Mode
 
-Two additions to the TextFSM model:
+Three additions to the TextFSM model:
 
 #### 1. `Send` Line Action
 
 ```
-^pattern -> Send ${ValueName} [NextState]
+^pattern -> Send ${expression} [NextState]
 ```
 
-Sends text to the stream. The text supports `${ValueName}` substitution,
-allowing captured or preset values to be sent. After sending, behaves like
-`Next` (consume, advance).
+Sends text to the stream. The text inside `${...}` is evaluated as an
+**aycalc expression** (see below), allowing captured values, preset values,
+and computed results to be sent. After sending, behaves like `Next` (consume,
+advance).
+
+Simple variable references (`${Password}`) work as expected — they're just
+trivial aycalc expressions that resolve to a variable lookup. But the full
+expression language is available for computed values:
+
+```
+^Challenge (\d+): -> Send ${compute_response(Challenge, SharedSecret)} Auth
+^Token: -> Send ${totp(Seed)} WaitPrompt
+^Password: -> Send ${Password} WaitPrompt
+```
 
 #### 2. `Preset` Value Option
 
@@ -174,6 +185,29 @@ enter the template without being hardcoded.
 session. Analogous to TextFSM's `End`, but semantically distinct: `End` means
 "stop processing," `Done` means "interaction completed successfully, the
 stream is ready for use."
+
+### Expression Evaluation with aycalc
+
+All `${...}` expansions in Send actions are evaluated as expressions by the
+[aycalc](https://github.com/ayourtch/aycalc/) embeddable calculator. The
+integration works through aycalc's two extension traits:
+
+- **`GetVar`**: Implemented over the TextFSM value table (captured + preset
+  values). A mutable context that accumulates values as the state machine
+  runs — each regex capture updates the table, and subsequent expressions
+  can reference newly captured values.
+- **`CallFunc`**: Caller-supplied custom functions for computed credentials
+  (challenge-response, TOTP, hashing, string manipulation, etc.).
+
+This means:
+- Simple cases (`${Password}`) are just variable lookups — zero overhead
+  over plain substitution.
+- Dynamic cases (`${compute_response(Challenge, SharedSecret)}`) get full
+  expression power, including arithmetic, string operations, and custom
+  functions.
+- The aycalc context is **mutable** and accumulates state during execution,
+  so values captured early in the interaction are available to expressions
+  in later states.
 
 ### Engine Modes
 
@@ -394,9 +428,10 @@ When the `EstablishedPath` is dropped, transports are closed in reverse order.
 |-----------|-------|
 | Telnet protocol | `aytelnet` (unchanged) |
 | SSH protocol | `ayssh` (unchanged) |
+| Expression evaluation | `aycalc` (unchanged, used via `GetVar`/`CallFunc` traits) |
 | TextFSM engine | `ayclic` (new module: `fsm`) |
 | Transport enum + connect logic | `ayclic` (new module: `path`) |
-| InteractiveTemplate | `ayclic` (uses `fsm` engine) |
+| InteractiveTemplate | `ayclic` (uses `fsm` engine + `aycalc`) |
 | ConnectionPath + runtime | `ayclic` (new module: `path`) |
 | CiscoIosConn | `ayclic` (updated to accept `EstablishedPath`) |
 
@@ -415,42 +450,92 @@ When the `EstablishedPath` is dropped, transports are closed in reverse order.
 Existing direct-connection API (`CiscoIosConn::new()` etc.) remains supported
 as a convenience — it's equivalent to a single-hop ConnectionPath.
 
-## Open Questions
+## Design Decisions
 
-1. **Timeout handling in Interactive mode**: Should timeouts be per-state,
-   per-template, or per-hop? A stuck state machine needs to fail gracefully.
-   Proposal: per-template default with optional per-state override.
+The following questions were raised during review and resolved:
 
-2. **Stream vs. line matching in Interactive mode**: TextFSM is line-oriented.
-   Interactive prompts often don't end with newlines. The engine needs to
-   support matching against accumulated (non-line-delimited) stream data
-   in Interactive mode while remaining line-oriented in Parse mode.
+### D1. Timeout handling in Interactive mode
 
-3. **SSH ProxyJump**: When two consecutive SSH hops exist and the SSH client
-   supports ProxyJump natively, should the runtime optimize to use it?
-   Or always decompose into explicit hops for consistency?
-   Proposal: allow both — `Transport::SshWithProxy` as an optional optimized
-   variant, but the explicit hop-by-hop path always works.
+**Decision**: Three-level override chain: **global default < per-template < per-state**.
 
-4. **Template discovery and loading**: Should templates be embedded in the
-   binary, loaded from a directory, or fetched from a registry?
-   Proposal: support all three — `include_str!` for built-in templates,
-   filesystem for custom, optional registry for community templates.
+The global default is a module-level `AtomicU64` named `DEFAULT_TIMEOUT_SECONDS`
+(initially 30). Since it is atomic, callers can adjust it at runtime without
+recompiling — useful for slow environments (lab over VPN) vs. fast (local
+network). Templates can specify a default timeout that overrides the global.
+Individual states can override the template default for specific slow steps.
 
-5. **Credential management**: Preset values will contain secrets. Should the
-   template system integrate with secret stores, or is that the caller's
-   responsibility?
-   Proposal: caller's responsibility. Templates receive populated Preset
-   values; where those values come from is outside scope.
+### D2. Stream vs. line matching in Interactive mode
 
-6. **Error recovery**: If an Interactive hop fails mid-way (wrong password,
-   unexpected prompt), should the runtime attempt to back out (e.g., Ctrl-C,
-   disconnect) or just fail and let the caller retry?
-   Proposal: fail fast and let the caller retry with a fresh ConnectionPath.
-   Error states in templates can provide diagnostic messages.
+**Decision**: Line-by-line in Parse mode (standard TextFSM), accumulated
+buffer matching in Interactive mode.
 
-7. **Capture values across hops**: Should values captured in one Interactive
-   hop be available to subsequent hops? Example: capture hostname in the
-   login hop, use it in later command templates.
-   Proposal: yes — maintain a value context across the ConnectionPath that
-   accumulates captures from each hop.
+In Interactive mode, every time new bytes arrive, the engine re-runs the
+current state's rules against the accumulated buffer. When a rule matches,
+data up to the match point is consumed and the engine proceeds. This is the
+same approach used by the existing `receive_until_match` implementation.
+
+Start with regex matching (correctness first). Compiling rules to aho-corasick
+is a natural optimization for later — the existing codebase already proves
+this approach works.
+
+### D3. SSH ProxyJump optimization
+
+**Decision**: Removed from scope. The explicit hop-by-hop model is the
+architecture. Native SSH ProxyJump may be added in the future as a parameter
+to the SSH transport variant, but only when there is concrete operational
+experience demonstrating the need. For future considerations only.
+
+### D4. Template discovery and loading
+
+**Decision**: `from_str(&str)` is the primitive API — parse a template from
+its text content. `from_file(path)` is a convenience method built on top.
+
+This layering allows templates to be loaded from any source (filesystem,
+database, embedded resources, network) since everything ultimately provides
+a string to `from_str()`. Additional loading mechanisms are deferred.
+
+### D5. Credential management and computed values
+
+**Decision**: Static credentials are supplied via Preset values (caller's
+responsibility — where they come from is outside scope). Dynamic/computed
+credentials use aycalc expressions in Send actions.
+
+The aycalc context is **mutable** and maintained during state machine
+execution. The `GetVar` trait is implemented over the TextFSM value table
+(captured + preset values). The `CallFunc` trait is caller-supplied for
+custom computation (challenge-response, TOTP, hashing, etc.).
+
+This means templates never hardcode secrets, simple cases are just variable
+lookups, and complex cases (OTP, challenge-response) get full expression
+power through registered functions.
+
+### D6. Error recovery
+
+**Decision**: Fail fast. When an Interactive hop reaches an `Error` state,
+execution stops and the error (including the template-defined message) is
+returned to the caller. No automatic recovery (Ctrl-C, disconnect, retry)
+is attempted.
+
+Rationale: automated recovery is fragile, especially multiple hops deep.
+The template's `Error` messages provide diagnostic information. The caller
+decides whether to retry with a fresh `ConnectionPath`.
+
+### D7. Value sharing across hops
+
+**Decision**: Deferred to the implementer of the `GetVar` trait on the
+aycalc context instance. The architecture provides the mechanism (a mutable
+aycalc context that persists across the `ConnectionPath` execution). Whether
+values are shared across hops or isolated per-hop is a policy decision made
+by whoever implements the `GetVar` trait — not prescribed by the architecture.
+
+## Future Considerations
+
+Items explicitly deferred, to be revisited when operational experience
+demonstrates the need:
+
+- **SSH ProxyJump**: Native ProxyJump as an optimization for multi-SSH-hop
+  paths. May be added as a parameter to `Transport::Ssh`.
+- **Template registries**: Community template sharing beyond filesystem loading.
+- **Embedded templates**: `include_str!` for built-in templates compiled into
+  the binary.
+- **Serial/Netconf transports**: Additional `Transport` variants.

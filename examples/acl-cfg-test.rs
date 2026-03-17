@@ -12,6 +12,7 @@
 //!              each ACE in reverse order, and finally deletes the ACL.
 
 use ayclic::{CiscoIosConn, ConnectionType};
+use ayclic::conn::ChangeSafety;
 use std::env;
 use std::time::{Duration, Instant};
 use tracing::{error, info};
@@ -153,21 +154,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 3 {
+    // Parse --safe flag
+    let mut safe_reload = false;
+    let mut filtered_args: Vec<String> = Vec::new();
+    for arg in &args {
+        if arg == "--safe" {
+            safe_reload = true;
+        } else {
+            filtered_args.push(arg.clone());
+        }
+    }
+
+    if filtered_args.len() < 3 {
         eprintln!("Usage:");
-        eprintln!("  {} create-test <aclname> [count]", args[0]);
-        eprintln!("  {} delete <aclname>", args[0]);
+        eprintln!("  {} [--safe] create-test <aclname> [count]", filtered_args[0]);
+        eprintln!("  {} [--safe] delete <aclname>", filtered_args[0]);
         eprintln!();
         eprintln!("  count: number of ACL entries (default {})", DEFAULT_ACL_SIZE);
+        eprintln!("  --safe: schedule 'reload in 10' before applying (auto-cancelled on success)");
         std::process::exit(1);
     }
 
-    let command = &args[1];
-    let acl_name = &args[2];
-    let acl_size: u32 = args
+    let command = &filtered_args[1];
+    let acl_name = &filtered_args[2];
+    let acl_size: u32 = filtered_args
         .get(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_ACL_SIZE);
+    let safety = if safe_reload {
+        ChangeSafety::DelayedReload { minutes: 10 }
+    } else {
+        ChangeSafety::None
+    };
 
     // Connect with 5-minute read timeout (applying large configs takes time)
     eprintln!("Connecting to {} ...", TARGET);
@@ -198,7 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             eprintln!("Pushing config atomically (this may take a few minutes)...");
             let start = Instant::now();
-            let output = conn.config_atomic(&config).await?;
+            let output = conn.config_atomic(&config, safety.clone()).await?;
             let elapsed = start.elapsed();
 
             eprintln!("Done in {:.1}s", elapsed.as_secs_f64());
@@ -275,7 +293,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             eprintln!("Pushing delete config atomically (this may take a few minutes)...");
             let start = Instant::now();
-            let output = conn.config_atomic(&config).await?;
+            let output = conn.config_atomic(&config, safety.clone()).await?;
             let elapsed = start.elapsed();
 
             eprintln!("Done in {:.1}s", elapsed.as_secs_f64());

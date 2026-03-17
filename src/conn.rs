@@ -202,6 +202,18 @@ pub fn build_tclsh_write_commands(filename: &str, config: &str) -> Vec<String> {
     cmds
 }
 
+/// Safety mechanism for config changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeSafety {
+    /// No safety mechanism — apply config directly.
+    None,
+    /// Schedule a reload before applying config. If the device becomes
+    /// unreachable after the change (bad config), it will reload after
+    /// the specified minutes and revert to the saved startup-config.
+    /// After a successful apply, the reload is automatically cancelled.
+    DelayedReload { minutes: u32 },
+}
+
 /// Initialize a Cisco IOS session: send `term len 0` and wait for prompt.
 /// Used after transport-level connection + auth is complete.
 async fn ios_init(
@@ -451,15 +463,45 @@ impl CiscoIosConn {
     /// Atomically apply a configuration snippet to the device.
     ///
     /// This method:
-    /// 1. Computes an MD5 hash of the config for a unique temp filename
-    /// 2. Spins up a one-shot HTTP server to serve the file content
-    /// 3. Tells the device to `copy http://our_ip:port/file flash:<tempfile>`
-    /// 4. Runs `verify /md5` to confirm file integrity
-    /// 5. Only if the MD5 matches, applies with `copy flash:<tempfile> running-config`
-    /// 6. Cleans up the temp file
+    /// 1. Optionally schedules a safety reload (`ChangeSafety::DelayedReload`)
+    /// 2. Computes an MD5 hash of the config for a unique temp filename
+    /// 3. Spins up a one-shot HTTP server to serve the file content
+    /// 4. Tells the device to `copy http://our_ip:port/file flash:<tempfile>`
+    /// 5. Runs `verify /md5` to confirm file integrity
+    /// 6. Only if the MD5 matches, applies with `copy flash:<tempfile> running-config`
+    /// 7. Cleans up the temp file
+    /// 8. On success with `DelayedReload`, cancels the scheduled reload
     ///
     /// Returns the output of the copy command.
-    pub async fn config_atomic(&mut self, config: &str) -> Result<String, CiscoIosError> {
+    pub async fn config_atomic(
+        &mut self,
+        config: &str,
+        safety: ChangeSafety,
+    ) -> Result<String, CiscoIosError> {
+        // Schedule a safety reload if requested
+        if let ChangeSafety::DelayedReload { minutes } = &safety {
+            info!(
+                "config_atomic: scheduling safety reload in {} minutes on {}",
+                minutes, self.config.target
+            );
+            // reload in N — IOS may prompt "Save? [yes/no]:" and "[confirm]"
+            // Answer "no" to save (we want to revert on reload) and confirm
+            let reload_prompts = vec![
+                ("#", PromptAction::Done),
+                ("[yes/no]", PromptAction::Respond(b"no\n".to_vec())),
+                ("[confirm]", PromptAction::Respond(b"\n".to_vec())),
+                ("]?", PromptAction::Respond(b"\n".to_vec())),
+            ];
+            let reload_output = run_interactive(
+                self.transport.as_mut(),
+                &format!("reload in {}", minutes),
+                &reload_prompts,
+                self.config.read_timeout,
+            )
+            .await?;
+            info!("config_atomic: reload scheduled: {}", reload_output.trim());
+        }
+
         let expected_md5 = md5_hex_as_flash_content(config);
         let flash_file = format!("_ayclic_{}.cfg", expected_md5);
         let flash_path = format!("flash:{}", flash_file);
@@ -525,6 +567,13 @@ impl CiscoIosConn {
         // Clean up temp file from flash
         let delete_cmd = format!("delete /force {}", flash_path);
         self.run_cmd(&delete_cmd).await?;
+
+        // Cancel the safety reload if one was scheduled
+        if let ChangeSafety::DelayedReload { .. } = &safety {
+            info!("config_atomic: cancelling safety reload on {}", self.config.target);
+            let cancel_output = self.run_cmd("reload cancel").await?;
+            info!("config_atomic: reload cancelled: {}", cancel_output.trim());
+        }
 
         info!(
             "config_atomic: applied successfully on {}",

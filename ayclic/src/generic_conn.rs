@@ -39,14 +39,27 @@ use crate::raw_transport::RawTransport;
 /// Default timeout for command execution (30 seconds).
 const DEFAULT_CMD_TIMEOUT_SECS: u64 = 30;
 
+/// Default prompt template — matches common CLI prompts.
+/// Handles `#`, `>`, and `$` as done markers.
+const DEFAULT_PROMPT_TEMPLATE: &str = r#"Start
+  ^.*[#>$]\s*$$ -> Done
+"#;
+
 /// A vendor-neutral CLI connection to a network device.
 ///
 /// Owns its transport and provides methods for sending commands and
 /// running TextFSMPlus templates. Works with any device that has a
 /// text-based CLI — Cisco, Juniper, Arista, MikroTik, Linux, etc.
+///
+/// The prompt template controls how `run_cmd()` detects command
+/// completion and handles interactive prompts. Set it during
+/// construction with `with_prompt_template()`.
 #[derive(Debug)]
 pub struct GenericCliConn {
     transport: Box<dyn RawTransport>,
+    /// TextFSMPlus template content for prompt detection in run_cmd().
+    /// A fresh engine is created from this for each command.
+    prompt_template: String,
     /// Default timeout for commands.
     pub cmd_timeout: Duration,
 }
@@ -78,15 +91,6 @@ impl GenericCliConn {
         for (i, hop) in hops.into_iter().enumerate() {
             match hop {
                 Hop::Transport(_) => {
-                    // Transport hops in connect_over are unusual — they'd
-                    // replace the current transport. Log a warning but allow it.
-                    info!(
-                        "connect_over hop {}: Transport hop will replace \
-                         the existing connection",
-                        i
-                    );
-                    // For now, delegate to the path module's logic
-                    // by wrapping in a ConnectionPath
                     return Err(CiscoIosError::InvalidConnectionType(
                         "Transport hops in connect_over are not yet supported. \
                          Use ConnectionPath::connect() instead."
@@ -102,17 +106,16 @@ impl GenericCliConn {
 
         Ok(Self {
             transport,
+            prompt_template: DEFAULT_PROMPT_TEMPLATE.to_string(),
             cmd_timeout: Duration::from_secs(DEFAULT_CMD_TIMEOUT_SECS),
         })
     }
 
     /// Wrap an already-established connection.
-    ///
-    /// The transport should already be authenticated and at a device
-    /// prompt (or whatever state you need it in).
     pub fn from_established(established: EstablishedPath) -> Self {
         Self {
             transport: established.into_transport(),
+            prompt_template: DEFAULT_PROMPT_TEMPLATE.to_string(),
             cmd_timeout: Duration::from_secs(DEFAULT_CMD_TIMEOUT_SECS),
         }
     }
@@ -121,8 +124,20 @@ impl GenericCliConn {
     pub fn from_transport(transport: Box<dyn RawTransport>) -> Self {
         Self {
             transport,
+            prompt_template: DEFAULT_PROMPT_TEMPLATE.to_string(),
             cmd_timeout: Duration::from_secs(DEFAULT_CMD_TIMEOUT_SECS),
         }
+    }
+
+    /// Set the prompt template for `run_cmd()`.
+    ///
+    /// The template should have rules that match the device prompt
+    /// (`-> Done`) and optionally handle interactive prompts (`-> Send`).
+    /// A fresh TextFSMPlus engine is created from this template for
+    /// each `run_cmd()` call.
+    pub fn with_prompt_template(mut self, template: &str) -> Self {
+        self.prompt_template = template.to_string();
+        self
     }
 
     /// Set the default command timeout.
@@ -131,20 +146,23 @@ impl GenericCliConn {
         self
     }
 
-    /// Send a command and collect output using a TextFSMPlus template
-    /// to detect when the command is complete.
+    /// Get the current prompt template.
+    pub fn prompt_template(&self) -> &str {
+        &self.prompt_template
+    }
+
+    /// Send a command and collect output, using the stored prompt
+    /// template to detect when the command is complete.
     ///
-    /// The template should have rules that match the device prompt
-    /// (-> Done) and optionally handle interactive prompts (-> Send).
-    ///
-    /// Returns the raw output bytes accumulated before the Done match.
+    /// A fresh TextFSMPlus engine is created from `self.prompt_template`
+    /// for each call, ensuring clean state.
     pub async fn run_cmd(
         &mut self,
         cmd: &str,
-        prompt_template: &mut TextFSMPlus,
         vars: &(impl GetVar + Sync),
         funcs: &(impl CallFunc + Sync),
     ) -> Result<String, CiscoIosError> {
+        let mut prompt_fsm = TextFSMPlus::from_str(&self.prompt_template);
         // Send the command
         self.transport.send(cmd.as_bytes()).await?;
         self.transport.send(b"\n").await?;
@@ -164,7 +182,7 @@ impl GenericCliConn {
             let remaining = deadline - now;
 
             // Try to match current buffer
-            let result = prompt_template.feed(&buffer, vars, funcs);
+            let result = prompt_fsm.feed(&buffer, vars, funcs);
             if result.consumed > 0 {
                 buffer.drain(..result.consumed);
             }
@@ -190,6 +208,71 @@ impl GenericCliConn {
                 }
                 InteractiveAction::None => {
                     // Read more data
+                    let chunk = self
+                        .transport
+                        .receive(remaining.min(Duration::from_secs(5)))
+                        .await?;
+                    if !chunk.is_empty() {
+                        buffer.extend_from_slice(&chunk);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Send a command with a specific template (overrides stored prompt).
+    ///
+    /// Use this for commands that need special prompt handling different
+    /// from the connection's default (e.g., interactive commands with
+    /// confirmation prompts, or commands that produce non-standard output).
+    pub async fn run_cmd_with_template(
+        &mut self,
+        cmd: &str,
+        template: &str,
+        vars: &(impl GetVar + Sync),
+        funcs: &(impl CallFunc + Sync),
+    ) -> Result<String, CiscoIosError> {
+        let mut prompt_fsm = TextFSMPlus::from_str(template);
+
+        self.transport.send(cmd.as_bytes()).await?;
+        self.transport.send(b"\n").await?;
+        debug!("GenericCliConn: sent command {:?} (custom template)", cmd);
+
+        let mut buffer = Vec::new();
+        let deadline = tokio::time::Instant::now() + self.cmd_timeout;
+
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(CiscoIosError::Timeout {
+                    accumulated: buffer,
+                });
+            }
+            let remaining = deadline - now;
+
+            let result = prompt_fsm.feed(&buffer, vars, funcs);
+            if result.consumed > 0 {
+                buffer.drain(..result.consumed);
+            }
+
+            match result.action {
+                InteractiveAction::Done => {
+                    return String::from_utf8(buffer).map_err(|e| {
+                        CiscoIosError::HttpUploadError(format!("Invalid UTF-8: {}", e))
+                    });
+                }
+                InteractiveAction::Send(text) => {
+                    self.transport.send(text.as_bytes()).await?;
+                    self.transport.send(b"\n").await?;
+                }
+                InteractiveAction::Error(msg) => {
+                    let msg_str = msg.as_deref().unwrap_or("unknown error");
+                    return Err(CiscoIosError::HttpUploadError(format!(
+                        "Command template error: {}",
+                        msg_str
+                    )));
+                }
+                InteractiveAction::None => {
                     let chunk = self
                         .transport
                         .receive(remaining.min(Duration::from_secs(5)))
@@ -252,22 +335,16 @@ mod tests {
         ]);
 
         let mut conn = GenericCliConn::from_transport(Box::new(transport))
-            .with_cmd_timeout(Duration::from_secs(5));
-
-        // Template that matches # as done
-        let mut prompt = TextFSMPlus::from_str(
-            r#"Start
+            .with_cmd_timeout(Duration::from_secs(5))
+            .with_prompt_template(r#"Start
   ^.*# -> Done
-"#,
-        );
+"#);
 
         let output = conn
-            .run_cmd("show version", &mut prompt, &NoVars, &NoFuncs)
+            .run_cmd("show version", &NoVars, &NoFuncs)
             .await
             .unwrap();
 
-        // Output is whatever was in the buffer (may be empty since
-        // the prompt match consumed everything)
         assert!(output.is_empty() || output.contains("#"));
     }
 
@@ -279,24 +356,39 @@ mod tests {
         ]);
 
         let mut conn = GenericCliConn::from_transport(Box::new(transport))
-            .with_cmd_timeout(Duration::from_secs(5));
-
-        let mut prompt = TextFSMPlus::from_str(
-            r#"Start
+            .with_cmd_timeout(Duration::from_secs(5))
+            .with_prompt_template(r#"Start
   ^.*# -> Done
   ^.*\? -> Send ""
-"#,
-        );
+"#);
 
         let _output = conn
-            .run_cmd(
-                "copy running-config startup-config",
-                &mut prompt,
-                &NoVars,
-                &NoFuncs,
-            )
+            .run_cmd("copy running-config startup-config", &NoVars, &NoFuncs)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_generic_conn_default_prompt_template() {
+        let transport = MockTransport::new(vec![]);
+        let conn = GenericCliConn::from_transport(Box::new(transport));
+        // Default template should match common prompts
+        assert!(conn.prompt_template().contains("Done"));
+    }
+
+    #[tokio::test]
+    async fn test_generic_conn_custom_prompt_template() {
+        let transport = MockTransport::new(vec![
+            b"device$ ".to_vec(),
+        ]);
+
+        let mut conn = GenericCliConn::from_transport(Box::new(transport))
+            .with_cmd_timeout(Duration::from_secs(5))
+            .with_prompt_template(r#"Start
+  ^.*\$\s -> Done
+"#);
+
+        let _output = conn.run_cmd("ls", &NoVars, &NoFuncs).await.unwrap();
     }
 
     #[tokio::test]

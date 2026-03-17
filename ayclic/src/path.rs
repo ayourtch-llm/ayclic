@@ -134,6 +134,16 @@ pub struct EstablishedPath {
 }
 
 impl EstablishedPath {
+    /// Create from a raw transport.
+    pub fn new(transport: Box<dyn RawTransport>) -> Self {
+        Self { transport }
+    }
+
+    /// Extract the underlying transport (e.g., to return to a pool).
+    pub fn into_transport(self) -> Box<dyn RawTransport> {
+        self.transport
+    }
+
     /// Send raw bytes to the device.
     pub async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
         self.transport.send(data).await
@@ -168,7 +178,7 @@ impl EstablishedPath {
 ///
 /// This is the core interactive loop: read data, feed to the state machine,
 /// send responses, until Done or Error.
-async fn drive_interactive(
+pub async fn drive_interactive(
     fsm: &mut TextFSMPlus,
     transport: &mut dyn RawTransport,
     timeout: Duration,

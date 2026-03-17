@@ -338,8 +338,9 @@ impl std::fmt::Debug for CiscoIosConn {
 }
 
 impl CiscoIosConn {
-    /// Create a new connection with password authentication and default timeouts (30s)
+    /// Create a new connection with password authentication and default timeouts (30s).
     ///
+    /// Uses the template-driven ConnectionPath architecture internally.
     /// Works for Telnet, Ssh, and SshKbdInteractive connection types.
     pub async fn new(
         target: &str,
@@ -358,7 +359,9 @@ impl CiscoIosConn {
         .await
     }
 
-    /// Create a new connection with password authentication and custom timeouts
+    /// Create a new connection with password authentication and custom timeouts.
+    ///
+    /// Uses the template-driven ConnectionPath architecture internally.
     pub async fn with_timeouts(
         target: &str,
         conntype: ConnectionType,
@@ -373,11 +376,110 @@ impl CiscoIosConn {
             ));
         }
 
-        info!("Connecting to {} via {:?}", target, conntype);
+        info!("Connecting to {} via {:?} (template-driven)", target, conntype);
+
+        // Parse target into SocketAddr
+        let addr: std::net::SocketAddr = Self::parse_target(target, &conntype)?;
+
+        // Build the ConnectionPath based on connection type
+        let mut hops: Vec<Hop> = Vec::new();
+
+        match conntype {
+            ConnectionType::Telnet => {
+                hops.push(Hop::Transport(TransportSpec::Telnet { target: addr }));
+                hops.push(Hop::Interactive(
+                    aytextfsmplus::TextFSMPlus::from_str(crate::templates::CISCO_IOS_TELNET_LOGIN)
+                        .with_preset("Username", username)
+                        .with_preset("Password", password),
+                ));
+            }
+            ConnectionType::Ssh => {
+                hops.push(Hop::Transport(TransportSpec::Ssh {
+                    target: addr,
+                    auth: SshAuth::Password {
+                        username: username.to_string(),
+                        password: password.to_string(),
+                    },
+                }));
+                hops.push(Hop::Interactive(
+                    aytextfsmplus::TextFSMPlus::from_str(
+                        crate::templates::CISCO_IOS_SSH_POST_LOGIN,
+                    ),
+                ));
+            }
+            ConnectionType::SshKbdInteractive => {
+                hops.push(Hop::Transport(TransportSpec::Ssh {
+                    target: addr,
+                    auth: SshAuth::KbdInteractive {
+                        username: username.to_string(),
+                        password: password.to_string(),
+                    },
+                }));
+                hops.push(Hop::Interactive(
+                    aytextfsmplus::TextFSMPlus::from_str(
+                        crate::templates::CISCO_IOS_SSH_POST_LOGIN,
+                    ),
+                ));
+            }
+            ConnectionType::SshKey => unreachable!(),
+        }
+
+        let path = ConnectionPath::new(hops).with_timeout(timeout);
+        let conn = GenericCliConn::connect(
+            path,
+            &aytextfsmplus::NoVars,
+            &aytextfsmplus::NoFuncs,
+        )
+        .await?
+        .with_prompt_template(crate::templates::CISCO_IOS_PROMPT)
+        .with_cmd_timeout(read_timeout);
+
+        debug!("Connected to {} successfully (template-driven)", target);
+
+        Ok(Self::from_generic(conn, target))
+    }
+
+    /// Legacy: create a new connection using the old Cisco-specific
+    /// transport layers (CiscoTelnet, ayssh::CiscoConn) directly.
+    ///
+    /// This bypasses the template-driven ConnectionPath architecture.
+    /// Use `new()` instead for the template-driven path.
+    pub async fn new_legacy(
+        target: &str,
+        conntype: ConnectionType,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, CiscoIosError> {
+        Self::with_timeouts_legacy(
+            target,
+            conntype,
+            username,
+            password,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        )
+        .await
+    }
+
+    /// Legacy: create with custom timeouts using the old transport layers.
+    pub async fn with_timeouts_legacy(
+        target: &str,
+        conntype: ConnectionType,
+        username: &str,
+        password: &str,
+        timeout: Duration,
+        read_timeout: Duration,
+    ) -> Result<Self, CiscoIosError> {
+        if conntype == ConnectionType::SshKey {
+            return Err(CiscoIosError::InvalidConnectionType(
+                "SshKey requires new_with_key constructor".to_string(),
+            ));
+        }
+
+        info!("Connecting to {} via {:?} (legacy)", target, conntype);
 
         let transport: Box<dyn CiscoTransport> = match conntype {
             ConnectionType::Telnet => {
-                // Use CiscoTelnet directly — it handles TCP + telnet negotiation + auth + term len 0
                 let mut client = aytelnet::CiscoTelnet::new(target, username, password)
                     .with_timeout(timeout)
                     .with_read_timeout(read_timeout)
@@ -386,7 +488,6 @@ impl CiscoIosConn {
                     .with_prompt("config#")
                     .with_prompt("cli#");
                 client.connect().await.map_err(CiscoIosError::Telnet)?;
-                // connect() already does term len 0, no need for ios_init
                 Box::new(TelnetTransport(client))
             }
             ConnectionType::Ssh => {
@@ -399,7 +500,6 @@ impl CiscoIosConn {
                     read_timeout,
                 )
                 .await?;
-                // ayssh::CiscoConn::new already does term len 0 + prompt wait
                 Box::new(SshTransport(conn))
             }
             ConnectionType::SshKbdInteractive => {
@@ -417,7 +517,7 @@ impl CiscoIosConn {
             ConnectionType::SshKey => unreachable!(),
         };
 
-        debug!("Connected to {} successfully", target);
+        debug!("Connected to {} successfully (legacy)", target);
 
         Ok(Self {
             config: CiscoIosConfig {
@@ -430,6 +530,47 @@ impl CiscoIosConn {
                 read_timeout,
             },
             transport,
+        })
+    }
+
+    /// Parse a target string into a SocketAddr, adding default port
+    /// based on connection type.
+    fn parse_target(
+        target: &str,
+        conntype: &ConnectionType,
+    ) -> Result<std::net::SocketAddr, CiscoIosError> {
+        let default_port = match conntype {
+            ConnectionType::Telnet => 23,
+            _ => 22,
+        };
+
+        // Try parsing as-is first (might already have port)
+        if let Ok(addr) = target.parse::<std::net::SocketAddr>() {
+            return Ok(addr);
+        }
+
+        // Try as [IPv6]:port
+        if let Ok(addr) = target.parse::<std::net::SocketAddr>() {
+            return Ok(addr);
+        }
+
+        // Try adding default port
+        let with_port = if target.contains(':') && !target.contains('[') {
+            // Looks like IPv6 without port — wrap in brackets
+            format!("[{}]:{}", target, default_port)
+        } else if target.contains(':') {
+            // Already has port or is bracketed IPv6
+            target.to_string()
+        } else {
+            // Plain hostname or IPv4
+            format!("{}:{}", target, default_port)
+        };
+
+        with_port.parse::<std::net::SocketAddr>().map_err(|e| {
+            CiscoIosError::InvalidConnectionType(format!(
+                "Cannot parse target '{}' as address: {}",
+                target, e
+            ))
         })
     }
 

@@ -189,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect with 5-minute read timeout (applying large configs takes time)
     eprintln!("Connecting to {} ...", TARGET);
-    let mut conn = CiscoIosConn::with_timeouts(
+    let mut conn = CiscoIosConn::with_timeouts_legacy(
         TARGET,
         ConnectionType::Ssh,
         USERNAME,

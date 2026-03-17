@@ -42,7 +42,7 @@ err_state = !{ "Error" ~ err_msg? }
 err_msg = @{ ("\"" ~ (!"\"" ~ ANY)* ~ "\"") | (!(WHITESPACE | NEWLINE) ~ ANY)* }
 done_state = !{ "Done" }
 send_action = !{ "Send" ~ send_text }
-send_text = @{ (!(WHITESPACE | NEWLINE) ~ ANY)+ }
+send_text = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" | (!(WHITESPACE | NEWLINE) ~ ANY)+ }
 space = _{ " " }
 
 // Record fields (for future expansion)

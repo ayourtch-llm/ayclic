@@ -1,6 +1,6 @@
 # Connection Path Architecture
 
-## Status: Phase 1-3 IMPLEMENTED, Phase 4-5 planned
+## Status: Phase 1-4 IMPLEMENTED, Phase 5 planned
 
 ## Problem Statement
 
@@ -557,21 +557,152 @@ are interactive (typing `ssh` in a shell), the SSH transport stays alive
 because the interactive hops operate on its stream — they don't create
 new transports.
 
+## GenericCliConn
+
+### Implementation Status: COMPLETE
+
+`GenericCliConn` (`ayclic/src/generic_conn.rs`) is the vendor-neutral CLI
+connection layer. It sits between the transport layer and vendor-specific
+wrappers like `CiscoIosConn`.
+
+```rust
+struct GenericCliConn {
+    transport: Box<dyn RawTransport>,
+    prompt_template: String,   // TextFSMPlus template for prompt detection
+    cmd_timeout: Duration,
+}
+```
+
+### Constructors
+
+| Constructor | Use Case |
+|-------------|----------|
+| `connect(ConnectionPath)` | Full path from scratch |
+| `connect_over(EstablishedPath, hops)` | Additional hops on existing connection (pool reuse) |
+| `from_established(EstablishedPath)` | Wrap already-connected transport |
+| `from_transport(Box<dyn RawTransport>)` | Wrap raw transport directly |
+
+### Prompt Template
+
+`GenericCliConn` stores a prompt template that `run_cmd()` uses for every
+command. A fresh `TextFSMPlus` engine is created from the template string
+for each call, ensuring clean state.
+
+```rust
+let mut conn = GenericCliConn::connect(path, &vars, &funcs).await?
+    .with_prompt_template(CISCO_IOS_PROMPT)  // set once
+    .with_cmd_timeout(Duration::from_secs(60));
+
+conn.run_cmd("show version", &vars, &funcs).await?;          // uses stored template
+conn.run_cmd("show interfaces", &vars, &funcs).await?;       // same template, fresh engine
+
+// One-off override for special commands:
+conn.run_cmd_with_template("copy run start", COPY_TEMPLATE, &vars, &funcs).await?;
+```
+
+### Transport Ownership
+
+- `into_transport()` extracts the transport (consumes the connection)
+- Enables pool return: checkout → connect_over → use → into_transport → checkin
+
+## CiscoIosConn Integration
+
+### Implementation Status: COMPLETE
+
+`CiscoIosConn::new()` and `with_timeouts()` now use the template-driven
+`ConnectionPath` architecture internally:
+
+1. Parse target address into `SocketAddr` (with default ports: 22/SSH, 23/Telnet)
+2. Build `ConnectionPath` with `TransportSpec` + Cisco login template
+3. Connect via `GenericCliConn`
+4. Set `CISCO_IOS_PROMPT` as the prompt template
+5. Wrap as `CiscoIosConn` via `from_generic()`
+
+Legacy constructors (`new_legacy()`, `with_timeouts_legacy()`) preserved
+for backward compatibility — they use the old `CiscoTelnet`/`ayssh::CiscoConn`
+directly.
+
+Additional constructors:
+- `from_generic(GenericCliConn)`: bridge any GenericCliConn to CiscoIosConn
+- `from_path(ConnectionPath)`: connect via template-driven path
+
+## Built-in Templates
+
+### Implementation Status: PARTIAL (Cisco IOS only)
+
+Located in `ayclic/src/templates.rs`:
+
+| Template | Purpose |
+|----------|---------|
+| `CISCO_IOS_SSH_POST_LOGIN` | Post-SSH-auth: wait for prompt, send `terminal length 0` |
+| `CISCO_IOS_TELNET_LOGIN` | Telnet login: username/password prompts, then `terminal length 0` |
+| `CISCO_IOS_PROMPT` | Command prompt detection: `#` as Done, auto-confirm `]?`, `[confirm]`, `(yes/no)` |
+
+## Session Transcript / Audit Logging
+
+### Implementation Status: COMPLETE
+
+`LoggingTransport` wraps any `RawTransport` and records all sent/received
+data to a `TranscriptSink`. Since the sink is shared via `Arc<Mutex<>>`,
+the caller can read the transcript at any time — even while the transport
+is owned by a `GenericCliConn` or `CiscoIosConn`.
+
+### TranscriptSink trait
+
+```rust
+trait TranscriptSink: Send + Debug {
+    fn record(&mut self, entry: TranscriptEntry);
+}
+```
+
+Implement to control where transcript data goes. Built-in implementations:
+
+| Sink | Use Case |
+|------|----------|
+| `VecTranscriptSink` | In-memory, inspect later (debugging, testing) |
+| `FileTranscriptSink` | Real-time file output (audit trails) |
+
+### Usage Patterns
+
+```rust
+// In-memory transcript (shared handle, readable anytime):
+let transcript = new_transcript();
+let transport = LoggingTransport::new(inner, transcript.clone());
+let mut conn = GenericCliConn::from_transport(Box::new(transport));
+conn.run_cmd("show version", &vars, &funcs).await?;
+println!("{}", transcript.lock().unwrap().to_display_string());
+
+// Fire-and-forget file logging (no handle needed):
+let transport = with_file_logging(inner, "/var/log/session.log")?;
+let mut conn = GenericCliConn::from_transport(transport);
+
+// Append to existing audit file:
+let transport = with_file_logging_append(inner, "/var/log/audit.log")?;
+
+// Custom sink (syslog, channel, ring buffer, etc.):
+impl TranscriptSink for MySink { fn record(&mut self, entry: TranscriptEntry) { ... } }
+```
+
+Empty receives (timeouts) are NOT recorded — only actual data.
+
 ## Integration with Existing Crate Structure
 
 ### Where Things Live
 
-| Component | Crate | Status |
-|-----------|-------|--------|
+| Component | Crate / Module | Status |
+|-----------|----------------|--------|
 | Telnet protocol | `aytelnet` (external) | Done |
 | Telnet raw session | `aytelnet::RawTelnetSession` (upstream) | **Done** |
 | SSH protocol | `ayssh` (external) | Done |
 | SSH raw session | `ayssh::RawSshSession` (upstream) | **Done** |
 | Expression evaluation | `aycalc` (external) | Done |
 | TextFSM+ engine | `aytextfsmplus` (workspace member) | **Done** |
-| RawTransport trait + wrappers | `ayclic` (module: `raw_transport`) | **Done** |
-| ConnectionPath + runtime | `ayclic` (module: `path`) | **Done** |
-| CiscoIosConn | `ayclic` (to be updated for `EstablishedPath`) | Planned |
+| RawTransport trait + wrappers | `ayclic::raw_transport` | **Done** |
+| LoggingTransport + transcript | `ayclic::raw_transport` | **Done** |
+| ConnectionPath + runtime | `ayclic::path` | **Done** |
+| GenericCliConn | `ayclic::generic_conn` | **Done** |
+| Built-in Cisco templates | `ayclic::templates` | **Done** |
+| CiscoIosConn (template-driven) | `ayclic::conn` | **Done** |
 
 ### Upstream Integrations
 
@@ -601,18 +732,23 @@ thin ~30-line delegations to the upstream types.
 3. **Phase 3**: Implement `ConnectionPath`, `Hop`, `TransportSpec`,
    `EstablishedPath`, `RawTransport` trait, and the connection runtime.
    Upstream `RawTelnetSession` and `RawSshSession` to aytelnet/ayssh.
-   **Status: DONE** — 65 tests in ayclic, `drive_interactive()` core loop,
+   **Status: DONE** — 80 tests in ayclic, `drive_interactive()` core loop,
    `MockTransport` for testing without network.
 
-4. **Phase 4**: Update `CiscoIosConn` to accept `ConnectionPath` or
-   `EstablishedPath` as an alternative to direct connection parameters.
-   **Status: Planned.**
+4. **Phase 4**: `GenericCliConn` (vendor-neutral CLI connection) and update
+   `CiscoIosConn` to use template-driven paths.
+   **Status: DONE** — `GenericCliConn` with stored prompt template,
+   `run_cmd()`, `run_cmd_with_template()`, `run_interactive()`,
+   `connect()`, `connect_over()`, `into_transport()`.
+   `CiscoIosConn::new()` now uses `ConnectionPath` + built-in Cisco
+   templates internally. Legacy constructors preserved as `new_legacy()`.
+   `LoggingTransport` with `TranscriptSink` trait, `VecTranscriptSink`,
+   `FileTranscriptSink`, `with_file_logging()` convenience.
 
 5. **Phase 5**: Write template libraries for common login/jump patterns.
-   **Status: Planned.**
-
-Existing direct-connection API (`CiscoIosConn::new()` etc.) remains supported
-as a convenience — it's equivalent to a single-hop ConnectionPath.
+   **Status: Partially done.** Built-in Cisco IOS templates exist
+   (`CISCO_IOS_SSH_POST_LOGIN`, `CISCO_IOS_TELNET_LOGIN`,
+   `CISCO_IOS_PROMPT`). Jump host and other vendor templates planned.
 
 ## Design Decisions
 
@@ -715,23 +851,44 @@ when the caller passes a shared context.
 Items explicitly deferred, to be revisited when operational experience
 demonstrates the need:
 
-- **SSH ProxyJump**: Native ProxyJump as an optimization for multi-SSH-hop
-  paths. May be added as a parameter to `TransportSpec::Ssh`.
+### Protocol Stacking (BoxedStream)
+
+For true protocol-over-protocol stacking (SSH-over-Telnet, SSH-over-SSH
+at the protocol level, not shell-level commands), both `aytelnet` and
+`ayssh` need to accept generic async byte streams instead of `TcpStream`:
+
+```rust
+type BoxedStream = Box<dyn AsyncRead + AsyncWrite + Send + Unpin>;
+```
+
+- `TelnetConnection::over_stream(BoxedStream)` — run Telnet over any stream
+- `Transport::over_stream(BoxedStream)` — run SSH over any stream
+- `TransportStream` adapter in ayclic bridges `RawTransport` → `AsyncRead + AsyncWrite`
+
+No micro-crate needed — `AsyncRead + AsyncWrite` from tokio is the shared
+contract. Request documents with full API details are in
+`docs/upstream-requests/`.
+
+This is backwards-compatible (TcpStream implements the required traits).
+
+### Other Deferred Items
+
+- **SSH ProxyJump**: Native ProxyJump optimization for multi-SSH-hop paths.
 - **Template registries**: Community template sharing beyond filesystem loading.
-- **Embedded templates**: `include_str!` for built-in templates compiled into
-  the binary.
+- **Connection string DSL**: `compile_path("cisco-ssh{10.1.1.1, user=admin}")` —
+  a parser that compiles connection strings into `ConnectionPath` using a
+  profile registry. Deferred: syntax design needs operational experience.
+- **Connection pool**: Reusable jumphost connections via `connect_over()` +
+  `into_transport()`. The architecture supports it; pool management logic
+  is application-level.
 - **Serial/Netconf transports**: Additional `TransportSpec` variants.
 - **aho-corasick optimization**: Compile interactive rules to aho-corasick
   for faster multi-pattern matching in `feed()`.
 - **Multiline regex in feed()**: Support `(?m)` flag or automatic line
   splitting so `^` matches after newlines within accumulated buffers.
-- **DEFAULT_TIMEOUT_SECONDS**: Global atomic timeout default (currently
-  per-path timeout via `ConnectionPath::interactive_timeout` is sufficient).
-- **Multi-transport stacking**: Current `EstablishedPath` holds a single
-  transport. For true SSH-inside-SSH (not shell-level jump), a transport
-  stack would be needed.
-- **CiscoIosError cleanup**: The error type still uses Cisco-specific
-  naming. Consider a vendor-neutral error type for the path module.
-- **Newline handling in Send**: Currently `drive_interactive()` appends
-  `\n` after every Send. Some devices may need `\r\n` or no newline.
-  Consider making this configurable per-template or per-hop.
+- **DEFAULT_TIMEOUT_SECONDS**: Global atomic timeout default.
+- **CiscoIosError cleanup**: Vendor-neutral error type for the path module.
+- **Newline handling in Send**: `drive_interactive()` appends `\n` after
+  every Send. Some devices may need `\r\n` or no newline.
+- **Additional vendor templates**: Juniper, Arista, MikroTik, Linux login
+  and prompt detection templates.

@@ -42,12 +42,18 @@ pub fn local_ip_for_target(target: &str) -> Result<String, CiscoIosError> {
     Ok(local_addr.ip().to_string())
 }
 
-/// Start a one-shot HTTP server that serves `content` at any path.
-/// Returns the (ip, port) the server is listening on, plus a shutdown handle.
-/// The server runs as a background tokio task and shuts down after one GET.
-pub async fn start_one_shot_http(
+/// Start an HTTP server that serves `content` at `/<filename>`, and shuts
+/// down when a GET to `/<filename>/done` is received. The file-specific
+/// `/done` path prevents easy guessing. The IOS device can make multiple
+/// HTTP requests (probe + download), and the caller signals completion by
+/// having the device `copy http://.../<filename>/done null:`.
+///
+/// Returns `(ip, port, join_handle)`. The server runs until the `/done`
+/// endpoint is hit or the JoinHandle is aborted.
+pub async fn start_config_http(
     content: Vec<u8>,
     bind_ip: &str,
+    filename: &str,
 ) -> Result<(String, u16, tokio::task::JoinHandle<()>), CiscoIosError> {
     let bind_addr = format!("{}:0", bind_ip);
     let listener = TcpListener::bind(&bind_addr)
@@ -59,26 +65,39 @@ pub async fn start_one_shot_http(
     let ip = local_addr.ip().to_string();
     let port = local_addr.port();
 
-    info!("One-shot HTTP server listening on {}:{}", ip, port);
+    info!("Config HTTP server listening on {}:{}", ip, port);
 
     let content = Arc::new(content);
     let content_len = content.len();
 
-    // Shutdown signal: fires after first successful GET
+    // Shutdown signal: fires when /<filename>/done is requested
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let shutdown_tx = Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx)));
 
+    let done_route = format!("/{}/done", filename);
+    let serve_route = format!("/{}", filename);
+
     let app = axum::Router::new()
-        .fallback(get({
+        .route(&done_route, get({
             let shutdown_tx = shutdown_tx.clone();
-            move |State(data): State<Arc<Vec<u8>>>| {
+            move || {
                 let shutdown_tx = shutdown_tx.clone();
                 async move {
-                    info!("HTTP: serving {} bytes", data.len());
-                    // Signal shutdown after this response
+                    info!("HTTP: /done requested, shutting down server");
                     if let Some(tx) = shutdown_tx.lock().await.take() {
                         let _ = tx.send(());
                     }
+                    (
+                        [(header::CONTENT_TYPE, "text/plain")],
+                        "done\n",
+                    ).into_response()
+                }
+            }
+        }))
+        .route(&serve_route, get({
+            move |State(data): State<Arc<Vec<u8>>>| {
+                async move {
+                    info!("HTTP: serving {} bytes", data.len());
                     (
                         [(header::CONTENT_TYPE, "text/plain")],
                         (*data).clone(),
@@ -92,12 +111,10 @@ pub async fn start_one_shot_http(
         axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
-                // Give the response time to fully flush
-                tokio::time::sleep(Duration::from_secs(1)).await;
             })
             .await
             .ok();
-        debug!("One-shot HTTP server shut down after serving {} bytes", content_len);
+        debug!("Config HTTP server shut down after serving {} bytes", content_len);
     });
 
     Ok((ip, port, handle))
@@ -521,29 +538,73 @@ impl CiscoIosConn {
         let local_ip = local_ip_for_target(&self.config.target)?;
         info!("config_atomic: local IP for device is {}", local_ip);
 
-        // Start one-shot HTTP server
+        // Start HTTP server (stays alive until /<filename>/done is requested)
         let (ip, port, http_handle) =
-            start_one_shot_http(file_content, &local_ip).await?;
+            start_config_http(file_content, &local_ip, &flash_file).await?;
         let http_url = format!("http://{}:{}/{}", ip, port, flash_file);
+        let done_url = format!("http://{}:{}/{}/done", ip, port, flash_file);
         info!("config_atomic: serving config at {}", http_url);
 
-        // Download file from our HTTP server to flash
-        // run_cmd_chat auto-responds to IOS confirmation prompts (]?, [confirm], etc.)
-        let copy_cmd = format!("copy {} {}", http_url, flash_path);
-        let copy_to_flash = self.run_cmd_chat(&copy_cmd, None).await?;
-        info!("copy to flash output: {}", copy_to_flash);
+        // Download file from our HTTP server to flash, with retry
+        const MAX_COPY_ATTEMPTS: u32 = 3;
+        let mut copy_to_flash = String::new();
+        let mut last_err: Option<CiscoIosError> = None;
 
-        // Wait for HTTP server to finish
-        let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
+        for attempt in 1..=MAX_COPY_ATTEMPTS {
+            let copy_cmd = format!("copy {} {}", http_url, flash_path);
+            match self.run_cmd_chat(&copy_cmd, None).await {
+                Ok(output) => {
+                    info!("copy to flash output (attempt {}): {}", attempt, output);
+                    if output.contains("%Error") {
+                        info!(
+                            "config_atomic: copy attempt {}/{} failed: device reported error",
+                            attempt, MAX_COPY_ATTEMPTS
+                        );
+                        last_err = Some(CiscoIosError::HttpUploadError(format!(
+                            "Device copy error: {}",
+                            output.trim()
+                        )));
+                        if attempt < MAX_COPY_ATTEMPTS {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    } else {
+                        copy_to_flash = output;
+                        last_err = None;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    info!(
+                        "config_atomic: copy attempt {}/{} failed: {}",
+                        attempt, MAX_COPY_ATTEMPTS, e
+                    );
+                    last_err = Some(e);
+                    if attempt < MAX_COPY_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        }
+
+        if let Some(err) = last_err {
+            info!("config_atomic: all copy attempts failed, shutting down HTTP server");
+            http_handle.abort();
+            return Err(err);
+        }
 
         // Verify MD5 of the file on flash
         let verify_cmd = format!("verify /md5 {}", flash_path);
         let verify_output = self.run_cmd(&verify_cmd).await?;
         debug!("verify output: {}", verify_output);
 
-        let actual_md5 = parse_verify_md5(&verify_output).ok_or_else(|| {
-            CiscoIosError::Md5ParseError(verify_output.clone())
-        })?;
+        let actual_md5 = match parse_verify_md5(&verify_output) {
+            Some(md5) => md5,
+            None => {
+                http_handle.abort();
+                return Err(CiscoIosError::Md5ParseError(verify_output));
+            }
+        };
 
         if actual_md5 != expected_md5 {
             // Keep the file on flash for investigation
@@ -551,6 +612,7 @@ impl CiscoIosConn {
                 "config_atomic: MD5 mismatch! Retaining {} on flash for debugging",
                 flash_path
             );
+            http_handle.abort();
             return Err(CiscoIosError::Md5Mismatch {
                 expected: expected_md5,
                 actual: actual_md5,
@@ -558,6 +620,11 @@ impl CiscoIosConn {
         }
 
         info!("config_atomic: MD5 verified ({}), applying config", expected_md5);
+
+        // Shut down HTTP server cleanly via /done endpoint
+        let done_cmd = format!("copy {} null:", done_url);
+        let _ = self.run_cmd_chat(&done_cmd, None).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
 
         // Apply config: copy from flash to running-config
         let copy_output = self

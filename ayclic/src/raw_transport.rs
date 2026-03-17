@@ -44,88 +44,57 @@ pub trait RawTransport: Send + std::fmt::Debug {
 
 // === Vendor-neutral Telnet transport ===
 
-/// Raw Telnet transport wrapping `aytelnet::TelnetConnection`.
+/// Raw Telnet transport using `aytelnet::RawTelnetSession`.
 ///
 /// Handles TELNET protocol negotiation internally but does NOT
 /// perform any login, prompt detection, or vendor-specific behavior.
 /// All interaction is left to the caller (typically via TextFSMPlus).
-///
-/// TODO: Upstream `Debug` impl for `TelnetConnection` to aytelnet.
+#[derive(Debug)]
 pub struct RawTelnetTransport {
-    conn: aytelnet::TelnetConnection,
-}
-
-impl std::fmt::Debug for RawTelnetTransport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawTelnetTransport").finish()
-    }
+    session: aytelnet::RawTelnetSession,
 }
 
 impl RawTelnetTransport {
     /// Connect to a Telnet server at the given address.
     pub async fn connect(addr: SocketAddr) -> Result<Self, CiscoIosError> {
-        let conn = aytelnet::TelnetConnection::start_with_config(
+        let session = aytelnet::RawTelnetSession::connect(
             &addr.ip().to_string(),
             addr.port(),
-            true,  // echo
-            true,  // binary
-            true,  // suppress go-ahead
         )
         .await
         .map_err(CiscoIosError::Telnet)?;
 
-        Ok(Self { conn })
+        Ok(Self { session })
+    }
+
+    /// Create from an already-connected RawTelnetSession.
+    pub fn from_session(session: aytelnet::RawTelnetSession) -> Self {
+        Self { session }
     }
 
     /// Create from an already-connected TelnetConnection.
     pub fn from_connection(conn: aytelnet::TelnetConnection) -> Self {
-        Self { conn }
+        Self {
+            session: aytelnet::RawTelnetSession::from_connection(conn),
+        }
     }
 }
 
 #[async_trait]
 impl RawTransport for RawTelnetTransport {
     async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
-        self.conn.send(data).await.map_err(CiscoIosError::Telnet)
+        self.session.send(data).await.map_err(CiscoIosError::Telnet)
     }
 
     async fn receive(&mut self, timeout: Duration) -> Result<Vec<u8>, CiscoIosError> {
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Ok(vec![]); // timeout
-            }
-            let remaining = deadline - now;
-
-            match tokio::time::timeout(remaining, self.conn.receive()).await {
-                Ok(Ok(event)) => {
-                    use aytelnet::TelnetEvent;
-                    match event {
-                        TelnetEvent::Data(data) => return Ok(data),
-                        TelnetEvent::Closed => {
-                            return Err(CiscoIosError::Telnet(
-                                aytelnet::TelnetError::Disconnected,
-                            ))
-                        }
-                        TelnetEvent::Error(e) => return Err(CiscoIosError::Telnet(e)),
-                        // Protocol commands and option negotiations — handle
-                        // internally, keep reading for actual data
-                        TelnetEvent::Command(_) | TelnetEvent::OptionNegotiated { .. } => {
-                            debug!("RawTelnetTransport: protocol event, continuing");
-                            continue;
-                        }
-                    }
-                }
-                Ok(Err(e)) => return Err(CiscoIosError::Telnet(e)),
-                Err(_) => return Ok(vec![]), // timeout
-            }
-        }
+        self.session
+            .receive(timeout)
+            .await
+            .map_err(CiscoIosError::Telnet)
     }
 
     async fn close(&mut self) -> Result<(), CiscoIosError> {
-        self.conn
+        self.session
             .disconnect()
             .await
             .map_err(CiscoIosError::Telnet)

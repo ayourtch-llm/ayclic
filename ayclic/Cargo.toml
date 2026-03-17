@@ -28,5 +28,5 @@ name = "cisco-cmd"
 path = "examples/cisco-cmd.rs"
 
 [[example]]
-name = "cisco-config"
-path = "examples/cisco-config.rs"
+name = "cisco-ios-config"
+path = "examples/cisco-ios-config.rs"

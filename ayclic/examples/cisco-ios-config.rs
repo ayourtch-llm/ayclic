@@ -1,22 +1,22 @@
-//! cisco-config — Two-phase Cisco IOS config management
+//! cisco-ios-config — Two-phase Cisco IOS config management
 //!
 //! Uses aycicdiff to compute config deltas and ayclic to apply them atomically.
 //!
 //! # Prepare phase: compute delta
 //!
-//!   cargo run --example cisco-config -- prepare \
+//!   cargo run --example cisco-ios-config -- prepare \
 //!     --device 10.1.1.1 --user admin --password secret \
 //!     --target desired.cfg -o delta.cfg
 //!
 //! # Apply phase: apply delta atomically
 //!
-//!   cargo run --example cisco-config -- apply \
+//!   cargo run --example cisco-ios-config -- apply \
 //!     --device 10.1.1.1 --user admin --password secret \
 //!     --delta delta.cfg --safety-reload 5
 //!
 //! # One-shot: prepare + apply in one step
 //!
-//!   cargo run --example cisco-config -- push \
+//!   cargo run --example cisco-ios-config -- push \
 //!     --device 10.1.1.1 --user admin --password secret \
 //!     --target desired.cfg --safety-reload 5
 
@@ -29,7 +29,7 @@ use tracing::{error, info};
 use ayclic::{CiscoIosConn, ChangeSafety, ConnectionType};
 
 #[derive(Parser)]
-#[command(name = "cisco-config")]
+#[command(name = "cisco-ios-config")]
 #[command(about = "Two-phase Cisco IOS config management with atomic apply")]
 struct Cli {
     #[command(subcommand)]

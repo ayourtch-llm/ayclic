@@ -20,7 +20,13 @@ async-trait = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"
+aycicdiff = { path = "../../aycicdiff" }
+clap = { version = "4", features = ["derive"] }
 
 [[example]]
 name = "cisco-cmd"
 path = "examples/cisco-cmd.rs"
+
+[[example]]
+name = "cisco-config"
+path = "examples/cisco-config.rs"

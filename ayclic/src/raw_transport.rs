@@ -103,25 +103,15 @@ impl RawTransport for RawTelnetTransport {
 
 // === Vendor-neutral SSH transport ===
 
-/// Raw SSH transport wrapping `ayssh::Transport` + session channel.
+/// Raw SSH transport using `ayssh::RawSshSession`.
 ///
 /// Handles SSH protocol (encryption, channels) internally but does NOT
 /// perform any login interaction, prompt detection, or vendor-specific
 /// behavior. SSH protocol-level authentication (password, pubkey, etc.)
 /// is done during construction; all subsequent interaction is raw bytes.
-///
-/// TODO: Upstream `Debug` impl for `Transport` to ayssh.
+#[derive(Debug)]
 pub struct RawSshTransport {
-    transport: ayssh::Transport,
-    channel_id: u32,
-}
-
-impl std::fmt::Debug for RawSshTransport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawSshTransport")
-            .field("channel_id", &self.channel_id)
-            .finish()
-    }
+    session: ayssh::RawSshSession,
 }
 
 /// SSH authentication method for establishing a connection.
@@ -145,12 +135,12 @@ impl RawSshTransport {
     /// Connect to an SSH server, authenticate, and open a session channel
     /// with a PTY and shell.
     pub async fn connect(addr: SocketAddr, auth: SshAuth) -> Result<Self, CiscoIosError> {
-        let client = ayssh::SshClient::new(addr.ip().to_string(), addr.port());
+        let host = addr.ip().to_string();
+        let port = addr.port();
 
-        let mut session = match auth {
+        let session = match auth {
             SshAuth::Password { username, password } => {
-                client
-                    .connect_with_password(username, password)
+                ayssh::RawSshSession::connect_with_password(&host, port, &username, &password)
                     .await
                     .map_err(CiscoIosError::Ssh)?
             }
@@ -158,55 +148,36 @@ impl RawSshTransport {
                 username,
                 private_key,
             } => {
-                client
-                    .connect_with_publickey(username, private_key)
+                ayssh::RawSshSession::connect_with_publickey(&host, port, &username, &private_key)
                     .await
                     .map_err(CiscoIosError::Ssh)?
             }
             SshAuth::KbdInteractive { username, password } => {
-                // Keyboard-interactive often falls back to password
-                client
-                    .connect_with_password(username, password)
-                    .await
-                    .map_err(CiscoIosError::Ssh)?
+                // Keyboard-interactive: use password as the response
+                let pwd = password.clone();
+                ayssh::RawSshSession::connect_with_keyboard_interactive(
+                    &host,
+                    port,
+                    &username,
+                    move |_challenge| Ok(vec![pwd.clone()]),
+                )
+                .await
+                .map_err(CiscoIosError::Ssh)?
             }
         };
 
-        // The session from connect_with_* should already have a channel.
-        // Get the remote channel ID for sending data.
-        let channel_id = session.remote_channel_id();
+        Ok(Self { session })
+    }
 
-        // Request PTY and shell
-        // Note: we need access to the transport that the session wraps.
-        // The current ayssh API returns Session which owns the transport
-        // interaction. We need to extract the transport.
-        //
-        // TODO: This is a prototype. The actual implementation will depend
-        // on how ayssh exposes Transport+Session separation. For now, we
-        // use CiscoConn's approach as a reference for what needs to happen.
-        //
-        // For the initial prototype, wrap CiscoConn's transport directly
-        // since it handles PTY/shell setup internally.
-
-        // FIXME: The ayssh Session API needs to be reviewed to determine
-        // the best way to get raw Transport + channel_id after auth.
-        // For now, this is a placeholder that documents the intended flow.
-
-        todo!(
-            "RawSshTransport::connect requires ayssh to expose Transport \
-             separately from Session after authentication. This will be \
-             implemented when the ayssh agent adds the necessary API."
-        )
+    /// Create from an already-authenticated RawSshSession.
+    pub fn from_session(session: ayssh::RawSshSession) -> Self {
+        Self { session }
     }
 
     /// Create from an already-authenticated transport and channel ID.
-    ///
-    /// This is the primary constructor for use when the caller manages
-    /// SSH connection setup externally (e.g., via ayssh directly).
     pub fn from_parts(transport: ayssh::Transport, channel_id: u32) -> Self {
         Self {
-            transport,
-            channel_id,
+            session: ayssh::RawSshSession::from_parts(transport, channel_id),
         }
     }
 }
@@ -214,70 +185,19 @@ impl RawSshTransport {
 #[async_trait]
 impl RawTransport for RawSshTransport {
     async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
-        self.transport
-            .send_channel_data(self.channel_id, data)
+        self.session.send(data).await.map_err(CiscoIosError::Ssh)
+    }
+
+    async fn receive(&mut self, timeout: Duration) -> Result<Vec<u8>, CiscoIosError> {
+        self.session
+            .receive(timeout)
             .await
             .map_err(CiscoIosError::Ssh)
     }
 
-    async fn receive(&mut self, timeout: Duration) -> Result<Vec<u8>, CiscoIosError> {
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Ok(vec![]); // timeout
-            }
-            let remaining = deadline - now;
-
-            match tokio::time::timeout(remaining, self.transport.recv_message()).await {
-                Ok(Ok(msg)) if !msg.is_empty() => {
-                    match msg[0] {
-                        94 => {
-                            // SSH_MSG_CHANNEL_DATA
-                            if msg.len() > 9 {
-                                let data_len = u32::from_be_bytes([
-                                    msg[5], msg[6], msg[7], msg[8],
-                                ]) as usize;
-                                if msg.len() >= 9 + data_len {
-                                    return Ok(msg[9..9 + data_len].to_vec());
-                                }
-                            }
-                            return Ok(vec![]);
-                        }
-                        93 => {
-                            // SSH_MSG_CHANNEL_WINDOW_ADJUST — ignore
-                            debug!("RawSshTransport: window adjust, continuing");
-                            continue;
-                        }
-                        96 => {
-                            // SSH_MSG_CHANNEL_EOF
-                            return Err(CiscoIosError::Ssh(
-                                ayssh::SshError::ChannelError("Channel EOF".to_string()),
-                            ));
-                        }
-                        97 => {
-                            // SSH_MSG_CHANNEL_CLOSE
-                            return Err(CiscoIosError::Ssh(
-                                ayssh::SshError::ChannelError("Channel closed".to_string()),
-                            ));
-                        }
-                        other => {
-                            debug!("RawSshTransport: ignoring msg type {}", other);
-                            continue;
-                        }
-                    }
-                }
-                Ok(Ok(_)) => continue, // empty message
-                Ok(Err(e)) => return Err(CiscoIosError::Ssh(e)),
-                Err(_) => return Ok(vec![]), // timeout
-            }
-        }
-    }
-
     async fn close(&mut self) -> Result<(), CiscoIosError> {
-        self.transport
-            .send_channel_close(self.channel_id)
+        self.session
+            .disconnect()
             .await
             .map_err(CiscoIosError::Ssh)
     }

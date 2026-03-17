@@ -398,7 +398,7 @@ Start
 "#;
         let fsm = TextFSMPlus::from_str(template)
             .with_preset("Username", "admin");
-        let expanded = fsm.expand_send_text("${Username}", &aytextfsmplus::NoFuncs);
+        let expanded = fsm.expand_send_text("${Username}", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(expanded, "admin");
     }
 
@@ -411,7 +411,7 @@ Start
   ^> -> Send "enable" Done
 "#;
         let fsm = TextFSMPlus::from_str(template);
-        let expanded = fsm.expand_send_text("\"enable\"", &aytextfsmplus::NoFuncs);
+        let expanded = fsm.expand_send_text("\"enable\"", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(expanded, "enable");
     }
 
@@ -428,7 +428,7 @@ Start
         fsm.set_preset("A", "hello");
         fsm.set_preset("B", "world");
         // String values get concatenated by aycalc
-        let expanded = fsm.expand_send_text("${A + B}", &aytextfsmplus::NoFuncs);
+        let expanded = fsm.expand_send_text("${A + B}", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(expanded, "helloworld");
     }
 
@@ -443,7 +443,7 @@ Start
         let mut fsm = TextFSMPlus::from_str(template);
         fsm.set_preset("A", "10");
         // Pure arithmetic works when not involving string variables
-        let expanded = fsm.expand_send_text("${2 + 40}", &aytextfsmplus::NoFuncs);
+        let expanded = fsm.expand_send_text("${2 + 40}", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(expanded, "42");
     }
 
@@ -460,7 +460,7 @@ WaitPassword
 "#;
         let mut fsm = TextFSMPlus::from_str(template)
             .with_preset("Username", "admin");
-        let action = fsm.parse_line_interactive("Username: ", &aytextfsmplus::NoFuncs);
+        let action = fsm.parse_line_interactive("Username: ", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(action, InteractiveAction::Send("admin".to_string()));
         assert_eq!(fsm.curr_state, "WaitPassword");
     }
@@ -474,7 +474,7 @@ Start
   ^${Hostname}# -> Done
 "#;
         let mut fsm = TextFSMPlus::from_str(template);
-        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoFuncs);
+        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(action, InteractiveAction::Done);
         assert_eq!(fsm.curr_state, "Done");
     }
@@ -487,7 +487,7 @@ Start
   ^# -> Done
 "#;
         let mut fsm = TextFSMPlus::from_str(template);
-        let action = fsm.parse_line_interactive("% Login invalid", &aytextfsmplus::NoFuncs);
+        let action = fsm.parse_line_interactive("% Login invalid", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(
             action,
             InteractiveAction::Error(Some("\"auth failed\"".to_string()))
@@ -515,15 +515,15 @@ WaitPrompt
             .with_preset("Username", "admin")
             .with_preset("Password", "secret123");
 
-        let action = fsm.parse_line_interactive("Username: ", &aytextfsmplus::NoFuncs);
+        let action = fsm.parse_line_interactive("Username: ", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(action, InteractiveAction::Send("admin".to_string()));
         assert_eq!(fsm.curr_state, "WaitPassword");
 
-        let action = fsm.parse_line_interactive("Password: ", &aytextfsmplus::NoFuncs);
+        let action = fsm.parse_line_interactive("Password: ", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(action, InteractiveAction::Send("secret123".to_string()));
         assert_eq!(fsm.curr_state, "WaitPrompt");
 
-        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoFuncs);
+        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(action, InteractiveAction::Done);
     }
 
@@ -540,13 +540,157 @@ Enable
 "#;
         let mut fsm = TextFSMPlus::from_str(template);
 
-        let action = fsm.parse_line_interactive("Router1>", &aytextfsmplus::NoFuncs);
+        let action = fsm.parse_line_interactive("Router1>", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(action, InteractiveAction::Send("enable".to_string()));
         assert_eq!(fsm.curr_state, "Enable");
 
         // Hostname was captured, now the Enable state should match it
-        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoFuncs);
+        let action = fsm.parse_line_interactive("Router1#", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
         assert_eq!(action, InteractiveAction::Done);
+    }
+
+    #[test]
+    fn test_feed_basic_match() {
+        let template = r#"
+Value Preset Username ()
+
+Start
+  ^Username:\s* -> Send ${Username} WaitPrompt
+
+WaitPrompt
+  ^# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template)
+            .with_preset("Username", "admin");
+
+        let result = fsm.feed(b"Username: ", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(result.action, InteractiveAction::Send("admin".to_string()));
+        assert!(result.consumed > 0);
+        assert_eq!(fsm.curr_state, "WaitPrompt");
+    }
+
+    #[test]
+    fn test_feed_no_match_returns_zero_consumed() {
+        let template = r#"
+Start
+  ^# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        let result = fsm.feed(b"no match here", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(result.action, InteractiveAction::None);
+        assert_eq!(result.consumed, 0);
+    }
+
+    #[test]
+    fn test_feed_partial_then_complete() {
+        let template = r#"
+Value Hostname (\S+)
+
+Start
+  ^${Hostname}# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+
+        // Partial data — no match yet
+        let result = fsm.feed(b"Router", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(result.action, InteractiveAction::None);
+        assert_eq!(result.consumed, 0);
+
+        // Complete data — match
+        let result = fsm.feed(b"Router1#", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(result.action, InteractiveAction::Done);
+        assert!(result.consumed > 0);
+    }
+
+    #[test]
+    fn test_feed_consumes_up_to_match() {
+        let template = r#"
+Start
+  ^Password:\s* -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        // feed() matches against the buffer — ^ matches start of string
+        let data = b"Password: ";
+        let result = fsm.feed(data, &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(result.action, InteractiveAction::Done);
+        assert!(result.consumed <= data.len());
+        assert!(result.consumed > 0);
+    }
+
+    #[test]
+    fn test_feed_no_match_with_prefix_data() {
+        let template = r#"
+Start
+  ^Password:\s* -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        // ^ won't match in the middle of a buffer
+        let data = b"some banner\nPassword: ";
+        let result = fsm.feed(data, &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        // No match because ^ anchors to start of buffer
+        assert_eq!(result.action, InteractiveAction::None);
+        assert_eq!(result.consumed, 0);
+    }
+
+    #[test]
+    fn test_feed_multi_step_login() {
+        let template = r#"
+Value Preset Username ()
+Value Preset Password ()
+Value Hostname (\S+)
+
+Start
+  ^Username:\s* -> Send ${Username} WaitPassword
+
+WaitPassword
+  ^Password:\s* -> Send ${Password} WaitPrompt
+
+WaitPrompt
+  ^${Hostname}# -> Done
+  ^% -> Error "auth failed"
+"#;
+        let mut fsm = TextFSMPlus::from_str(template)
+            .with_preset("Username", "admin")
+            .with_preset("Password", "secret");
+
+        // Step 1: Username prompt
+        let r = fsm.feed(b"Username: ", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(r.action, InteractiveAction::Send("admin".to_string()));
+
+        // Step 2: Password prompt
+        let r = fsm.feed(b"Password: ", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(r.action, InteractiveAction::Send("secret".to_string()));
+
+        // Step 3: Device prompt
+        let r = fsm.feed(b"Router1#", &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(r.action, InteractiveAction::Done);
+
+        // Verify hostname was captured
+        assert_eq!(
+            fsm.curr_record.get("Hostname"),
+            Some(&Value::Single("Router1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_feed_with_accumulated_buffer() {
+        let template = r#"
+Start
+  ^Router# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+
+        // Simulate data arriving in chunks — caller accumulates
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(b"Rout");
+        let r = fsm.feed(&buffer, &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(r.action, InteractiveAction::None);
+        assert_eq!(r.consumed, 0);
+
+        buffer.extend_from_slice(b"er#");
+        let r = fsm.feed(&buffer, &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
+        assert_eq!(r.action, InteractiveAction::Done);
+        assert!(r.consumed > 0);
     }
 
     #[test]

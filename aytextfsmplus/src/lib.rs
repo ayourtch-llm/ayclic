@@ -1074,22 +1074,33 @@ impl TextFSMPlus {
 
 /// GetVar implementation over the TextFSM value table.
 /// Looks up captured and preset values by name.
-struct ValueTableVars<'a> {
+/// Falls back to an optional external GetVar provider.
+pub struct ValueTableVars<'a, V: GetVar> {
     record: &'a DataRecord,
+    external: &'a V,
 }
 
-impl<'a> GetVar for ValueTableVars<'a> {
+impl<'a, V: GetVar> GetVar for ValueTableVars<'a, V> {
     fn get_var_value(&self, varname: &str) -> Result<CalcVal, aycalc::Error> {
+        // Try the value table first, then fall back to external
         match self.record.get(varname) {
             Some(Value::Single(s)) => Ok(CalcVal::String(s.clone())),
             Some(Value::List(l)) => Ok(CalcVal::String(l.join(","))),
-            None => Err(aycalc::Error::VariableNotFound(varname.to_string())),
+            None => self.external.get_var_value(varname),
         }
     }
 }
 
+/// No-op GetVar — no external variables.
+pub struct NoVars;
+
+impl GetVar for NoVars {
+    fn get_var_value(&self, varname: &str) -> Result<CalcVal, aycalc::Error> {
+        Err(aycalc::Error::VariableNotFound(varname.to_string()))
+    }
+}
+
 /// No-op CallFunc — no custom functions registered.
-/// Users can provide their own via drive_with().
 pub struct NoFuncs;
 
 impl CallFunc for NoFuncs {
@@ -1111,14 +1122,30 @@ pub enum InteractiveAction {
     Error(Option<String>),
 }
 
+/// Result of feeding stream data to the interactive engine.
+#[derive(Debug, PartialEq, Clone)]
+pub struct FeedResult {
+    /// The action to take.
+    pub action: InteractiveAction,
+    /// Number of bytes consumed from the input buffer.
+    /// The caller should remove this many bytes from the front of the buffer.
+    pub consumed: usize,
+}
+
 impl TextFSMPlus {
     /// Expand a send text expression using aycalc.
     /// Simple variable references like `${Password}` are looked up directly.
     /// Complex expressions like `${compute_response(Challenge, Key)}` are
     /// evaluated by aycalc with the current value table as GetVar context.
-    pub fn expand_send_text(&self, text: &str, funcs: &impl CallFunc) -> String {
+    pub fn expand_send_text(
+        &self,
+        text: &str,
+        vars: &impl GetVar,
+        funcs: &impl CallFunc,
+    ) -> String {
         let vars = ValueTableVars {
             record: &self.curr_record,
+            external: vars,
         };
         // Extract ${...} expressions manually to support arbitrary aycalc
         // expressions (which may contain spaces, operators, function calls).
@@ -1178,6 +1205,7 @@ impl TextFSMPlus {
     pub fn parse_line_interactive(
         &mut self,
         aline: &str,
+        vars: &impl GetVar,
         funcs: &impl CallFunc,
     ) -> InteractiveAction {
         let curr_state = self.curr_state.clone();
@@ -1259,7 +1287,7 @@ impl TextFSMPlus {
                         return InteractiveAction::None;
                     }
                     LineAction::Send(text, next) => {
-                        let expanded = self.expand_send_text(text, funcs);
+                        let expanded = self.expand_send_text(text, vars, funcs);
                         if let Some(next_state) = next {
                             match next_state {
                                 NextState::Done => {
@@ -1282,5 +1310,139 @@ impl TextFSMPlus {
             panic!("State {} not found!", &self.curr_state);
         }
         InteractiveAction::None
+    }
+
+    /// Feed accumulated stream data to the interactive engine.
+    ///
+    /// Unlike `parse_line_interactive()` which works on complete lines, `feed()`
+    /// matches patterns against an accumulated byte buffer — suitable for
+    /// interactive sessions where prompts don't end with newlines.
+    ///
+    /// Returns a `FeedResult` containing the action to take and how many bytes
+    /// were consumed. The caller should:
+    /// - Remove `consumed` bytes from the front of the buffer
+    /// - If `action` is `Send(text)`, write `text` to the stream
+    /// - If `action` is `Done` or `Error`, stop
+    /// - If `action` is `None`, read more data and call `feed()` again
+    pub fn feed(&mut self, data: &[u8], vars: &impl GetVar, funcs: &impl CallFunc) -> FeedResult {
+        let text = String::from_utf8_lossy(data);
+        let curr_state = self.curr_state.clone();
+
+        if let Some(ref curr_state) = self.parser.states.get(&curr_state) {
+            for rule in &curr_state.rules {
+                let mut transition: RuleTransition = Default::default();
+                transition.line_action = LineAction::Continue;
+                let mut capture_matched = false;
+                let mut match_end: usize = 0;
+                let mut tmp_datarec = DataRecord::new();
+                let mut tmp_filldown_rec = DataRecord::new();
+
+                match &rule.maybe_regex {
+                    Some(MultiRegex::Classic(rx)) => {
+                        if let Some(m) = rx.find(&text) {
+                            match_end = m.end();
+                            if let Some(caps) = rx.captures(&text) {
+                                for name in &rule.match_variables {
+                                    let maybe_value =
+                                        caps.name(name).map(|x| x.as_str().to_string());
+                                    self.insert_value(
+                                        "FEED",
+                                        &mut tmp_datarec,
+                                        &mut tmp_filldown_rec,
+                                        name,
+                                        maybe_value,
+                                        &text,
+                                    );
+                                }
+                            }
+                            capture_matched = true;
+                        }
+                    }
+                    Some(MultiRegex::Fancy(rx)) => {
+                        if let Ok(Some(m)) = rx.find(&text) {
+                            match_end = m.end();
+                            if let Ok(Some(caps)) = rx.captures(&text) {
+                                for name in &rule.match_variables {
+                                    let maybe_value =
+                                        caps.name(name).map(|x| x.as_str().to_string());
+                                    self.insert_value(
+                                        "FEED",
+                                        &mut tmp_datarec,
+                                        &mut tmp_filldown_rec,
+                                        name,
+                                        maybe_value,
+                                        &text,
+                                    );
+                                }
+                            }
+                            capture_matched = true;
+                        }
+                    }
+                    x => {
+                        panic!("Regex {:?} on rule is not supported", &x);
+                    }
+                }
+
+                if capture_matched {
+                    for (name, v) in tmp_datarec.fields {
+                        self.curr_record.append_value(name, v);
+                    }
+                    for (name, v) in tmp_filldown_rec.fields {
+                        self.filldown_record.append_value(name, v);
+                    }
+                    transition = rule.transition.clone();
+                }
+
+                let make_result = |action: InteractiveAction, consumed: usize| FeedResult {
+                    action,
+                    consumed,
+                };
+
+                match &transition.line_action {
+                    LineAction::Next(Some(NextState::Done)) => {
+                        self.curr_state = "Done".to_string();
+                        return make_result(InteractiveAction::Done, match_end);
+                    }
+                    LineAction::Next(Some(NextState::Error(msg))) => {
+                        return make_result(InteractiveAction::Error(msg.clone()), match_end);
+                    }
+                    LineAction::Next(Some(NextState::NamedState(name))) => {
+                        self.set_curr_state(name);
+                        return make_result(InteractiveAction::None, match_end);
+                    }
+                    LineAction::Next(None) => {
+                        return make_result(InteractiveAction::None, match_end);
+                    }
+                    LineAction::Send(send_text, next) => {
+                        let expanded = self.expand_send_text(send_text, vars, funcs);
+                        if let Some(next_state) = next {
+                            match next_state {
+                                NextState::Done => {
+                                    self.curr_state = "Done".to_string();
+                                }
+                                NextState::NamedState(name) => {
+                                    self.set_curr_state(name);
+                                }
+                                NextState::Error(msg) => {
+                                    return make_result(
+                                        InteractiveAction::Error(msg.clone()),
+                                        match_end,
+                                    );
+                                }
+                            }
+                        }
+                        return make_result(InteractiveAction::Send(expanded), match_end);
+                    }
+                    LineAction::Continue => {}
+                }
+            }
+        } else {
+            panic!("State {} not found!", &self.curr_state);
+        }
+
+        FeedResult {
+            action: InteractiveAction::None,
+            consumed: 0,
+        }
     }
 }

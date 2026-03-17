@@ -140,8 +140,111 @@ upstream implementation can use this as reference.
 
 ## Summary of Changes
 
+| Change | Effort | Status |
+|--------|--------|--------|
+| `Debug` impl for `TelnetConnection` | Small | **Done** |
+| `RawTelnetSession` struct | Small (~50 lines) | **Done** |
+| Export in `lib.rs` | Trivial | **Done** |
+| Generic stream support for `TelnetConnection` | Medium | Planned (see below) |
+
+---
+
+## Future Request: Generic Stream Support for Protocol Stacking
+
+### Context
+
+The connection path architecture supports multi-hop access where protocols
+can be **stacked** — e.g., running Telnet over an SSH channel, or running
+SSH over a Telnet session (for terminal servers that expose SSH on the
+other side).
+
+For this to work, `TelnetConnection` needs to accept any async byte stream
+as its underlying I/O, not just `TcpStream`.
+
+### What's Needed
+
+Change `TelnetConnection` to accept a boxed async stream:
+
+```rust
+type BoxedStream = Box<dyn tokio::io::AsyncRead
+                     + tokio::io::AsyncWrite
+                     + Send
+                     + Unpin>;
+
+pub struct TelnetConnection {
+    stream: Option<BoxedStream>,  // was: Option<TcpStream>
+    // ... rest unchanged
+}
+
+impl TelnetConnection {
+    /// Connect over TCP (existing behavior, unchanged API).
+    pub async fn connect(host: &str, port: u16) -> Result<Self> {
+        let tcp = TcpStream::connect(format!("{}:{}", host, port)).await?;
+        Ok(Self::over_stream(Box::new(tcp)))
+    }
+
+    /// Run the TELNET protocol over an arbitrary async byte stream.
+    ///
+    /// This enables protocol stacking — e.g., running Telnet over
+    /// an SSH channel or over another protocol's data stream.
+    pub fn over_stream(stream: BoxedStream) -> Self {
+        Self {
+            stream: Some(stream),
+            // ... same initialization as connect()
+        }
+    }
+}
+```
+
+### Why This Is Backwards-Compatible
+
+- `TcpStream` implements `AsyncRead + AsyncWrite`, so boxing it is free.
+- The existing `connect()` API is unchanged — it just boxes internally.
+- `over_stream()` is a new constructor, no existing code affected.
+- All internal `stream.read()` / `stream.write()` calls work identically
+  on `BoxedStream` as on `TcpStream` (same trait methods).
+
+### How ayclic Will Use This
+
+```rust
+// ayclic has a TransportStream adapter that wraps any RawTransport
+// as an AsyncRead + AsyncWrite:
+let ssh_transport: Box<dyn RawTransport> = /* existing SSH connection */;
+let stream = TransportStream::new(ssh_transport);
+
+// Run Telnet protocol over the SSH channel
+let telnet = TelnetConnection::over_stream(Box::new(stream));
+let session = RawTelnetSession::from_connection(telnet);
+// Now session.send()/receive() speaks Telnet-over-SSH
+```
+
+### Also Update `start_with_config`
+
+If `start_with_config()` currently calls `connect()` internally, add
+an `over_stream` variant:
+
+```rust
+/// Start with config over an existing stream.
+pub async fn start_with_config_over(
+    stream: BoxedStream,
+    enable_echo: bool,
+    enable_binary: bool,
+    enable_suppress_ga: bool,
+) -> Result<Self> {
+    let mut conn = Self::over_stream(stream);
+    // ... negotiate options (same as existing) ...
+    Ok(conn)
+}
+```
+
+### Effort
+
 | Change | Effort |
 |--------|--------|
-| `Debug` impl for `TelnetConnection` | Small |
-| `RawTelnetSession` struct | Small (~50 lines) |
-| Export in `lib.rs` | Trivial |
+| Change `stream` field type to `BoxedStream` | Small (type swap) |
+| Add `over_stream()` constructor | Small |
+| Add `start_with_config_over()` | Small |
+| Box `TcpStream` in `connect()` | Trivial |
+
+No behavioral changes, no new dependencies. Just widening the accepted
+input type from concrete `TcpStream` to trait-object `BoxedStream`.

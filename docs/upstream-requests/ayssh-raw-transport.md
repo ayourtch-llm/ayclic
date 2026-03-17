@@ -221,11 +221,13 @@ parts (`term len 0`, prompt detection, etc.).
 
 ## Summary of Changes
 
-| Change | Effort |
-|--------|--------|
-| `Debug` impl for `Transport` | Small |
-| `RawSshSession` struct | Medium (~100 lines, mostly reuses CiscoConn's connect flow) |
-| Export in `lib.rs` | Trivial |
+| Change | Effort | Status |
+|--------|--------|--------|
+| `Debug` impl for `Transport` | Small | **Done** |
+| `Debug` impls for all public types | Small | **Done** |
+| `RawSshSession` struct | Medium (~100 lines) | **Done** |
+| Export in `lib.rs` | Trivial | **Done** |
+| Generic stream support for `Transport` | Medium | Planned (see below) |
 
 ## Reference: CiscoConn's Connection Flow
 
@@ -238,3 +240,135 @@ For reference, here's what `CiscoConn` does during setup (from
 4. `Session::open(&mut transport)` — open session channel
 5. Request PTY + shell (send channel requests via transport)
 6. ~~Send `term len 0` and wait for prompt~~ ← SKIP THIS (vendor-specific)
+
+---
+
+## Future Request: Generic Stream Support for Protocol Stacking
+
+### Context
+
+The connection path architecture supports multi-hop access where protocols
+can be **stacked** — e.g., running SSH over a Telnet session (terminal
+server scenarios), running SSH over another SSH channel, or running SSH
+over any arbitrary byte stream.
+
+For this to work, `Transport` needs to accept any async byte stream as
+its underlying I/O, not just `TcpStream`.
+
+### What's Needed
+
+Change `Transport` to accept a boxed async stream:
+
+```rust
+type BoxedStream = Box<dyn tokio::io::AsyncRead
+                     + tokio::io::AsyncWrite
+                     + Send
+                     + Unpin>;
+
+pub struct Transport {
+    stream: BoxedStream,  // was: TcpStream
+    // ... rest unchanged
+}
+
+impl Transport {
+    /// Create over a TCP connection (existing behavior, unchanged API).
+    pub fn new(stream: TcpStream) -> Self {
+        Self::over_stream(Box::new(stream))
+    }
+
+    /// Run the SSH protocol over an arbitrary async byte stream.
+    ///
+    /// This enables protocol stacking — e.g., running SSH over
+    /// a Telnet session, over another SSH channel, or over any
+    /// other protocol's data stream.
+    pub fn over_stream(stream: BoxedStream) -> Self {
+        Self {
+            stream,
+            // ... same initialization as new()
+        }
+    }
+}
+```
+
+### Also Update RawSshSession
+
+Add connect methods that work over an existing stream:
+
+```rust
+impl RawSshSession {
+    /// Existing TCP-based connections (unchanged)
+    pub async fn connect_with_password(...) -> Result<Self> { ... }
+    pub async fn connect_with_publickey(...) -> Result<Self> { ... }
+
+    /// Run SSH over an arbitrary byte stream.
+    ///
+    /// Performs SSH handshake, authenticates, opens session channel,
+    /// allocates PTY, and starts shell — all over the provided stream
+    /// instead of a TCP connection.
+    pub async fn connect_over_stream_with_password(
+        stream: BoxedStream,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, SshError> {
+        let mut transport = Transport::over_stream(stream);
+        transport.handshake().await?;
+        // ... authenticate, open session, PTY, shell ...
+        Ok(Self::from_parts(transport, channel_id))
+    }
+
+    pub async fn connect_over_stream_with_publickey(
+        stream: BoxedStream,
+        username: &str,
+        private_key: &[u8],
+    ) -> Result<Self, SshError> {
+        // same pattern
+    }
+}
+```
+
+### Why This Is Backwards-Compatible
+
+- `TcpStream` implements `AsyncRead + AsyncWrite`, so boxing it is free.
+- The existing `new()` and `connect_*()` APIs are unchanged — they box
+  internally.
+- `over_stream()` and `connect_over_stream_*()` are new constructors.
+- All internal `stream.read()` / `stream.write()` calls work identically
+  on `BoxedStream` as on `TcpStream` (same trait methods).
+- No new dependencies required.
+
+### How ayclic Will Use This
+
+```rust
+// ayclic has a TransportStream adapter that wraps any RawTransport
+// as an AsyncRead + AsyncWrite:
+let telnet_transport: Box<dyn RawTransport> = /* existing Telnet session */;
+let stream = TransportStream::new(telnet_transport);
+
+// Run SSH protocol over the Telnet session
+let ssh_session = RawSshSession::connect_over_stream_with_password(
+    Box::new(stream),
+    "operator",
+    "password123",
+).await?;
+// Now ssh_session.send()/receive() speaks SSH-over-Telnet
+```
+
+This enables scenarios like:
+- **SSH over Telnet**: Connect to a terminal server via Telnet, then SSH
+  to a device behind it at the protocol level (not shell-level `ssh` command)
+- **SSH over SSH**: True nested SSH (not typing `ssh` in a shell), useful
+  for environments where SSH port forwarding is restricted
+- **SSH over any transport**: Future transports (serial, WebSocket, etc.)
+  can all serve as the underlying stream for SSH
+
+### Effort
+
+| Change | Effort |
+|--------|--------|
+| Change `stream` field type to `BoxedStream` | Small (type swap) |
+| Add `Transport::over_stream()` | Small |
+| Add `RawSshSession::connect_over_stream_*()` | Medium (reuse existing connect flow) |
+| Box `TcpStream` in `Transport::new()` | Trivial |
+
+No behavioral changes, no new dependencies. Just widening the accepted
+input type from concrete `TcpStream` to trait-object `BoxedStream`.

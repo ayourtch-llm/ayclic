@@ -292,6 +292,59 @@ impl TranscriptSink for VecTranscriptSink {
     }
 }
 
+/// Transcript sink that writes to a file in real time.
+///
+/// Each entry is written as it happens — useful for audit trails
+/// and debugging sessions that may crash or hang.
+pub struct FileTranscriptSink {
+    file: std::fs::File,
+}
+
+impl std::fmt::Debug for FileTranscriptSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileTranscriptSink").finish()
+    }
+}
+
+impl FileTranscriptSink {
+    /// Create from an open file (takes ownership).
+    pub fn new(file: std::fs::File) -> Self {
+        Self { file }
+    }
+
+    /// Create by opening a file for writing (truncates if exists).
+    pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let file = std::fs::File::create(path)?;
+        Ok(Self { file })
+    }
+
+    /// Create by opening a file for appending.
+    pub fn open_append(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Self { file })
+    }
+}
+
+impl TranscriptSink for FileTranscriptSink {
+    fn record(&mut self, entry: TranscriptEntry) {
+        use std::io::Write;
+        let prefix = match entry.direction {
+            TranscriptDirection::Sent => ">>> ",
+            TranscriptDirection::Received => "<<< ",
+        };
+        // Best-effort write — don't fail the transport on I/O errors
+        let _ = write!(self.file, "{}", prefix);
+        let _ = self.file.write_all(&entry.data);
+        if !entry.data.ends_with(b"\n") {
+            let _ = writeln!(self.file);
+        }
+        let _ = self.file.flush();
+    }
+}
+
 /// Shared transcript handle — wraps any `TranscriptSink` in
 /// `Arc<Mutex<>>` so the caller can retain a handle while the
 /// transport is owned by a `GenericCliConn` or `CiscoIosConn`.

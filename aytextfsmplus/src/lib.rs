@@ -171,15 +171,15 @@ pub enum Value {
 
 #[derive(Parser, Debug, Default, Clone)]
 #[grammar = "textfsm.pest"]
-pub struct TextFSMParser {
+pub struct TextFSMPlusParser {
     pub values: IndexMap<String, ValueDefinition>,
     pub mandatory_values: Vec<String>,
     pub states: IndexMap<String, StateCompiled>,
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct TextFSM {
-    pub parser: TextFSMParser,
+pub struct TextFSMPlus {
+    pub parser: TextFSMPlusParser,
     pub curr_state: String,
     pub curr_record: DataRecord,
     pub filldown_record: DataRecord,
@@ -190,6 +190,9 @@ pub struct TextFSM {
 pub enum LineAction {
     Continue,
     Next(Option<NextState>),
+    /// Send text to the stream (Interactive mode).
+    /// The string supports aycalc expression evaluation via ${...}.
+    Send(String, Option<NextState>),
 }
 
 impl Default for LineAction {
@@ -211,12 +214,14 @@ pub enum RecordAction {
 pub enum NextState {
     Error(Option<String>),
     NamedState(String),
+    /// Interactive session completed successfully.
+    Done,
 }
 
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct RuleTransition {
-    line_action: LineAction,
-    record_action: RecordAction,
+    pub line_action: LineAction,
+    pub record_action: RecordAction,
 }
 
 #[derive(Debug, Default, PartialEq, Clone)]
@@ -227,14 +232,15 @@ pub struct StateRule {
 
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct ValueDefinition {
-    name: String,
-    is_filldown: bool,
-    is_key: bool,
-    is_required: bool,
-    is_list: bool,
-    is_fillup: bool,
-    regex_pattern: String,
-    options: Option<String>,
+    pub name: String,
+    pub is_filldown: bool,
+    pub is_key: bool,
+    pub is_required: bool,
+    pub is_list: bool,
+    pub is_fillup: bool,
+    pub is_preset: bool,
+    pub regex_pattern: String,
+    pub options: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,17 +251,17 @@ pub enum MultiRegex {
 
 #[derive(Debug, Clone)]
 pub struct StateRuleCompiled {
-    _rule_match: String,
-    _expanded_rule_match: String,
-    match_variables: Vec<String>,
-    maybe_regex: Option<MultiRegex>,
-    transition: RuleTransition,
+    pub _rule_match: String,
+    pub _expanded_rule_match: String,
+    pub match_variables: Vec<String>,
+    pub maybe_regex: Option<MultiRegex>,
+    pub transition: RuleTransition,
 }
 
 #[derive(Debug, Clone)]
 pub struct StateCompiled {
-    name: String,
-    rules: Vec<StateRuleCompiled>,
+    pub name: String,
+    pub rules: Vec<StateRuleCompiled>,
 }
 
 #[derive(Debug, Clone)]
@@ -263,7 +269,7 @@ pub enum DataRecordConversion {
     LowercaseKeys,
 }
 
-impl TextFSMParser {
+impl TextFSMPlusParser {
     fn _log_pair(indent: usize, pair: &Pair<'_, Rule>) {
         // println!("Debug: {:#?}", &pair);
         let spaces = " ".repeat(indent);
@@ -306,16 +312,35 @@ impl TextFSMParser {
                     let next_state = NextState::Error(maybe_err_msg);
                     line_action = LineAction::Next(Some(next_state));
                 }
+                Rule::done_state => {
+                    line_action = LineAction::Next(Some(NextState::Done));
+                }
+                Rule::send_action => {
+                    let mut send_text = String::new();
+                    for p in pair.clone().into_inner() {
+                        if p.as_rule() == Rule::send_text {
+                            send_text = p.as_str().to_string();
+                        }
+                    }
+                    line_action = LineAction::Send(send_text, None);
+                }
                 Rule::next_state => {
-                    if line_action == LineAction::Next(None) {
-                        let next_state = NextState::NamedState(pair.as_str().to_string());
-                        line_action = LineAction::Next(Some(next_state));
-                    } else {
-                        panic!(
-                            "Line action {:?} does not support next state (attempted {:?})",
-                            &line_action,
-                            pair.as_str()
-                        );
+                    match line_action {
+                        LineAction::Next(None) => {
+                            let next_state = NextState::NamedState(pair.as_str().to_string());
+                            line_action = LineAction::Next(Some(next_state));
+                        }
+                        LineAction::Send(text, None) => {
+                            let next_state = NextState::NamedState(pair.as_str().to_string());
+                            line_action = LineAction::Send(text, Some(next_state));
+                        }
+                        _ => {
+                            panic!(
+                                "Line action {:?} does not support next state (attempted {:?})",
+                                &line_action,
+                                pair.as_str()
+                            );
+                        }
                     }
                 }
                 x => {
@@ -520,6 +545,7 @@ impl TextFSMParser {
         let mut is_required = false;
         let mut is_list = false;
         let mut is_fillup = false;
+        let mut is_preset = false;
 
         for p in pair.clone().into_inner() {
             match p.as_rule() {
@@ -545,6 +571,7 @@ impl TextFSMParser {
                         "Required" => is_required = true,
                         "List" => is_list = true,
                         "Fillup" => is_fillup = true,
+                        "Preset" => is_preset = true,
                         x => panic!("Unknown option {:?}", &x),
                     }
                 }
@@ -565,6 +592,7 @@ impl TextFSMParser {
                 is_required,
                 is_list,
                 is_fillup,
+                is_preset,
                 options,
             })
         } else {
@@ -590,10 +618,9 @@ impl TextFSMParser {
         }
         Ok((vals, mandatory_values))
     }
-    pub fn from_file(fname: &str) -> Self {
-        // println!("Path: {}", &fname);
-        let template = std::fs::read_to_string(&fname).expect("File read failed");
-        // pad with a newline, because dealing with a missing one within grammar is a PITA
+    pub fn from_str(template: &str) -> Self {
+        // Trim leading newlines and pad with trailing newlines
+        let template = template.trim_start_matches('\n').trim_start_matches('\r');
         let template = format!("{}\n\n\n", template);
 
         let mut seen_eoi = false;
@@ -618,7 +645,7 @@ impl TextFSMParser {
         };
         states.insert(eof_state.name.clone(), eof_state);
 
-        match TextFSMParser::parse(Rule::file, &template) {
+        match TextFSMPlusParser::parse(Rule::file, &template) {
             Ok(pairs) => {
                 for pair in pairs.clone() {
                     match pair.as_rule() {
@@ -659,34 +686,67 @@ impl TextFSMParser {
                             panic!("RULE {:?} not supported", &x);
                         }
                     }
-                    // Self::process_pair(0, &pair);
                 }
 
                 if !seen_eoi {
                     println!("WARNING: EOI token not seen");
                 }
 
-                // FIXME: check that the "Start" state exists
-                return TextFSMParser {
+                TextFSMPlusParser {
                     values,
                     mandatory_values,
                     states,
-                };
+                }
             }
-            Err(e) => panic!("file {} Error: {}", &fname, e),
+            Err(e) => panic!("Template parse error: {}", e),
         }
+    }
+
+    pub fn from_file(fname: &str) -> Self {
+        let template = std::fs::read_to_string(&fname).expect("File read failed");
+        Self::from_str(&template)
     }
 }
 
-impl TextFSM {
-    pub fn from_file(fname: &str) -> Self {
-        let parser = TextFSMParser::from_file(fname);
+impl TextFSMPlus {
+    pub fn from_str(template: &str) -> Self {
+        let parser = TextFSMPlusParser::from_str(template);
         let curr_state = format!("Start");
-        TextFSM {
+        TextFSMPlus {
             parser,
             curr_state,
             ..Default::default()
         }
+    }
+
+    pub fn from_file(fname: &str) -> Self {
+        let parser = TextFSMPlusParser::from_file(fname);
+        let curr_state = format!("Start");
+        TextFSMPlus {
+            parser,
+            curr_state,
+            ..Default::default()
+        }
+    }
+
+    /// Set a Preset value before running the engine.
+    pub fn set_preset(&mut self, name: &str, value: &str) {
+        if let Some(val_def) = self.parser.values.get(name) {
+            if !val_def.is_preset {
+                panic!("Value '{}' is not declared as Preset", name);
+            }
+            self.curr_record
+                .fields
+                .insert(name.to_string(), Value::Single(value.to_string()));
+        } else {
+            panic!("Value '{}' not found in template", name);
+        }
+    }
+
+    /// Builder-style preset setter.
+    pub fn with_preset(mut self, name: &str, value: &str) -> Self {
+        self.set_preset(name, value);
+        self
     }
 
     pub fn set_curr_state(&mut self, state_name: &str) {
@@ -941,6 +1001,11 @@ impl TextFSM {
                 }
                 match transition.line_action {
                     LineAction::Next(x) => return x,
+                    LineAction::Send(_text, next) => {
+                        // In Parse mode, Send is treated like Next (no stream to send to).
+                        // In Interactive mode, drive() handles the actual sending.
+                        return next;
+                    }
                     LineAction::Continue => {}
                 }
             }
@@ -977,6 +1042,10 @@ impl TextFSM {
                 match next_state {
                     NextState::Error(maybe_msg) => {
                         panic!("Error state reached! msg: {:?}", &maybe_msg);
+                    }
+                    NextState::Done => {
+                        self.curr_state = "Done".to_string();
+                        break;
                     }
                     NextState::NamedState(name) => {
                         self.set_curr_state(&name);

@@ -14,7 +14,7 @@ enum VerifyResult {
 }
 
 fn verify(template_name: &str, data_name: &str, yaml_verify_name: &str) -> VerifyResult {
-    let mut textfsm = TextFSM::from_file(&template_name);
+    let mut textfsm = TextFSMPlus::from_file(&template_name);
     let yaml = std::fs::read_to_string(&yaml_verify_name).expect("YAML File read failed");
 
     let result = textfsm.parse_file(&data_name, Some(DataRecordConversion::LowercaseKeys));

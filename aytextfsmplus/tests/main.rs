@@ -9,33 +9,33 @@ mod tests {
     fn test_regex_pattern() {
         let input = r#"((\d+\/?)+)
 "#;
-        let pairs = TextFSMParser::parse(Rule::regex_pattern, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::regex_pattern, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
     #[test]
     fn test_rule_with_err_msg() {
         let input = r#"  ^.* -> Error "Could not parse line:""#;
-        let pairs = TextFSMParser::parse(Rule::rule, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::rule, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
     #[test]
     fn test_err_msg() {
         let input = r#""test""#;
-        let pairs = TextFSMParser::parse(Rule::err_msg, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::err_msg, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
     #[test]
     fn test_value_definition() {
         let input = r#"Value PORT ((\d+\/?)+)
 "#;
-        let pairs = TextFSMParser::parse(Rule::value_definition, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::value_definition, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
 
     #[test]
     fn test_state_definition() {
         let input = "Start\n  ^interface -> Continue.Record End\n";
-        let pairs = TextFSMParser::parse(Rule::state_definition, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::state_definition, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
 
@@ -53,7 +53,7 @@ GetDescription
   ^$ -> GetDescription
   ^. -> Error
 "#;
-        let pairs = TextFSMParser::parse(Rule::file, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::file, input).unwrap();
         println!("Pairs: {:?}", &pairs);
         assert_eq!(pairs.count(), 3);
     }
@@ -70,7 +70,7 @@ Start
 Startr_ecord
   ^x -> X
 "#;
-        let pairs = TextFSMParser::parse(Rule::file, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::file, input).unwrap();
         println!("Pairs: {:?}", &pairs);
         assert_eq!(pairs.count(), 3);
     }
@@ -88,7 +88,7 @@ Start
   ^${PORT_ID}\s+${DESCRIPTION}\s*$$ -> Record
   ^-+\s*$$
   ^. -> Error"#;
-        let pairs = TextFSMParser::parse(Rule::file, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::file, input).unwrap();
         println!("Pairs: {:?}", &pairs);
         assert_eq!(pairs.count(), 3);
     }
@@ -99,7 +99,7 @@ Start
   ^interface$
   ^$
 "#;
-        let pairs = TextFSMParser::parse(Rule::state_definition, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::state_definition, input).unwrap();
         println!("Pairs: {:?}", &pairs);
         assert_eq!(pairs.count(), 1);
     }
@@ -117,7 +117,7 @@ Start
   # Error out if raw data does not match any above rules.
   ^.* -> Error "Could not parse line:"
 "#;
-        let pairs = TextFSMParser::parse(Rule::state_definition, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::state_definition, input).unwrap();
         println!("Pairs: {:?}", &pairs);
         assert_eq!(pairs.count(), 1);
     }
@@ -135,7 +135,7 @@ Start
   # Error out if raw data does not match any above rules.
   ^.* -> Error
 "#;
-        let pairs = TextFSMParser::parse(Rule::state_definition, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::state_definition, input).unwrap();
         println!("Pairs: {:?}", &pairs);
         assert_eq!(pairs.count(), 1);
     }
@@ -147,7 +147,7 @@ Value VERSION (\d+\.\d+)
 Value MODEL (\w+)
 
 "#;
-        let pairs = TextFSMParser::parse(Rule::value_definitions, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::value_definitions, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
 
@@ -155,14 +155,14 @@ Value MODEL (\w+)
     fn test_complex_rule_nostate() {
         let input = r#"  ^PING\s+${DESTINATION}\s+${PKT_SIZE}\s+data\s+bytes*$$
 "#;
-        let pairs = TextFSMParser::parse(Rule::rule, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::rule, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
 
     #[test]
     fn test_complex_rule() {
         let input = "  ^interface GigabitEthernet -> Record Start\n";
-        let pairs = TextFSMParser::parse(Rule::rule, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::rule, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
 
@@ -175,7 +175,7 @@ GetDescription
   ^description -> Record Start
   ^. -> Error
 "#;
-        let pairs = TextFSMParser::parse(Rule::state_definitions, input).unwrap();
+        let pairs = TextFSMPlusParser::parse(Rule::state_definitions, input).unwrap();
         assert_eq!(pairs.count(), 1);
     }
 }
@@ -197,7 +197,7 @@ fn main() {
         let template = std::fs::read_to_string(&arg).expect("File read failed");
         let template = format!("{}\n", template);
 
-        match TextFSMParser::parse(Rule::file, &template) {
+        match TextFSMPlusParser::parse(Rule::file, &template) {
             Ok(pairs) => {
                 for pair in pairs {
                     print_pair(0, &pair);
@@ -205,5 +205,226 @@ fn main() {
             }
             Err(e) => panic!("file {} Error: {}", &arg, e),
         }
+    }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use aytextfsmplus::*;
+
+    #[test]
+    fn test_preset_value_parsing() {
+        let template = r#"
+Value Preset Username ()
+Value Preset Password ()
+Value Hostname (\S+)
+
+Start
+  ^Username:\s* -> Done
+"#;
+        let fsm = TextFSMPlus::from_str(template);
+        assert!(fsm.parser.values.get("Username").unwrap().is_preset);
+        assert!(fsm.parser.values.get("Password").unwrap().is_preset);
+        assert!(!fsm.parser.values.get("Hostname").unwrap().is_preset);
+    }
+
+    #[test]
+    fn test_set_preset_value() {
+        let template = r#"
+Value Preset Username ()
+Value Hostname (\S+)
+
+Start
+  ^${Hostname}# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        fsm.set_preset("Username", "admin");
+        assert_eq!(
+            fsm.curr_record.get("Username"),
+            Some(&Value::Single("admin".to_string()))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not declared as Preset")]
+    fn test_set_preset_on_non_preset_panics() {
+        let template = r#"
+Value Hostname (\S+)
+
+Start
+  ^${Hostname}# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        fsm.set_preset("Hostname", "router1");
+    }
+
+    #[test]
+    fn test_with_preset_builder() {
+        let template = r#"
+Value Preset Username ()
+Value Preset Password ()
+
+Start
+  ^. -> Done
+"#;
+        let fsm = TextFSMPlus::from_str(template)
+            .with_preset("Username", "admin")
+            .with_preset("Password", "secret");
+        assert_eq!(
+            fsm.curr_record.get("Username"),
+            Some(&Value::Single("admin".to_string()))
+        );
+        assert_eq!(
+            fsm.curr_record.get("Password"),
+            Some(&Value::Single("secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_done_state_parsing() {
+        let template = r#"
+Value Hostname (\S+)
+
+Start
+  ^${Hostname}# -> Done
+  ^. -> Error
+"#;
+        let fsm = TextFSMPlusParser::from_str(template);
+        let start = fsm.states.get("Start").unwrap();
+        match &start.rules[0].transition.line_action {
+            LineAction::Next(Some(NextState::Done)) => {} // expected
+            other => panic!("Expected Next(Some(Done)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_done_stops_parsing() {
+        let template = r#"
+Value Hostname (\S+)
+
+Start
+  ^${Hostname}# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        let result = fsm.parse_line("Router1#");
+        assert_eq!(result, Some(NextState::Done));
+    }
+
+    #[test]
+    fn test_send_action_parsing() {
+        let template = r#"
+Value Preset Username ()
+
+Start
+  ^Username:\s* -> Send ${Username} WaitPassword
+  ^# -> Done
+"#;
+        let fsm = TextFSMPlusParser::from_str(template);
+        let start = fsm.states.get("Start").unwrap();
+        match &start.rules[0].transition.line_action {
+            LineAction::Send(text, Some(NextState::NamedState(state))) => {
+                assert_eq!(text, "${Username}");
+                assert_eq!(state, "WaitPassword");
+            }
+            other => panic!("Expected Send with next state, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_send_action_no_next_state() {
+        let template = r#"
+Value Preset Password ()
+
+Start
+  ^Password:\s* -> Send ${Password}
+  ^# -> Done
+"#;
+        let fsm = TextFSMPlusParser::from_str(template);
+        let start = fsm.states.get("Start").unwrap();
+        match &start.rules[0].transition.line_action {
+            LineAction::Send(text, None) => {
+                assert_eq!(text, "${Password}");
+            }
+            other => panic!("Expected Send without next state, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_send_treated_as_next_in_parse_mode() {
+        let template = r#"
+Value Preset Username ()
+Value Hostname (\S+)
+
+Start
+  ^Username:\s* -> Send ${Username} WaitPrompt
+
+WaitPrompt
+  ^${Hostname}# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template)
+            .with_preset("Username", "admin");
+        // In parse mode, Send acts like Next — transitions to WaitPrompt
+        let result = fsm.parse_line("Username: ");
+        assert_eq!(
+            result,
+            Some(NextState::NamedState("WaitPrompt".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_from_str_equivalence() {
+        let template = r#"Value Required Interface (\S+)
+Value Status (up|down)
+
+Start
+  ^${Interface}\s+is\s+${Status} -> Record
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        fsm.parse_line("Gi0/1 is up");
+        assert_eq!(fsm.records.len(), 1);
+        assert_eq!(
+            fsm.records[0].get("Interface"),
+            Some(&Value::Single("Gi0/1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_full_interactive_template_parses() {
+        let template = r#"
+Value Preset Username ()
+Value Preset Password ()
+Value Preset EnableSecret ()
+Value Hostname (\S+)
+
+Start
+  ^Username:\s* -> Send ${Username} WaitPassword
+  ^Password:\s* -> Send ${Password} WaitPrompt
+
+WaitPassword
+  ^Password:\s* -> Send ${Password} WaitPrompt
+
+WaitPrompt
+  ^${Hostname}# -> Done
+  ^${Hostname}> -> Send "enable" Enable
+  ^% -> Error "login failed"
+
+Enable
+  ^Password:\s* -> Send ${EnableSecret} CheckEnable
+
+CheckEnable
+  ^${Hostname}# -> Done
+  ^${Hostname}> -> Error "enable failed"
+  ^% -> Error "enable auth failed"
+"#;
+        let fsm = TextFSMPlusParser::from_str(template);
+        assert!(fsm.values.get("Username").unwrap().is_preset);
+        assert!(fsm.values.get("Password").unwrap().is_preset);
+        assert!(fsm.values.get("EnableSecret").unwrap().is_preset);
+        assert!(!fsm.values.get("Hostname").unwrap().is_preset);
+        assert!(fsm.states.get("Start").is_some());
+        assert!(fsm.states.get("WaitPassword").is_some());
+        assert!(fsm.states.get("WaitPrompt").is_some());
+        assert!(fsm.states.get("Enable").is_some());
+        assert!(fsm.states.get("CheckEnable").is_some());
     }
 }

@@ -860,8 +860,15 @@ impl TextFSM {
                         let number_of_values = self.curr_record.keys().len();
 
                         for k in &self.parser.mandatory_values {
-                            if self.curr_record.get(k).is_some() {
-                                mandatory_count += 1;
+                            if let Some(val) = self.curr_record.get(k) {
+                                // Required values must be non-empty to count
+                                let is_non_empty = match val {
+                                    Value::Single(s) => !s.is_empty(),
+                                    Value::List(l) => !l.is_empty(),
+                                };
+                                if is_non_empty {
+                                    mandatory_count += 1;
+                                }
                             }
                         }
                         if number_of_values > 0 {
@@ -889,10 +896,15 @@ impl TextFSM {
                                 trace!("RECORD: {:?}", &new_rec);
                                 self.records.push(new_rec);
                             } else {
-                                trace!("RECORD: no required fields set");
+                                trace!("RECORD: no required fields set, discarding");
+                                // Still must clear curr_record even when discarding,
+                                // otherwise stale values leak into the next record
+                                self.curr_record = self.filldown_record.clone();
                             }
                         } else {
                             trace!("RECORD: record is empty, not dumping");
+                            // Clear curr_record to filldown baseline
+                            self.curr_record = self.filldown_record.clone();
                         }
                     }
                     RecordAction::NoRecord => {}

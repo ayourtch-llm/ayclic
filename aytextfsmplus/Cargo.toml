@@ -1,0 +1,16 @@
+[package]
+name = "aytextfsmplus"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pest = "*"
+pest_derive = "*"
+regex = "*"
+fancy-regex = "*"
+serde = { version = "*", features = ["derive"] }
+serde_yaml = "*"
+log = "*"
+env_logger = "*"
+csv = "*"
+aycalc = { path = "../../aycalc" }

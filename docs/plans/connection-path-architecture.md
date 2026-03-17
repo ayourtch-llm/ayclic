@@ -1,6 +1,6 @@
 # Connection Path Architecture
 
-## Status: Phase 1-2 IMPLEMENTED, Phase 3-5 planned
+## Status: Phase 1-3 IMPLEMENTED, Phase 4-5 planned
 
 ## Problem Statement
 
@@ -68,19 +68,46 @@ Interactive hops are powered by the `aytextfsmplus` state-machine engine.
 ### Hop and ConnectionPath
 
 ```rust
+/// Specification for opening a new byte stream.
+enum TransportSpec {
+    Telnet { target: SocketAddr },
+    Ssh { target: SocketAddr, auth: SshAuth },
+}
+
 enum Hop {
-    Transport(Transport),
-    Interactive(TextFSMPlus),  // was InteractiveTemplate in earlier drafts
+    Transport(TransportSpec),
+    Interactive(TextFSMPlus),
 }
 
 struct ConnectionPath {
     hops: Vec<Hop>,
+    interactive_timeout: Duration,  // default 30s
 }
 ```
 
 A `ConnectionPath` is an ordered list of hops. The runtime processes them
 sequentially. Each Transport hop establishes (or changes) the underlying
 stream; each Interactive hop drives text-based interaction on it.
+
+### RawTransport Trait
+
+The `RawTransport` trait provides vendor-neutral byte-level I/O over
+any protocol (Telnet, SSH). Implementations delegate to upstream
+`RawTelnetSession` (aytelnet) and `RawSshSession` (ayssh):
+
+```rust
+#[async_trait]
+trait RawTransport: Send + Debug {
+    async fn send(&mut self, data: &[u8]) -> Result<()>;
+    async fn receive(&mut self, timeout: Duration) -> Result<Vec<u8>>;
+    async fn close(&mut self) -> Result<()>;
+}
+```
+
+Implementations:
+- `RawTelnetTransport` — thin wrapper over `aytelnet::RawTelnetSession`
+- `RawSshTransport` — thin wrapper over `ayssh::RawSshSession`
+- `MockTransport` — test harness (available in `#[cfg(test)]`)
 
 ## State Machine Engine (`aytextfsmplus` crate)
 
@@ -423,41 +450,47 @@ DevicePrompt
 ## Full Connection Path Example
 
 ```rust
-let path = ConnectionPath {
-    hops: vec![
-        // Hop 1: SSH from my machine to bastion (protocol-level auth)
-        Hop::Transport(Transport::Ssh {
-            target: "10.1.1.1:22".parse()?,
-            auth: SshAuth::PubKey {
-                username: "ops".into(),
-                key_path: "~/.ssh/id_ed25519".into(),
-            },
-        }),
+use ayclic::path::*;
+use ayclic::raw_transport::SshAuth;
+use aytextfsmplus::{TextFSMPlus, NoVars, NoFuncs};
 
-        // Hop 2: In bastion shell, SSH to target device (interactive)
-        Hop::Interactive(
-            TextFSMPlus::from_file("ssh_jump.textfsm")
-                .with_preset("TargetUser", "operator")
-                .with_preset("TargetHost", "10.200.0.5")
-                .with_preset("JumpPassword", "hunter2")
-        ),
+let path = ConnectionPath::new(vec![
+    // Hop 1: SSH from my machine to bastion (protocol-level auth)
+    Hop::Transport(TransportSpec::Ssh {
+        target: "10.1.1.1:22".parse()?,
+        auth: SshAuth::PubKey {
+            username: "ops".into(),
+            private_key: std::fs::read("~/.ssh/id_ed25519")?,
+        },
+    }),
 
-        // Hop 3: Device login and enable (interactive)
-        Hop::Interactive(
-            TextFSMPlus::from_file("cisco_ios_login.textfsm")
-                .with_preset("Username", "admin")
-                .with_preset("Password", "device_pass")
-                .with_preset("EnableSecret", "enable_pass")
-        ),
-    ],
-};
+    // Hop 2: In bastion shell, SSH to target device (interactive)
+    Hop::Interactive(
+        TextFSMPlus::from_file("ssh_jump.textfsm")
+            .with_preset("TargetUser", "operator")
+            .with_preset("TargetHost", "10.200.0.5")
+            .with_preset("JumpPassword", "hunter2")
+    ),
 
-// Execute the path — returns a connected, authenticated stream
-let stream = path.connect().await?;
+    // Hop 3: Device login and enable (interactive)
+    Hop::Interactive(
+        TextFSMPlus::from_file("cisco_ios_login.textfsm")
+            .with_preset("Username", "admin")
+            .with_preset("Password", "device_pass")
+            .with_preset("EnableSecret", "enable_pass")
+    ),
+]).with_timeout(Duration::from_secs(60));
 
-// Wrap in CiscoIosConn for command execution
-let mut conn = CiscoIosConn::from_stream(stream);
-let output = conn.run_cmd("show version").await?;
+// Execute the path — returns an EstablishedPath with active transport
+let mut established = path.connect(&NoVars, &NoFuncs).await?;
+
+// Send commands directly
+established.send(b"show version\n").await?;
+let output = established.receive(Duration::from_secs(10)).await?;
+
+// Or run another template for structured interaction
+let mut cmd_fsm = TextFSMPlus::from_str("...");
+established.run_interactive(&mut cmd_fsm, Duration::from_secs(30), &NoVars, &NoFuncs).await?;
 
 // Parse output using standard ntc-templates
 let mut parser = TextFSMPlus::from_file("cisco_ios_show_version.textfsm");
@@ -466,59 +499,63 @@ let records = parser.parse_file("output.txt", None);
 
 ## Execution Runtime
 
+### Implementation Status: COMPLETE
+
+The runtime is implemented in `ayclic/src/path.rs`.
+
 ### Connection Path Execution
 
-```
-let mut current_stream: Option<Box<dyn AsyncReadWrite>> = None;
+`ConnectionPath::connect()` processes hops sequentially:
 
-for hop in path.hops {
+```rust
+// Simplified — actual implementation in ayclic/src/path.rs
+for (i, hop) in self.hops.into_iter().enumerate() {
     match hop {
-        Hop::Transport(transport) => {
+        Hop::Transport(spec) => {
             // Opens a new TCP connection + runs protocol
-            current_stream = Some(transport.connect().await?);
+            transport = Some(match spec {
+                TransportSpec::Telnet { target } =>
+                    Box::new(RawTelnetTransport::connect(target).await?),
+                TransportSpec::Ssh { target, auth } =>
+                    Box::new(RawSshTransport::connect(target, auth).await?),
+            });
         }
         Hop::Interactive(mut fsm) => {
-            // Drive interaction using feed() step-at-a-time API
-            let stream = current_stream.as_mut()
-                .ok_or(Error::NoStream)?;
-            let mut buffer = Vec::new();
-            loop {
-                let n = stream.read(&mut tmp).await?;
-                buffer.extend_from_slice(&tmp[..n]);
-                let result = fsm.feed(&buffer, &vars, &funcs);
-                buffer.drain(..result.consumed);
-                match result.action {
-                    InteractiveAction::Send(text) => {
-                        stream.write_all(text.as_bytes()).await?;
-                    }
-                    InteractiveAction::Done => break,
-                    InteractiveAction::Error(msg) => return Err(msg.into()),
-                    InteractiveAction::None => continue,
-                }
-            }
-            // Stream is unchanged — same bytes, new logical context
+            // Drive TextFSMPlus template on current transport
+            drive_interactive(&mut fsm, transport, timeout, &vars, &funcs).await?;
         }
     }
 }
 ```
 
-### Stream Ownership
+### drive_interactive()
 
-Intermediate hops must stay alive while the final stream is in use. For
-Transport hops, this means the SSH connection / Telnet connection object must
-be held. The runtime should maintain a stack of transport layers:
+The core interactive loop (`drive_interactive()` in `path.rs`):
+
+1. Try to match current buffer against TextFSMPlus rules via `feed()`
+2. If `Send(text)` — write text + newline to transport
+3. If `Done` — return success
+4. If `Error(msg)` — return error with diagnostic message
+5. If `None` — read more data from transport, append to buffer, retry
+6. Overall timeout enforced across the entire interaction
+
+### EstablishedPath
 
 ```rust
 struct EstablishedPath {
-    /// Stack of transport layers, outermost first.
-    /// The final entry's channel is the active stream.
-    transport_stack: Vec<Box<dyn TransportLayer>>,
-    /// The active stream for the final device
-    stream: Box<dyn AsyncReadWrite + Send>,
+    /// The active transport to the final device.
+    transport: Box<dyn RawTransport>,
 }
 ```
 
-When the `EstablishedPath` is dropped, transports are closed in reverse order.
+Provides `send()`, `receive()`, `close()`, and `run_interactive()` for
+post-connection template-driven interactions.
+
+Note: current implementation holds a single transport (the final one).
+For multi-hop scenarios where the first hop is SSH and subsequent hops
+are interactive (typing `ssh` in a shell), the SSH transport stays alive
+because the interactive hops operate on its stream — they don't create
+new transports.
 
 ## Integration with Existing Crate Structure
 
@@ -526,13 +563,29 @@ When the `EstablishedPath` is dropped, transports are closed in reverse order.
 
 | Component | Crate | Status |
 |-----------|-------|--------|
-| Telnet protocol | `aytelnet` (external, unchanged) | Done |
-| SSH protocol | `ayssh` (external, unchanged) | Done |
-| Expression evaluation | `aycalc` (external, unchanged) | Done |
+| Telnet protocol | `aytelnet` (external) | Done |
+| Telnet raw session | `aytelnet::RawTelnetSession` (upstream) | **Done** |
+| SSH protocol | `ayssh` (external) | Done |
+| SSH raw session | `ayssh::RawSshSession` (upstream) | **Done** |
+| Expression evaluation | `aycalc` (external) | Done |
 | TextFSM+ engine | `aytextfsmplus` (workspace member) | **Done** |
-| Transport enum + connect logic | `ayclic` (new module: `path`) | Planned |
-| ConnectionPath + runtime | `ayclic` (new module: `path`) | Planned |
-| CiscoIosConn | `ayclic` (updated to accept `EstablishedPath`) | Planned |
+| RawTransport trait + wrappers | `ayclic` (module: `raw_transport`) | **Done** |
+| ConnectionPath + runtime | `ayclic` (module: `path`) | **Done** |
+| CiscoIosConn | `ayclic` (to be updated for `EstablishedPath`) | Planned |
+
+### Upstream Integrations
+
+Both `aytelnet` and `ayssh` were updated to provide vendor-neutral raw
+session APIs, per the request documents in `docs/upstream-requests/`:
+
+- **aytelnet**: Added `RawTelnetSession` (send/receive with TELNET protocol
+  event filtering) and `Debug` for `TelnetConnection`.
+- **ayssh**: Added `RawSshSession` (full connect+auth+PTY+shell setup,
+  send/receive with SSH message filtering) and `Debug` for `Transport`
+  and all public types.
+
+The `ayclic` wrappers (`RawTelnetTransport`, `RawSshTransport`) are now
+thin ~30-line delegations to the upstream types.
 
 ### Migration Path
 
@@ -545,9 +598,11 @@ When the `EstablishedPath` is dropped, transports are closed in reverse order.
    **Status: DONE** — 56 tests, full aycalc integration, `GetVar`/`CallFunc`
    flexibility matching aycalc's own API.
 
-3. **Phase 3**: Implement `ConnectionPath`, `Hop`, `Transport` types and the
-   connection runtime in `ayclic`.
-   **Status: Planned.**
+3. **Phase 3**: Implement `ConnectionPath`, `Hop`, `TransportSpec`,
+   `EstablishedPath`, `RawTransport` trait, and the connection runtime.
+   Upstream `RawTelnetSession` and `RawSshSession` to aytelnet/ayssh.
+   **Status: DONE** — 65 tests in ayclic, `drive_interactive()` core loop,
+   `MockTransport` for testing without network.
 
 4. **Phase 4**: Update `CiscoIosConn` to accept `ConnectionPath` or
    `EstablishedPath` as an alternative to direct connection parameters.
@@ -573,9 +628,15 @@ recompiling — useful for slow environments (lab over VPN) vs. fast (local
 network). Templates can specify a default timeout that overrides the global.
 Individual states can override the template default for specific slow steps.
 
-**Implementation note**: Not yet implemented. The `feed()` API is timeout-agnostic
-— the caller controls timing in their I/O loop. Timeout logic will be added
-when a convenience `drive()` wrapper is built on top of `feed()`.
+**Implementation**: Two levels are implemented:
+- `ConnectionPath::interactive_timeout` — per-path timeout (default 30s),
+  configurable via `with_timeout()`.
+- `drive_interactive()` enforces this as an overall deadline for each
+  Interactive hop, with 5-second read intervals within.
+
+The `feed()` API remains timeout-agnostic for callers who manage their own
+loop. The global `AtomicU64` default is deferred — the per-path timeout
+is sufficient for current use cases.
 
 ### D2. Stream vs. line matching in Interactive mode
 
@@ -655,14 +716,22 @@ Items explicitly deferred, to be revisited when operational experience
 demonstrates the need:
 
 - **SSH ProxyJump**: Native ProxyJump as an optimization for multi-SSH-hop
-  paths. May be added as a parameter to `Transport::Ssh`.
+  paths. May be added as a parameter to `TransportSpec::Ssh`.
 - **Template registries**: Community template sharing beyond filesystem loading.
 - **Embedded templates**: `include_str!` for built-in templates compiled into
   the binary.
-- **Serial/Netconf transports**: Additional `Transport` variants.
+- **Serial/Netconf transports**: Additional `TransportSpec` variants.
 - **aho-corasick optimization**: Compile interactive rules to aho-corasick
   for faster multi-pattern matching in `feed()`.
 - **Multiline regex in feed()**: Support `(?m)` flag or automatic line
   splitting so `^` matches after newlines within accumulated buffers.
-- **DEFAULT_TIMEOUT_SECONDS**: Global atomic timeout default (not yet
-  implemented — `feed()` is timeout-agnostic by design).
+- **DEFAULT_TIMEOUT_SECONDS**: Global atomic timeout default (currently
+  per-path timeout via `ConnectionPath::interactive_timeout` is sufficient).
+- **Multi-transport stacking**: Current `EstablishedPath` holds a single
+  transport. For true SSH-inside-SSH (not shell-level jump), a transport
+  stack would be needed.
+- **CiscoIosError cleanup**: The error type still uses Cisco-specific
+  naming. Consider a vendor-neutral error type for the path module.
+- **Newline handling in Send**: Currently `drive_interactive()` appends
+  `\n` after every Send. Some devices may need `\r\n` or no newline.
+  Consider making this configurable per-template or per-hop.

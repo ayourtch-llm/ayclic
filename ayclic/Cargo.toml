@@ -7,6 +7,7 @@ edition = "2021"
 aytelnet = { path = "../../aytelnet" }
 ayssh = { path = "../../ayssh" }
 aytextfsmplus = { path = "../aytextfsmplus" }
+aycalc = { path = "../../aycalc" }
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 tracing = "0.1"

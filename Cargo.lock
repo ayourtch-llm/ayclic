@@ -119,6 +119,7 @@ dependencies = [
  "aho-corasick",
  "async-trait",
  "axum",
+ "aycalc",
  "ayssh",
  "aytelnet",
  "aytextfsmplus",

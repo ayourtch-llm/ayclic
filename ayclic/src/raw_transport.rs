@@ -203,50 +203,53 @@ impl RawTransport for RawSshTransport {
     }
 }
 
+/// Mock transport for testing the feed() integration loop
+/// without real network connections.
+#[cfg(test)]
+#[derive(Debug)]
+pub struct MockTransport {
+    pub chunks: Vec<Vec<u8>>,
+    index: usize,
+    pub sent: Vec<Vec<u8>>,
+}
+
+#[cfg(test)]
+impl MockTransport {
+    pub fn new(chunks: Vec<Vec<u8>>) -> Self {
+        Self {
+            chunks,
+            index: 0,
+            sent: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl RawTransport for MockTransport {
+    async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
+        self.sent.push(data.to_vec());
+        Ok(())
+    }
+
+    async fn receive(&mut self, _timeout: Duration) -> Result<Vec<u8>, CiscoIosError> {
+        if self.index < self.chunks.len() {
+            let chunk = self.chunks[self.index].clone();
+            self.index += 1;
+            Ok(chunk)
+        } else {
+            Ok(vec![]) // simulate timeout
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), CiscoIosError> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Mock transport for testing the feed() integration loop
-    /// without real network connections.
-    #[derive(Debug)]
-    pub struct MockTransport {
-        pub chunks: Vec<Vec<u8>>,
-        index: usize,
-        pub sent: Vec<Vec<u8>>,
-    }
-
-    impl MockTransport {
-        pub fn new(chunks: Vec<Vec<u8>>) -> Self {
-            Self {
-                chunks,
-                index: 0,
-                sent: Vec::new(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl RawTransport for MockTransport {
-        async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
-            self.sent.push(data.to_vec());
-            Ok(())
-        }
-
-        async fn receive(&mut self, _timeout: Duration) -> Result<Vec<u8>, CiscoIosError> {
-            if self.index < self.chunks.len() {
-                let chunk = self.chunks[self.index].clone();
-                self.index += 1;
-                Ok(chunk)
-            } else {
-                Ok(vec![]) // simulate timeout
-            }
-        }
-
-        async fn close(&mut self) -> Result<(), CiscoIosError> {
-            Ok(())
-        }
-    }
 
     #[tokio::test]
     async fn test_mock_transport_send_receive() {

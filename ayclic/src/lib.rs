@@ -10,5 +10,5 @@ pub use conn::{CiscoIosConn, CiscoIosConfig, ConnectionType, ChangeSafety, md5_h
 pub use error::CiscoIosError;
 pub use generic_conn::GenericCliConn;
 pub use path::{ConnectionPath, Hop, TransportSpec, EstablishedPath};
-pub use raw_transport::{RawTransport, RawTelnetTransport, RawSshTransport, SshAuth, LoggingTransport, TranscriptSink, TranscriptDirection, TranscriptEntry, VecTranscriptSink, FileTranscriptSink, SharedTranscript, new_transcript};
+pub use raw_transport::{RawTransport, RawTelnetTransport, RawSshTransport, SshAuth, LoggingTransport, TranscriptSink, TranscriptDirection, TranscriptEntry, VecTranscriptSink, FileTranscriptSink, SharedTranscript, new_transcript, with_file_logging, with_file_logging_append};
 pub use transport::{CiscoTransport, TelnetTransport, SshTransport, receive_until_match, run_interactive, PromptAction, ios_prompt_actions};

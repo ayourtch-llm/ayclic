@@ -345,6 +345,36 @@ impl TranscriptSink for FileTranscriptSink {
     }
 }
 
+/// Wrap a transport with file-based logging.
+///
+/// Returns a `Box<dyn RawTransport>` that logs all sent/received data
+/// to the file in real time. No shared handle needed — the file is
+/// owned by the transport and closed when dropped.
+///
+/// ```ignore
+/// let transport = with_file_logging(transport, "/var/log/session.log")?;
+/// let mut conn = GenericCliConn::from_transport(transport);
+/// // Everything is logged to the file automatically
+/// ```
+pub fn with_file_logging(
+    transport: Box<dyn RawTransport>,
+    path: impl AsRef<std::path::Path>,
+) -> std::io::Result<Box<dyn RawTransport>> {
+    let sink = FileTranscriptSink::open(path)?;
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(sink));
+    Ok(Box::new(LoggingTransport::new(transport, shared)))
+}
+
+/// Same as `with_file_logging` but appends to an existing file.
+pub fn with_file_logging_append(
+    transport: Box<dyn RawTransport>,
+    path: impl AsRef<std::path::Path>,
+) -> std::io::Result<Box<dyn RawTransport>> {
+    let sink = FileTranscriptSink::open_append(path)?;
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(sink));
+    Ok(Box::new(LoggingTransport::new(transport, shared)))
+}
+
 /// Shared transcript handle — wraps any `TranscriptSink` in
 /// `Arc<Mutex<>>` so the caller can retain a handle while the
 /// transport is owned by a `GenericCliConn` or `CiscoIosConn`.

@@ -12,7 +12,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tracing::debug;
+
+
 
 use crate::error::CiscoIosError;
 

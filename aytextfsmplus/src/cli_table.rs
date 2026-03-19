@@ -101,7 +101,7 @@ impl CliTable {
         let mut result = String::new();
 
         // Build the nested structure from left to right
-        for (i, c) in chars.iter().enumerate() {
+        for (_i, c) in chars.iter().enumerate() {
             // Add opening parenthesis and character
             result.push_str("(");
             result.push(*c);

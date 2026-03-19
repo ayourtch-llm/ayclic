@@ -1,12 +1,11 @@
 use aycalc::{CalcVal, CallFunc, GetVar};
-use log::{debug, error, info, log_enabled, trace, Level};
+use log::{debug, error, trace};
 pub use pest::iterators::Pair;
 pub use pest::Parser;
 use pest_derive::Parser;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use indexmap::IndexMap;
-use std::collections::HashMap;
 
 pub mod cli_table;
 pub mod varsubst;
@@ -85,7 +84,7 @@ impl DataRecord {
 
     pub fn insert(&mut self, name: String, value: String) {
         if self.fields.contains_key(&name) {
-            let mut existing = self.fields.remove(&name);
+            let mut existing = self.fields.shift_remove(&name);
             match existing {
                 None => {
                     panic!("internal error");
@@ -106,7 +105,7 @@ impl DataRecord {
 
     pub fn append_value(&mut self, name: String, value: Value) {
         if self.fields.contains_key(&name) {
-            let mut existing = self.fields.remove(&name);
+            let mut existing = self.fields.shift_remove(&name);
             match existing {
                 None => {
                     panic!("internal error");
@@ -140,7 +139,7 @@ impl DataRecord {
     }
 
     pub fn remove(&mut self, key: &str) {
-        self.fields.remove(key);
+        self.fields.shift_remove(key);
     }
     pub fn keys(&self) -> indexmap::map::Keys<'_, String, Value> {
         self.fields.keys()
@@ -908,7 +907,7 @@ impl TextFSMPlus {
                                                 break;
                                             }
                                         }
-                                        Value::List(lst) => {
+                                        Value::List(_) => {
                                             panic!("fillup not supported for lists!");
                                         }
                                     }
@@ -949,9 +948,8 @@ impl TextFSMPlus {
                         }
                         if number_of_values > 0 {
                             if mandatory_count == self.parser.mandatory_values.len() {
-                                let mut new_rec: DataRecord = Default::default();
                                 /* fill the record from filldown */
-                                new_rec = self.filldown_record.clone();
+                                let mut new_rec = self.filldown_record.clone();
                                 /* swap with the current record */
                                 std::mem::swap(&mut new_rec, &mut self.curr_record);
                                 // Rebuild record in template declaration order,

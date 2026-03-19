@@ -14,7 +14,7 @@ use tracing::{debug, info};
 
 use crate::error::CiscoIosError;
 use crate::generic_conn::GenericCliConn;
-use crate::path::{ConnectionPath, EstablishedPath, Hop, TransportSpec};
+use crate::path::{ConnectionPath, Hop, TransportSpec};
 use crate::raw_transport::SshAuth;
 use crate::transport::{
     ios_prompt_actions, receive_until_match, run_interactive, CiscoTransport, PromptAction,
@@ -264,6 +264,7 @@ pub enum ChangeSafety {
 
 /// Initialize a Cisco IOS session: send `term len 0` and wait for prompt.
 /// Used after transport-level connection + auth is complete.
+#[allow(dead_code)]
 async fn ios_init(
     transport: &mut dyn CiscoTransport,
     read_timeout: Duration,
@@ -759,7 +760,7 @@ impl CiscoIosConn {
 
         // Download file from our HTTP server to flash, with retry
         const MAX_COPY_ATTEMPTS: u32 = 3;
-        let mut copy_to_flash = String::new();
+        let mut _copy_to_flash = String::new();
         let mut last_err: Option<CiscoIosError> = None;
 
         for attempt in 1..=MAX_COPY_ATTEMPTS {
@@ -781,7 +782,7 @@ impl CiscoIosConn {
                             continue;
                         }
                     } else {
-                        copy_to_flash = output;
+                        _copy_to_flash = output;
                         last_err = None;
                         break;
                     }

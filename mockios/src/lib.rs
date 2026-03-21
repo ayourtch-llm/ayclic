@@ -49,6 +49,8 @@ pub enum CliMode {
     Config,
     /// Sub-configuration mode (hostname(config-if)#, etc.).
     ConfigSub(String),
+    /// Device is reloading — connection should be closed.
+    Reloading,
 }
 
 /// A mock Cisco IOS device that implements `RawTransport`.
@@ -82,6 +84,14 @@ pub struct MockIosDevice {
     input_buffer: Vec<u8>,
     /// Whether the initial banner/prompt has been sent.
     initial_sent: bool,
+    /// Queued reload transforms. Each reload pops the next one.
+    reload_transforms: Vec<Box<dyn FnOnce(&mut MockIosDevice) + Send>>,
+    /// Total flash size in bytes (for `dir` output).
+    flash_total_size: u64,
+    /// Boot variable (for `show boot` output).
+    boot_variable: String,
+    /// Reload delay for server mode simulation.
+    reload_delay: Duration,
 }
 
 /// Pending interactive prompt state.
@@ -135,6 +145,10 @@ impl MockIosDevice {
             pending_interactive: None,
             input_buffer: Vec::new(),
             initial_sent: false,
+            reload_transforms: Vec::new(),
+            flash_total_size: 8_000_000_000,
+            boot_variable: String::new(),
+            reload_delay: Duration::from_secs(0),
         };
         device.register_default_commands();
         device
@@ -191,12 +205,96 @@ impl MockIosDevice {
         self
     }
 
+    /// Set total flash size in bytes (for `dir` output).
+    pub fn with_flash_size(mut self, size: u64) -> Self {
+        self.flash_total_size = size;
+        self
+    }
+
+    /// Set the boot variable.
+    pub fn with_boot_variable(mut self, boot_var: &str) -> Self {
+        self.boot_variable = boot_var.to_string();
+        self
+    }
+
+    /// Add a reload transform. Each reload pops the next transform.
+    /// Transforms are applied in order: first reload uses first transform, etc.
+    pub fn with_reload_transform<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut MockIosDevice) + Send + 'static,
+    {
+        self.reload_transforms.push(Box::new(f));
+        self
+    }
+
+    /// Set the simulated reload delay (for server mode).
+    pub fn with_reload_delay(mut self, delay: Duration) -> Self {
+        self.reload_delay = delay;
+        self
+    }
+
+    /// Create a new device derived from this one, carrying over flash
+    /// files, hostname, model, commands, and config. The new device
+    /// starts in PrivilegedExec mode (as if freshly booted).
+    ///
+    /// Use this to create the post-reload device in tests:
+    /// ```ignore
+    /// let post = pre.derive().with_version("17.09.04a");
+    /// ```
+    pub fn derive(&self) -> Self {
+        Self {
+            hostname: self.hostname.clone(),
+            mode: CliMode::PrivilegedExec,
+            output_queue: Vec::new(),
+            commands: self.commands.clone(),
+            running_config: self.running_config.clone(),
+            flash_files: self.flash_files.clone(),
+            username: None,
+            password: None,
+            enable_password: None,
+            version: self.version.clone(),
+            model: self.model.clone(),
+            pending_interactive: None,
+            input_buffer: Vec::new(),
+            initial_sent: false,
+            reload_transforms: Vec::new(),
+            flash_total_size: self.flash_total_size,
+            boot_variable: self.boot_variable.clone(),
+            reload_delay: self.reload_delay,
+        }
+    }
+
+    /// Check if the device is in the Reloading state.
+    pub fn is_reloading(&self) -> bool {
+        self.mode == CliMode::Reloading
+    }
+
+    /// Get the reload delay.
+    pub fn reload_delay(&self) -> Duration {
+        self.reload_delay
+    }
+
+    /// Apply the next queued reload transform and reset to booted state.
+    /// Call this to simulate the device coming back after a reload.
+    pub fn power_on(&mut self) {
+        if !self.reload_transforms.is_empty() {
+            let transform = self.reload_transforms.remove(0);
+            transform(self);
+        }
+        self.mode = CliMode::PrivilegedExec;
+        self.output_queue.clear();
+        self.input_buffer.clear();
+        self.initial_sent = false;
+        self.pending_interactive = None;
+    }
+
     fn register_default_commands(&mut self) {
         // These are overridable via with_command()
     }
 
     fn prompt(&self) -> String {
         match &self.mode {
+            CliMode::Reloading => String::new(),
             CliMode::Login | CliMode::LoginPassword => String::new(),
             CliMode::UserExec => format!("{}>", self.hostname),
             CliMode::PrivilegedExec => format!("{}#", self.hostname),
@@ -207,18 +305,20 @@ impl MockIosDevice {
 
     fn handle_line(&mut self, line: &str) {
         let line = line.trim();
+
+        // Handle pending interactive state first (even for empty lines —
+        // empty line is a valid confirm response)
+        if let Some(pending) = self.pending_interactive.take() {
+            self.handle_interactive_response(line, pending);
+            return;
+        }
+
         if line.is_empty() {
             self.queue_output(&format!("\n{}", self.prompt()));
             return;
         }
 
         debug!("MockIOS [{}] cmd: {:?}", self.hostname, line);
-
-        // Handle pending interactive state first
-        if let Some(pending) = self.pending_interactive.take() {
-            self.handle_interactive_response(line, pending);
-            return;
-        }
 
         // Handle based on current mode
         match &self.mode {
@@ -227,6 +327,7 @@ impl MockIosDevice {
             CliMode::PrivilegedExec => self.handle_privileged_exec(line),
             CliMode::Config => self.handle_config_mode(line),
             CliMode::ConfigSub(_) => self.handle_config_sub(line),
+            CliMode::Reloading => {} // ignore input while reloading
         }
     }
 
@@ -320,6 +421,8 @@ impl MockIosDevice {
             self.handle_verify_md5(line);
         } else if cmd.starts_with("reload") {
             self.handle_reload_command(line);
+        } else if cmd.starts_with("show boot") || cmd == "show boot" {
+            self.handle_show_boot();
         } else if cmd.starts_with("dir ") || cmd == "dir" {
             self.handle_dir_command(line);
         } else {
@@ -500,10 +603,33 @@ impl MockIosDevice {
 
     fn handle_dir_command(&mut self, _line: &str) {
         let mut output = String::from("\nDirectory of flash:/\n\n");
+        let mut used: u64 = 0;
         for (name, content) in &self.flash_files {
-            output.push_str(&format!("  {} ({} bytes)\n", name, content.len()));
+            output.push_str(&format!(
+                "  {:>10} bytes  {}\n",
+                content.len(),
+                name
+            ));
+            used += content.len() as u64;
         }
-        output.push_str(&format!("\n{}", self.prompt()));
+        let free = self.flash_total_size.saturating_sub(used);
+        output.push_str(&format!(
+            "\n{} bytes total ({} bytes free)\n{}",
+            self.flash_total_size, free, self.prompt()
+        ));
+        self.queue_output(&output);
+    }
+
+    fn handle_show_boot(&mut self) {
+        let boot_var = if self.boot_variable.is_empty() {
+            format!("flash:c{}-universalk9-mz.SPA.{}.bin", self.model.to_lowercase(), self.version)
+        } else {
+            self.boot_variable.clone()
+        };
+        let output = format!(
+            "\nBOOT variable = {}\nConfig file = \nPrivate Config file = \nEnable Break = no\nManual Boot = no\n{}",
+            boot_var, self.prompt()
+        );
         self.queue_output(&output);
     }
 
@@ -559,7 +685,9 @@ impl MockIosDevice {
                 }
             }
             PendingInteractive::ReloadConfirm { .. } => {
-                self.queue_output(&format!("\n{}", self.prompt()));
+                // Enter reloading state — subsequent send/receive will error
+                self.queue_output("\n\nSystem is reloading...\n");
+                self.mode = CliMode::Reloading;
             }
             PendingInteractive::ReloadSave => {
                 // yes/no to save before reload
@@ -604,6 +732,9 @@ Configuration register is 0x2102"#,
 #[async_trait]
 impl RawTransport for MockIosDevice {
     async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
+        if self.mode == CliMode::Reloading {
+            return Err(CiscoIosError::NotConnected);
+        }
         self.input_buffer.extend_from_slice(data);
 
         // Process complete lines from the input buffer
@@ -641,6 +772,10 @@ impl RawTransport for MockIosDevice {
                     self.queue_output(&format!("{}", self.prompt()));
                 }
             }
+        }
+
+        if self.mode == CliMode::Reloading && self.output_queue.is_empty() {
+            return Err(CiscoIosError::NotConnected);
         }
 
         if self.output_queue.is_empty() {
@@ -896,5 +1031,206 @@ mod tests {
         device.send(b"end\n").await.unwrap();
         let data = device.receive(Duration::from_secs(1)).await.unwrap();
         assert!(String::from_utf8_lossy(&data).contains("#"));
+    }
+
+    // === Reload simulation tests ===
+
+    #[tokio::test]
+    async fn test_reload_enters_reloading_state() {
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Trigger reload
+        device.send(b"reload\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("[confirm]"));
+
+        // Confirm reload
+        device.send(b"\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("reloading"));
+
+        // Device is now reloading
+        assert!(device.is_reloading());
+    }
+
+    #[tokio::test]
+    async fn test_reload_errors_on_send_receive() {
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"reload\n").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"\n").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // "reloading..."
+
+        // send should error
+        assert!(device.send(b"test\n").await.is_err());
+        // receive should error
+        assert!(device.receive(Duration::from_secs(1)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_derive_creates_fresh_device() {
+        let pre = MockIosDevice::new("Switch1")
+            .with_version("17.06.05")
+            .with_flash_file("image.bin", b"firmware".to_vec());
+
+        let post = pre.derive().with_version("17.09.04a");
+
+        assert_eq!(post.hostname, "Switch1");
+        assert_eq!(post.version, "17.09.04a");
+        assert!(post.flash_files.contains_key("image.bin"));
+        assert_eq!(post.mode, CliMode::PrivilegedExec);
+        assert!(!post.initial_sent);
+    }
+
+    #[tokio::test]
+    async fn test_derive_preserves_flash_files() {
+        let pre = MockIosDevice::new("Switch1")
+            .with_flash_file("file1.bin", b"data1".to_vec())
+            .with_flash_file("file2.cfg", b"data2".to_vec());
+
+        let post = pre.derive();
+        assert_eq!(post.flash_files.len(), 2);
+        assert_eq!(post.flash_files.get("file1.bin").unwrap(), b"data1");
+    }
+
+    #[tokio::test]
+    async fn test_power_on_applies_transform() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_version("17.06.05")
+            .with_reload_transform(|d| {
+                d.version = "17.09.04a".to_string();
+            });
+
+        // Simulate reload
+        device.mode = CliMode::Reloading;
+
+        // Power on applies the transform
+        device.power_on();
+        assert_eq!(device.version, "17.09.04a");
+        assert_eq!(device.mode, CliMode::PrivilegedExec);
+        assert!(!device.initial_sent);
+    }
+
+    #[tokio::test]
+    async fn test_power_on_multiple_transforms() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_version("17.06.05")
+            .with_reload_transform(|d| {
+                d.version = "17.09.04a".to_string();
+            })
+            .with_reload_transform(|d| {
+                d.version = "17.09.04a-final".to_string();
+            });
+
+        // First reload
+        device.mode = CliMode::Reloading;
+        device.power_on();
+        assert_eq!(device.version, "17.09.04a");
+
+        // Second reload
+        device.mode = CliMode::Reloading;
+        device.power_on();
+        assert_eq!(device.version, "17.09.04a-final");
+    }
+
+    #[tokio::test]
+    async fn test_reload_in_with_save_prompt() {
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"reload in 5\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("Save?"));
+
+        // Answer no to save
+        device.send(b"no\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("[confirm]"));
+
+        // Confirm
+        device.send(b"\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(String::from_utf8_lossy(&data).contains("reloading"));
+        assert!(device.is_reloading());
+    }
+
+    #[tokio::test]
+    async fn test_flash_size() {
+        let device = MockIosDevice::new("Router1")
+            .with_flash_size(4_000_000_000);
+        assert_eq!(device.flash_total_size, 4_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_show_boot() {
+        let mut device = MockIosDevice::new("Router1")
+            .with_boot_variable("flash:packages.conf");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"show boot\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("flash:packages.conf"));
+    }
+
+    #[tokio::test]
+    async fn test_dir_shows_flash_space() {
+        let mut device = MockIosDevice::new("Router1")
+            .with_flash_size(8_000_000_000)
+            .with_flash_file("test.bin", vec![0u8; 1000]);
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"dir flash:\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("test.bin"));
+        assert!(output.contains("1000 bytes"));
+        assert!(output.contains("bytes total"));
+        assert!(output.contains("bytes free"));
+    }
+
+    #[tokio::test]
+    async fn test_full_reload_workflow() {
+        // Pre-reload device
+        let mut device = MockIosDevice::new("Switch1")
+            .with_version("17.06.05")
+            .with_flash_file("new_image.bin", b"firmware".to_vec())
+            .with_reload_transform(|d| {
+                d.version = "17.09.04a".to_string();
+            });
+
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Run show version — old version
+        device.send(b"show version\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(String::from_utf8_lossy(&data).contains("17.06.05"));
+
+        // Trigger reload
+        device.send(b"reload\n").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"\n").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(device.is_reloading());
+
+        // Create post-reload device using derive (alternative to power_on)
+        let mut post = device.derive();
+        // Apply the transform manually (derive doesn't auto-apply transforms)
+        post.version = "17.09.04a".to_string();
+
+        let _ = post.receive(Duration::from_secs(1)).await.unwrap();
+        post.send(b"show version\n").await.unwrap();
+        let data = post.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(String::from_utf8_lossy(&data).contains("17.09.04a"));
+
+        // Flash files persist across reload
+        assert!(post.flash_files.contains_key("new_image.bin"));
     }
 }

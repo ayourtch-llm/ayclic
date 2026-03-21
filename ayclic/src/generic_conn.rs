@@ -488,4 +488,114 @@ WaitPrompt
 
         assert_eq!(conn.cmd_timeout, Duration::from_secs(120));
     }
+
+    #[tokio::test]
+    async fn test_generic_conn_run_cmd_with_template() {
+        let transport = MockTransport::new(vec![
+            b"Router1#".to_vec(),
+        ]);
+
+        let mut conn = GenericCliConn::from_transport(Box::new(transport))
+            .with_cmd_timeout(Duration::from_secs(5));
+
+        let custom_template = r#"Start
+  ^.*# -> Done
+"#;
+        let output = conn
+            .run_cmd_with_template("show version", custom_template, &NoVars, &NoFuncs)
+            .await
+            .unwrap();
+
+        // The prompt was consumed or is empty
+        assert!(output.is_empty() || output.contains("#"));
+    }
+
+    #[tokio::test]
+    async fn test_generic_conn_run_cmd_with_template_interactive() {
+        let transport = MockTransport::new(vec![
+            b"Are you sure? [yes/no]: ".to_vec(),
+            b"Router1#".to_vec(),
+        ]);
+
+        let mut conn = GenericCliConn::from_transport(Box::new(transport))
+            .with_cmd_timeout(Duration::from_secs(5));
+
+        let custom_template = r#"Start
+  ^.*# -> Done
+  ^.*\[yes/no\]:\s* -> Send "yes" Start
+"#;
+        let _output = conn
+            .run_cmd_with_template("reload", custom_template, &NoVars, &NoFuncs)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_generic_conn_connect_over_transport_hop_error() {
+        use crate::path::TransportSpec;
+
+        let transport = MockTransport::new(vec![]);
+        let established = EstablishedPath::new(Box::new(transport));
+
+        let result = GenericCliConn::connect_over(
+            established,
+            vec![Hop::Transport(TransportSpec::Telnet {
+                target: "10.0.0.1:23".parse().unwrap(),
+            })],
+            &NoVars,
+            &NoFuncs,
+        )
+        .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CiscoIosError::InvalidConnectionType(msg) => {
+                assert!(msg.contains("Transport hops in connect_over are not yet supported"));
+            }
+            other => panic!("Expected InvalidConnectionType, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generic_conn_close() {
+        let transport = MockTransport::new(vec![]);
+        let mut conn = GenericCliConn::from_transport(Box::new(transport));
+
+        // close should succeed on MockTransport
+        conn.close().await.unwrap();
+    }
+
+    #[test]
+    fn test_default_prompt_template_content() {
+        let transport = MockTransport::new(vec![]);
+        let conn = GenericCliConn::from_transport(Box::new(transport));
+        let template = conn.prompt_template();
+        // Default template should match common prompt characters
+        assert!(template.contains("#"));
+        assert!(template.contains(">"));
+        assert!(template.contains("$"));
+        assert!(template.contains("Done"));
+        assert!(template.contains("Start"));
+    }
+
+    #[tokio::test]
+    async fn test_generic_conn_send_and_receive() {
+        let transport = MockTransport::new(vec![
+            b"some data".to_vec(),
+        ]);
+        let mut conn = GenericCliConn::from_transport(Box::new(transport));
+
+        conn.send(b"hello").await.unwrap();
+        let data = conn.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(data, b"some data");
+    }
+
+    #[tokio::test]
+    async fn test_generic_conn_from_established() {
+        let transport = MockTransport::new(vec![]);
+        let established = EstablishedPath::new(Box::new(transport));
+        let conn = GenericCliConn::from_established(established);
+        assert_eq!(conn.cmd_timeout, Duration::from_secs(30));
+        assert!(conn.prompt_template().contains("Done"));
+    }
 }

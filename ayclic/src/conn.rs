@@ -1411,4 +1411,273 @@ mod tests {
         let msg = format!("{}", err);
         assert!(msg.contains("Not connected"));
     }
+
+    // === parse_target tests ===
+
+    #[test]
+    fn test_parse_target_ipv4_with_port() {
+        let addr = CiscoIosConn::parse_target("192.168.1.1:2222", &ConnectionType::Ssh).unwrap();
+        assert_eq!(addr.ip().to_string(), "192.168.1.1");
+        assert_eq!(addr.port(), 2222);
+    }
+
+    #[test]
+    fn test_parse_target_ipv4_default_ssh_port() {
+        let addr = CiscoIosConn::parse_target("192.168.1.1", &ConnectionType::Ssh).unwrap();
+        assert_eq!(addr.ip().to_string(), "192.168.1.1");
+        assert_eq!(addr.port(), 22);
+    }
+
+    #[test]
+    fn test_parse_target_ipv4_default_telnet_port() {
+        let addr = CiscoIosConn::parse_target("10.0.0.1", &ConnectionType::Telnet).unwrap();
+        assert_eq!(addr.ip().to_string(), "10.0.0.1");
+        assert_eq!(addr.port(), 23);
+    }
+
+    #[test]
+    fn test_parse_target_ipv4_default_ssh_key_port() {
+        let addr = CiscoIosConn::parse_target("10.0.0.1", &ConnectionType::SshKey).unwrap();
+        assert_eq!(addr.port(), 22);
+    }
+
+    #[test]
+    fn test_parse_target_ipv4_default_ssh_kbd_interactive_port() {
+        let addr =
+            CiscoIosConn::parse_target("10.0.0.1", &ConnectionType::SshKbdInteractive).unwrap();
+        assert_eq!(addr.port(), 22);
+    }
+
+    #[test]
+    fn test_parse_target_bracketed_ipv6_with_port() {
+        let addr = CiscoIosConn::parse_target("[::1]:2222", &ConnectionType::Ssh).unwrap();
+        assert_eq!(addr.ip().to_string(), "::1");
+        assert_eq!(addr.port(), 2222);
+    }
+
+    #[test]
+    fn test_parse_target_bare_ipv6_default_port() {
+        let addr = CiscoIosConn::parse_target("::1", &ConnectionType::Ssh).unwrap();
+        assert_eq!(addr.ip().to_string(), "::1");
+        assert_eq!(addr.port(), 22);
+    }
+
+    #[test]
+    fn test_parse_target_bare_ipv6_default_telnet_port() {
+        let addr = CiscoIosConn::parse_target("::1", &ConnectionType::Telnet).unwrap();
+        assert_eq!(addr.ip().to_string(), "::1");
+        assert_eq!(addr.port(), 23);
+    }
+
+    #[test]
+    fn test_parse_target_invalid_returns_error() {
+        let result = CiscoIosConn::parse_target("not_a_valid_address!!!", &ConnectionType::Ssh);
+        assert!(result.is_err());
+    }
+
+    // === regex_escape tests ===
+
+    #[test]
+    fn test_regex_escape_no_special_chars() {
+        assert_eq!(regex_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_regex_escape_dot() {
+        assert_eq!(regex_escape("a.b"), r"a\.b");
+    }
+
+    #[test]
+    fn test_regex_escape_plus() {
+        assert_eq!(regex_escape("a+b"), r"a\+b");
+    }
+
+    #[test]
+    fn test_regex_escape_star() {
+        assert_eq!(regex_escape("a*b"), r"a\*b");
+    }
+
+    #[test]
+    fn test_regex_escape_question_mark() {
+        assert_eq!(regex_escape("a?b"), r"a\?b");
+    }
+
+    #[test]
+    fn test_regex_escape_parens() {
+        assert_eq!(regex_escape("(a)"), r"\(a\)");
+    }
+
+    #[test]
+    fn test_regex_escape_brackets() {
+        assert_eq!(regex_escape("[a]"), r"\[a\]");
+    }
+
+    #[test]
+    fn test_regex_escape_braces() {
+        assert_eq!(regex_escape("{a}"), r"\{a\}");
+    }
+
+    #[test]
+    fn test_regex_escape_pipe() {
+        assert_eq!(regex_escape("a|b"), r"a\|b");
+    }
+
+    #[test]
+    fn test_regex_escape_caret() {
+        assert_eq!(regex_escape("^a"), r"\^a");
+    }
+
+    #[test]
+    fn test_regex_escape_dollar() {
+        assert_eq!(regex_escape("a$"), r"a\$");
+    }
+
+    #[test]
+    fn test_regex_escape_backslash() {
+        assert_eq!(regex_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn test_regex_escape_all_special_chars() {
+        let input = r".*+?()[]{}|^$\";
+        let expected = r"\.\*\+\?\(\)\[\]\{\}\|\^\$\\";
+        assert_eq!(regex_escape(input), expected);
+    }
+
+    #[test]
+    fn test_regex_escape_empty_string() {
+        assert_eq!(regex_escape(""), "");
+    }
+
+    #[test]
+    fn test_regex_escape_cisco_prompt() {
+        // Typical IOS prompt patterns
+        assert_eq!(regex_escape("#"), "#");
+        assert_eq!(regex_escape("]?"), r"\]\?");
+        assert_eq!(regex_escape("[confirm]"), r"\[confirm\]");
+    }
+
+    // === build_chat_template tests ===
+
+    #[test]
+    fn test_build_chat_template_done_action() {
+        let prompts: Vec<(&str, PromptAction)> = vec![("#", PromptAction::Done)];
+        let template = build_chat_template(&prompts);
+        assert!(template.starts_with("Start\n"));
+        assert!(template.contains("^.*# -> Done"));
+    }
+
+    #[test]
+    fn test_build_chat_template_respond_action() {
+        let prompts: Vec<(&str, PromptAction)> = vec![
+            ("#", PromptAction::Done),
+            ("]?", PromptAction::Respond(b"\n".to_vec())),
+        ];
+        let template = build_chat_template(&prompts);
+        assert!(template.contains("^.*# -> Done"));
+        // The ]? should be escaped, and the response should be trimmed
+        assert!(template.contains(r"\]\?"));
+        assert!(template.contains("-> Send"));
+    }
+
+    #[test]
+    fn test_build_chat_template_respond_trims_newline() {
+        let prompts: Vec<(&str, PromptAction)> = vec![
+            ("]?", PromptAction::Respond(b"yes\n".to_vec())),
+        ];
+        let template = build_chat_template(&prompts);
+        // The response should have the trailing newline trimmed
+        assert!(template.contains(r#"Send "yes""#));
+    }
+
+    #[test]
+    fn test_build_chat_template_empty_prompts() {
+        let prompts: Vec<(&str, PromptAction)> = vec![];
+        let template = build_chat_template(&prompts);
+        assert_eq!(template, "Start\n");
+    }
+
+    #[test]
+    fn test_build_chat_template_special_chars_escaped() {
+        let prompts: Vec<(&str, PromptAction)> = vec![
+            ("[confirm]", PromptAction::Respond(b"\n".to_vec())),
+        ];
+        let template = build_chat_template(&prompts);
+        assert!(template.contains(r"\[confirm\]"));
+    }
+
+    // === CiscoIosConfig default tests (additional) ===
+
+    #[test]
+    fn test_config_default_conntype_is_ssh() {
+        let config = CiscoIosConfig::default();
+        assert_eq!(config.conntype, ConnectionType::Ssh);
+    }
+
+    #[test]
+    fn test_config_default_timeout_values() {
+        let config = CiscoIosConfig::default();
+        assert_eq!(config.timeout.as_secs(), 30);
+        assert_eq!(config.read_timeout.as_secs(), 30);
+    }
+
+    #[test]
+    fn test_config_default_strings_empty() {
+        let config = CiscoIosConfig::default();
+        assert!(config.target.is_empty());
+        assert!(config.username.is_empty());
+        assert!(config.password.is_empty());
+    }
+
+    #[test]
+    fn test_config_default_private_key_none() {
+        let config = CiscoIosConfig::default();
+        assert!(config.private_key.is_none());
+    }
+
+    // === CiscoIosConn::into_generic tests ===
+
+    #[test]
+    fn test_into_generic_from_generic_returns_some() {
+        use crate::raw_transport::MockTransport;
+
+        let transport = MockTransport::new(vec![]);
+        let conn =
+            GenericCliConn::from_transport(Box::new(transport));
+        let ios_conn = CiscoIosConn::from_generic(conn, "test-device");
+        let result = ios_conn.into_generic();
+        assert!(result.is_some());
+    }
+
+    // === ChangeSafety tests ===
+
+    #[test]
+    fn test_change_safety_none() {
+        let safety = ChangeSafety::None;
+        assert_eq!(safety, ChangeSafety::None);
+    }
+
+    #[test]
+    fn test_change_safety_delayed_reload() {
+        let safety = ChangeSafety::DelayedReload { minutes: 5 };
+        assert_eq!(safety, ChangeSafety::DelayedReload { minutes: 5 });
+        assert_ne!(safety, ChangeSafety::DelayedReload { minutes: 10 });
+        assert_ne!(safety, ChangeSafety::None);
+    }
+
+    #[test]
+    fn test_change_safety_clone() {
+        let safety = ChangeSafety::DelayedReload { minutes: 15 };
+        let cloned = safety.clone();
+        assert_eq!(safety, cloned);
+    }
+
+    #[test]
+    fn test_change_safety_debug() {
+        let s = format!("{:?}", ChangeSafety::None);
+        assert_eq!(s, "None");
+        let s = format!("{:?}", ChangeSafety::DelayedReload { minutes: 5 });
+        assert!(s.contains("DelayedReload"));
+        assert!(s.contains("5"));
+    }
 }

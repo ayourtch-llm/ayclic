@@ -693,6 +693,292 @@ Start
         assert!(r.consumed > 0);
     }
 
+    // === DataRecord tests ===
+
+    #[test]
+    fn test_data_record_insert_new_value() {
+        let mut rec = DataRecord::new();
+        rec.insert("key1".to_string(), "value1".to_string());
+        assert_eq!(
+            rec.get("key1"),
+            Some(&Value::Single("value1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_data_record_insert_duplicate_creates_list() {
+        let mut rec = DataRecord::new();
+        rec.insert("key1".to_string(), "value1".to_string());
+        rec.insert("key1".to_string(), "value2".to_string());
+        assert_eq!(
+            rec.get("key1"),
+            Some(&Value::List(vec![
+                "value1".to_string(),
+                "value2".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_data_record_insert_triple_appends_to_list() {
+        let mut rec = DataRecord::new();
+        rec.insert("key1".to_string(), "a".to_string());
+        rec.insert("key1".to_string(), "b".to_string());
+        rec.insert("key1".to_string(), "c".to_string());
+        assert_eq!(
+            rec.get("key1"),
+            Some(&Value::List(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_data_record_append_value_single_to_single() {
+        let mut rec = DataRecord::new();
+        rec.fields
+            .insert("key".to_string(), Value::Single("old".to_string()));
+        rec.append_value("key".to_string(), Value::Single("new".to_string()));
+        // Single appended to Single replaces
+        assert_eq!(
+            rec.get("key"),
+            Some(&Value::Single("new".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_data_record_append_value_single_to_list() {
+        let mut rec = DataRecord::new();
+        rec.fields.insert(
+            "key".to_string(),
+            Value::List(vec!["a".to_string(), "b".to_string()]),
+        );
+        rec.append_value("key".to_string(), Value::Single("c".to_string()));
+        assert_eq!(
+            rec.get("key"),
+            Some(&Value::List(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_data_record_append_value_list_to_list() {
+        let mut rec = DataRecord::new();
+        rec.fields.insert(
+            "key".to_string(),
+            Value::List(vec!["a".to_string()]),
+        );
+        rec.append_value(
+            "key".to_string(),
+            Value::List(vec!["b".to_string(), "c".to_string()]),
+        );
+        assert_eq!(
+            rec.get("key"),
+            Some(&Value::List(vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_data_record_append_value_new_key() {
+        let mut rec = DataRecord::new();
+        rec.append_value("key".to_string(), Value::Single("val".to_string()));
+        assert_eq!(
+            rec.get("key"),
+            Some(&Value::Single("val".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_data_record_remove() {
+        let mut rec = DataRecord::new();
+        rec.insert("key1".to_string(), "value1".to_string());
+        rec.insert("key2".to_string(), "value2".to_string());
+        rec.remove("key1");
+        assert!(rec.get("key1").is_none());
+        assert!(rec.get("key2").is_some());
+    }
+
+    #[test]
+    fn test_data_record_remove_nonexistent() {
+        let mut rec = DataRecord::new();
+        rec.insert("key1".to_string(), "value1".to_string());
+        rec.remove("nonexistent"); // should not panic
+        assert_eq!(rec.get("key1"), Some(&Value::Single("value1".to_string())));
+    }
+
+    #[test]
+    fn test_data_record_overwrite_from() {
+        let mut rec = DataRecord::new();
+        rec.insert("key1".to_string(), "old1".to_string());
+        rec.insert("key2".to_string(), "old2".to_string());
+
+        let mut from = DataRecord::new();
+        from.insert("key2".to_string(), "new2".to_string());
+        from.insert("key3".to_string(), "new3".to_string());
+
+        rec.overwrite_from(from);
+
+        assert_eq!(
+            rec.get("key1"),
+            Some(&Value::Single("old1".to_string()))
+        );
+        assert_eq!(
+            rec.get("key2"),
+            Some(&Value::Single("new2".to_string()))
+        );
+        assert_eq!(
+            rec.get("key3"),
+            Some(&Value::Single("new3".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_data_record_overwrite_from_empty() {
+        let mut rec = DataRecord::new();
+        rec.insert("key1".to_string(), "val".to_string());
+        rec.overwrite_from(DataRecord::new());
+        assert_eq!(rec.get("key1"), Some(&Value::Single("val".to_string())));
+    }
+
+    #[test]
+    fn test_textfsmplus_from_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ayclic_test_template.textfsm");
+        let template_content = r#"Value Hostname (\S+)
+
+Start
+  ^${Hostname}# -> Done
+"#;
+        std::fs::write(&path, template_content).unwrap();
+
+        let fsm = TextFSMPlus::from_file(path.to_str().unwrap());
+        assert_eq!(fsm.curr_state, "Start");
+        assert!(fsm.parser.values.contains_key("Hostname"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_textfsmplus_parser_from_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ayclic_test_parser_template.textfsm");
+        let template_content = r#"Value PORT (\S+)
+Value STATUS (up|down)
+
+Start
+  ^${PORT}\s+${STATUS} -> Record
+"#;
+        std::fs::write(&path, template_content).unwrap();
+
+        let parser = TextFSMPlusParser::from_file(path.to_str().unwrap());
+        assert!(parser.values.contains_key("PORT"));
+        assert!(parser.values.contains_key("STATUS"));
+        assert!(parser.states.contains_key("Start"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_fancy_regex_lookahead() {
+        // Use a pattern with lookahead to trigger the fancy_regex fallback path
+        let template = r#"Value Hostname (\S+)
+
+Start
+  ^(?=Router)${Hostname}# -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        let result = fsm.parse_line("Router1#");
+        assert_eq!(result, Some(NextState::Done));
+        assert_eq!(
+            fsm.curr_record.get("Hostname"),
+            Some(&Value::Single("Router1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_fancy_regex_lookbehind() {
+        // Lookbehind also triggers fancy_regex
+        let template = r#"Value Hostname (\S+)
+
+Start
+  ^${Hostname}(?<=#) -> Done
+"#;
+        let mut fsm = TextFSMPlus::from_str(template);
+        let result = fsm.parse_line("Router1#");
+        assert_eq!(result, Some(NextState::Done));
+    }
+
+    #[test]
+    fn test_data_record_keys() {
+        let mut rec = DataRecord::new();
+        rec.insert("alpha".to_string(), "a".to_string());
+        rec.insert("beta".to_string(), "b".to_string());
+        let keys: Vec<&String> = rec.keys().collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&&"alpha".to_string()));
+        assert!(keys.contains(&&"beta".to_string()));
+    }
+
+    #[test]
+    fn test_data_record_iter() {
+        let mut rec = DataRecord::new();
+        rec.insert("x".to_string(), "1".to_string());
+        rec.insert("y".to_string(), "2".to_string());
+        let items: Vec<(&String, &Value)> = rec.iter().collect();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_data_record_equality() {
+        let mut rec1 = DataRecord::new();
+        rec1.insert("a".to_string(), "1".to_string());
+
+        let mut rec2 = DataRecord::new();
+        rec2.insert("a".to_string(), "1".to_string());
+
+        assert_eq!(rec1, rec2);
+    }
+
+    #[test]
+    fn test_data_record_inequality_different_values() {
+        let mut rec1 = DataRecord::new();
+        rec1.insert("a".to_string(), "1".to_string());
+
+        let mut rec2 = DataRecord::new();
+        rec2.insert("a".to_string(), "2".to_string());
+
+        assert_ne!(rec1, rec2);
+    }
+
+    #[test]
+    fn test_data_record_inequality_different_keys() {
+        let mut rec1 = DataRecord::new();
+        rec1.insert("a".to_string(), "1".to_string());
+
+        let mut rec2 = DataRecord::new();
+        rec2.insert("b".to_string(), "1".to_string());
+
+        assert_ne!(rec1, rec2);
+    }
+
+    #[test]
+    fn test_data_record_new_is_empty() {
+        let rec = DataRecord::new();
+        assert!(rec.fields.is_empty());
+        assert!(rec.record_key.is_none());
+    }
+
     #[test]
     fn test_full_interactive_template_parses() {
         let template = r#"

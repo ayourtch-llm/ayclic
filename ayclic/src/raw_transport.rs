@@ -624,6 +624,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_logging_transport_into_inner() {
+        let inner = MockTransport::new(vec![
+            b"hello".to_vec(),
+        ]);
+
+        let transcript = new_transcript();
+        let transport = LoggingTransport::new(Box::new(inner), transcript.clone());
+
+        // Extract the inner transport
+        let mut extracted = transport.into_inner();
+
+        // The extracted transport should still work
+        let chunk = extracted.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(chunk, b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_file_transcript_sink_open_and_write() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ayclic_test_transcript_open.txt");
+
+        {
+            let mut sink = FileTranscriptSink::open(&path).unwrap();
+            sink.record(TranscriptEntry {
+                direction: TranscriptDirection::Sent,
+                data: b"hello".to_vec(),
+                timestamp: std::time::Instant::now(),
+            });
+            sink.record(TranscriptEntry {
+                direction: TranscriptDirection::Received,
+                data: b"world\n".to_vec(),
+                timestamp: std::time::Instant::now(),
+            });
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(">>> hello"));
+        assert!(content.contains("<<< world"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_file_transcript_sink_open_append() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ayclic_test_transcript_append.txt");
+
+        // Write initial content
+        std::fs::write(&path, "existing content\n").unwrap();
+
+        {
+            let mut sink = FileTranscriptSink::open_append(&path).unwrap();
+            sink.record(TranscriptEntry {
+                direction: TranscriptDirection::Sent,
+                data: b"appended".to_vec(),
+                timestamp: std::time::Instant::now(),
+            });
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("existing content"));
+        assert!(content.contains(">>> appended"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_with_file_logging() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ayclic_test_with_file_logging.txt");
+
+        let inner = MockTransport::new(vec![
+            b"response data".to_vec(),
+        ]);
+
+        let mut transport = with_file_logging(Box::new(inner), &path).unwrap();
+
+        transport.send(b"command").await.unwrap();
+        let chunk = transport.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(chunk, b"response data");
+
+        // Drop transport to flush file
+        drop(transport);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(">>> command"));
+        assert!(content.contains("<<< response data"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_with_file_logging_append() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("ayclic_test_with_file_logging_append.txt");
+
+        // Write some initial content
+        std::fs::write(&path, "pre-existing\n").unwrap();
+
+        let inner = MockTransport::new(vec![
+            b"response".to_vec(),
+        ]);
+
+        let mut transport = with_file_logging_append(Box::new(inner), &path).unwrap();
+
+        transport.send(b"cmd").await.unwrap();
+        transport.receive(Duration::from_secs(1)).await.unwrap();
+
+        drop(transport);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("pre-existing"));
+        assert!(content.contains(">>> cmd"));
+        assert!(content.contains("<<< response"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn test_vec_transcript_sink_entries() {
+        let mut sink = VecTranscriptSink::new();
+        assert!(sink.entries().is_empty());
+
+        sink.record(TranscriptEntry {
+            direction: TranscriptDirection::Sent,
+            data: b"test1".to_vec(),
+            timestamp: std::time::Instant::now(),
+        });
+        sink.record(TranscriptEntry {
+            direction: TranscriptDirection::Received,
+            data: b"test2".to_vec(),
+            timestamp: std::time::Instant::now(),
+        });
+
+        assert_eq!(sink.entries().len(), 2);
+        assert_eq!(sink.entries()[0].direction, TranscriptDirection::Sent);
+        assert_eq!(sink.entries()[0].data, b"test1");
+        assert_eq!(sink.entries()[1].direction, TranscriptDirection::Received);
+        assert_eq!(sink.entries()[1].data, b"test2");
+    }
+
+    #[tokio::test]
+    async fn test_logging_transport_close() {
+        let inner = MockTransport::new(vec![]);
+        let transcript = new_transcript();
+        let mut transport = LoggingTransport::new(Box::new(inner), transcript.clone());
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_mock_transport_with_textfsmplus_feed() {
         use aytextfsmplus::*;
 

@@ -440,6 +440,74 @@ Start
     }
 
     #[tokio::test]
+    async fn test_established_path_new_and_into_transport() {
+        let transport = MockTransport::new(vec![
+            b"data chunk".to_vec(),
+        ]);
+
+        let established = EstablishedPath::new(Box::new(transport));
+
+        // Round-trip: new -> into_transport -> use transport
+        let mut transport = established.into_transport();
+        let chunk = transport.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(chunk, b"data chunk");
+    }
+
+    #[tokio::test]
+    async fn test_established_path_send_receive_close() {
+        let transport = MockTransport::new(vec![
+            b"response".to_vec(),
+        ]);
+
+        let mut established = EstablishedPath::new(Box::new(transport));
+
+        established.send(b"command").await.unwrap();
+        let data = established.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(data, b"response");
+        established.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connection_path_with_timeout() {
+        let path = ConnectionPath::new(vec![])
+            .with_timeout(Duration::from_secs(120));
+
+        assert_eq!(path.interactive_timeout, Duration::from_secs(120));
+    }
+
+    #[tokio::test]
+    async fn test_connection_path_default_timeout() {
+        let path = ConnectionPath::new(vec![]);
+        assert_eq!(path.interactive_timeout, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn test_connection_path_connect_no_transport_returns_error() {
+        // A path with only interactive hops but no transport should fail
+        let path = ConnectionPath::new(vec![
+            Hop::Interactive(TextFSMPlus::from_str("Start\n  ^# -> Done\n")),
+        ]);
+
+        let result = path.connect(&NoVars, &NoFuncs).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CiscoIosError::NotConnected => {}
+            other => panic!("Expected NotConnected, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connection_path_connect_empty_hops_returns_error() {
+        let path = ConnectionPath::new(vec![]);
+        let result = path.connect(&NoVars, &NoFuncs).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CiscoIosError::NotConnected => {}
+            other => panic!("Expected NotConnected, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
     async fn test_established_path_run_interactive() {
         let transport = MockTransport::new(vec![
             b"Router1#".to_vec(),

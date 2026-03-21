@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         CiscoIosConn::new_with_key(&target, &username, &private_key).await?
     } else {
-        CiscoIosConn::new_legacy(&target, conntype, &username, &password).await?
+        CiscoIosConn::new(&target, conntype, &username, &password).await?
     };
 
     eprintln!("Connected via {}!", auth_label);

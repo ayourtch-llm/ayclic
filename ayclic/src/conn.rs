@@ -21,32 +21,43 @@ use crate::transport::{
     SshTransport, TelnetTransport,
 };
 
-/// Adapter that wraps a `Box<dyn RawTransport>` as a `CiscoTransport`.
-/// This bridges the new vendor-neutral transport layer with the existing
-/// Cisco-specific code that expects `CiscoTransport`.
-struct RawTransportAdapter(Box<dyn crate::raw_transport::RawTransport>);
-
-impl std::fmt::Debug for RawTransportAdapter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawTransportAdapter")
-            .field("inner", &self.0)
-            .finish()
+/// Escape a string for use in a regex pattern.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        match c {
+            '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$'
+            | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
     }
+    out
 }
 
-#[async_trait::async_trait]
-impl CiscoTransport for RawTransportAdapter {
-    async fn send(&mut self, data: &[u8]) -> Result<(), CiscoIosError> {
-        self.0.send(data).await
+/// Build a TextFSMPlus template string from aho-corasick prompt actions.
+/// This bridges the old PromptAction API with the new template engine.
+fn build_chat_template(prompts: &[(&str, PromptAction)]) -> String {
+    let mut template = String::from("Start\n");
+    for (pattern, action) in prompts {
+        let escaped = regex_escape(pattern);
+        match action {
+            PromptAction::Done => {
+                template.push_str(&format!("  ^.*{} -> Done\n", escaped));
+            }
+            PromptAction::Respond(response) => {
+                let resp_str = String::from_utf8_lossy(response);
+                let resp_trimmed = resp_str.trim_end_matches('\n');
+                template.push_str(&format!(
+                    "  ^.*{} -> Send \"{}\" Start\n",
+                    escaped, resp_trimmed
+                ));
+            }
+        }
     }
-
-    async fn receive(&mut self, timeout: Duration) -> Result<Vec<u8>, CiscoIosError> {
-        self.0.receive(timeout).await
-    }
-
-    async fn close(&mut self) -> Result<(), CiscoIosError> {
-        self.0.close().await
-    }
+    template
 }
 
 /// Determine the local IP address that can reach a given target.
@@ -321,19 +332,27 @@ impl Default for CiscoIosConfig {
 /// telnet, SSH password, SSH public key, or SSH keyboard-interactive
 /// authentication. All methods share the same `run_cmd` / `disconnect` API.
 ///
-/// Internally uses the `CiscoTransport` trait for a unified send/receive
-/// codepath across all protocols. Pattern matching uses aho-corasick
-/// for efficient multi-pattern detection.
+/// Internally uses `GenericCliConn` with the Cisco IOS prompt template
+/// for the template-driven path, or `CiscoTransport` for legacy
+/// constructors.
 pub struct CiscoIosConn {
     config: CiscoIosConfig,
-    transport: Box<dyn CiscoTransport>,
+    /// The connection — either a GenericCliConn (new path) or a
+    /// CiscoTransport (legacy path). Both support run_cmd/config_atomic.
+    inner: CiscoIosConnInner,
+}
+
+enum CiscoIosConnInner {
+    /// Template-driven path (new constructors)
+    Generic(GenericCliConn),
+    /// Legacy path (old constructors using CiscoTelnet/CiscoConn directly)
+    Legacy(Box<dyn CiscoTransport>),
 }
 
 impl std::fmt::Debug for CiscoIosConn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CiscoIosConn")
             .field("config", &self.config)
-            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -437,7 +456,18 @@ impl CiscoIosConn {
 
         debug!("Connected to {} successfully (template-driven)", target);
 
-        Ok(Self::from_generic(conn, target))
+        Ok(Self {
+            config: CiscoIosConfig {
+                target: target.to_string(),
+                conntype,
+                username: username.to_string(),
+                password: password.to_string(),
+                private_key: None,
+                timeout,
+                read_timeout,
+            },
+            inner: CiscoIosConnInner::Generic(conn),
+        })
     }
 
     /// Legacy: create a new connection using the old Cisco-specific
@@ -530,7 +560,7 @@ impl CiscoIosConn {
                 timeout,
                 read_timeout,
             },
-            transport,
+            inner: CiscoIosConnInner::Legacy(transport),
         })
     }
 
@@ -597,23 +627,21 @@ impl CiscoIosConn {
                 timeout: Duration::from_secs(30),
                 read_timeout: Duration::from_secs(30),
             },
-            transport: Box::new(SshTransport(conn)),
+            inner: CiscoIosConnInner::Legacy(Box::new(SshTransport(conn))),
         })
     }
 
     /// Create from a `GenericCliConn`.
     ///
     /// The connection should already be authenticated and at a device
-    /// prompt. This constructor bridges the vendor-neutral `GenericCliConn`
-    /// with the Cisco-specific `CiscoIosConn` functionality.
+    /// prompt. Uses the `GenericCliConn` directly — no adapter layer.
     pub fn from_generic(conn: GenericCliConn, target: &str) -> Self {
-        let transport = conn.into_transport();
         Self {
             config: CiscoIosConfig {
                 target: target.to_string(),
                 ..Default::default()
             },
-            transport: Box::new(RawTransportAdapter(transport)),
+            inner: CiscoIosConnInner::Generic(conn),
         }
     }
 
@@ -622,45 +650,41 @@ impl CiscoIosConn {
     /// The path should include all necessary Transport and Interactive
     /// hops to reach the device and authenticate. After the path
     /// completes, the device should be at a privileged prompt (`#`).
-    ///
-    /// Example:
-    /// ```ignore
-    /// let path = ConnectionPath::new(vec![
-    ///     Hop::Transport(TransportSpec::Ssh { target, auth }),
-    ///     Hop::Interactive(cisco_login_template),
-    /// ]);
-    /// let conn = CiscoIosConn::from_path(path, "10.1.1.1", &NoVars, &NoFuncs).await?;
-    /// ```
     pub async fn from_path(
         path: ConnectionPath,
         target: &str,
         vars: &(impl aycalc::GetVar + Sync),
         funcs: &(impl aycalc::CallFunc + Sync),
     ) -> Result<Self, CiscoIosError> {
-        let conn = GenericCliConn::connect(path, vars, funcs).await?;
+        let conn = GenericCliConn::connect(path, vars, funcs).await?
+            .with_prompt_template(crate::templates::CISCO_IOS_PROMPT);
         Ok(Self::from_generic(conn, target))
     }
 
     /// Execute a command on the connected device and return its output.
-    ///
-    /// Sends the command, then waits for the `#` prompt using aho-corasick
-    /// pattern matching over the transport. This is the single unified
-    /// codepath for both telnet and SSH.
     pub async fn run_cmd(&mut self, cmd: &str) -> Result<String, CiscoIosError> {
         debug!("run_cmd on {}: {}", self.config.target, cmd);
-        let prompt = AhoCorasick::new(&["#"]).unwrap();
-        self.transport
-            .send(format!("{}\n", cmd).as_bytes())
-            .await?;
-        let (data, _) = receive_until_match(
-            self.transport.as_mut(),
-            &prompt,
-            self.config.read_timeout,
-            vec![],
-        )
-        .await?;
-        String::from_utf8(data)
-            .map_err(|e| CiscoIosError::HttpUploadError(format!("Invalid UTF-8: {}", e)))
+        match &mut self.inner {
+            CiscoIosConnInner::Generic(conn) => {
+                conn.run_cmd(cmd, &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs)
+                    .await
+            }
+            CiscoIosConnInner::Legacy(transport) => {
+                let prompt = AhoCorasick::new(&["#"]).unwrap();
+                transport
+                    .send(format!("{}\n", cmd).as_bytes())
+                    .await?;
+                let (data, _) = receive_until_match(
+                    transport.as_mut(),
+                    &prompt,
+                    self.config.read_timeout,
+                    vec![],
+                )
+                .await?;
+                String::from_utf8(data)
+                    .map_err(|e| CiscoIosError::HttpUploadError(format!("Invalid UTF-8: {}", e)))
+            }
+        }
     }
 
     /// Execute an interactive command, auto-responding to IOS prompts.
@@ -671,23 +695,72 @@ impl CiscoIosConn {
     ///
     /// Custom prompt/response pairs can be provided; if `None`, uses
     /// the standard IOS confirmation prompts.
+    ///
+    /// For template-driven connections, consider using `run_cmd_with_template()`
+    /// instead for full TextFSMPlus flexibility.
     pub async fn run_cmd_chat(
         &mut self,
         cmd: &str,
         extra_prompts: Option<&[(&str, PromptAction)]>,
     ) -> Result<String, CiscoIosError> {
         debug!("run_cmd_chat on {}: {}", self.config.target, cmd);
-        let prompts = match extra_prompts {
-            Some(custom) => custom.to_vec(),
-            None => ios_prompt_actions(),
-        };
-        run_interactive(
-            self.transport.as_mut(),
-            cmd,
-            &prompts,
-            self.config.read_timeout,
-        )
-        .await
+        match &mut self.inner {
+            CiscoIosConnInner::Generic(conn) => {
+                // Build a template from the prompt actions
+                let prompts = match extra_prompts {
+                    Some(custom) => custom.to_vec(),
+                    None => ios_prompt_actions(),
+                };
+                // Convert aho-corasick prompts to a TextFSMPlus template
+                let template = build_chat_template(&prompts);
+                conn.run_cmd_with_template(
+                    cmd,
+                    &template,
+                    &aytextfsmplus::NoVars,
+                    &aytextfsmplus::NoFuncs,
+                )
+                .await
+            }
+            CiscoIosConnInner::Legacy(transport) => {
+                let prompts = match extra_prompts {
+                    Some(custom) => custom.to_vec(),
+                    None => ios_prompt_actions(),
+                };
+                run_interactive(
+                    transport.as_mut(),
+                    cmd,
+                    &prompts,
+                    self.config.read_timeout,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Execute a command using a TextFSMPlus template for prompt handling.
+    ///
+    /// This is the most flexible command execution method — the template
+    /// controls prompt detection, interactive responses, and completion.
+    /// Only available on template-driven connections (not legacy).
+    pub async fn run_cmd_with_template(
+        &mut self,
+        cmd: &str,
+        template: &str,
+    ) -> Result<String, CiscoIosError> {
+        match &mut self.inner {
+            CiscoIosConnInner::Generic(conn) => {
+                conn.run_cmd_with_template(
+                    cmd,
+                    template,
+                    &aytextfsmplus::NoVars,
+                    &aytextfsmplus::NoFuncs,
+                )
+                .await
+            }
+            CiscoIosConnInner::Legacy(_) => Err(CiscoIosError::InvalidConnectionType(
+                "run_cmd_with_template requires template-driven connection (use new(), not new_legacy())".to_string(),
+            )),
+        }
     }
 
     /// Atomically apply a configuration snippet to the device.
@@ -722,13 +795,12 @@ impl CiscoIosConn {
                 ("[confirm]", PromptAction::Respond(b"\n".to_vec())),
                 ("]?", PromptAction::Respond(b"\n".to_vec())),
             ];
-            let reload_output = run_interactive(
-                self.transport.as_mut(),
-                &format!("reload in {}", minutes),
-                &reload_prompts,
-                self.config.read_timeout,
-            )
-            .await?;
+            let reload_output = self
+                .run_cmd_chat(
+                    &format!("reload in {}", minutes),
+                    Some(&reload_prompts),
+                )
+                .await?;
             info!("config_atomic: reload scheduled: {}", reload_output.trim());
         }
 
@@ -865,7 +937,19 @@ impl CiscoIosConn {
     /// Disconnect from the device
     pub async fn disconnect(&mut self) -> Result<(), CiscoIosError> {
         info!("Disconnecting from {}", self.config.target);
-        self.transport.close().await
+        match &mut self.inner {
+            CiscoIosConnInner::Generic(conn) => conn.close().await,
+            CiscoIosConnInner::Legacy(transport) => transport.close().await,
+        }
+    }
+
+    /// Extract the GenericCliConn (only for template-driven connections).
+    /// Consumes the CiscoIosConn.
+    pub fn into_generic(self) -> Option<GenericCliConn> {
+        match self.inner {
+            CiscoIosConnInner::Generic(conn) => Some(conn),
+            CiscoIosConnInner::Legacy(_) => None,
+        }
     }
 
     /// Get the target address

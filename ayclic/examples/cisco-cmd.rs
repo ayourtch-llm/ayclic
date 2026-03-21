@@ -41,6 +41,7 @@ fn print_usage(prog: &str) {
     eprintln!("  --ssh               Use SSH with password authentication (default)");
     eprintln!("  --kbd-interactive   Use SSH with keyboard-interactive authentication");
     eprintln!("  --key <file>        Use SSH with RSA public key authentication");
+    eprintln!("  --legacy            Use legacy transport (CiscoTelnet/CiscoConn directly)");
     eprintln!();
     eprintln!("Multiple commands can be separated with semicolons.");
     eprintln!();
@@ -74,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse flags
     let mut conntype = ConnectionType::Ssh;
     let mut key_file: Option<String> = None;
+    let mut use_legacy = false;
     let mut positional: Vec<String> = Vec::new();
     let mut skip_next = false;
 
@@ -86,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--telnet" => conntype = ConnectionType::Telnet,
             "--ssh" => conntype = ConnectionType::Ssh,
             "--kbd-interactive" => conntype = ConnectionType::SshKbdInteractive,
+            "--legacy" => use_legacy = true,
             "--key" => {
                 conntype = ConnectionType::SshKey;
                 if let Some(next) = args.get(i + 1) {
@@ -157,6 +160,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Failed to read private key {}: {}", key_path, e))?;
 
         CiscoIosConn::new_with_key(&target, &username, &private_key).await?
+    } else if use_legacy {
+        CiscoIosConn::new_legacy(&target, conntype, &username, &password).await?
     } else {
         CiscoIosConn::new(&target, conntype, &username, &password).await?
     };

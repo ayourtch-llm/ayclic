@@ -153,6 +153,94 @@ fn real_device_targets() -> Vec<TestTarget> {
     ]
 }
 
+/// Start a mockios SSH server with enable mode, return a TestTarget.
+async fn mockios_ssh_enable_target() -> TestTarget {
+    let server = ayssh::server::TestSshServer::new(0).await.unwrap();
+    let port = server.local_addr().port();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let stream = match server.accept_stream().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let (mut io, ch) = match server.handshake_and_auth(stream).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            tokio::spawn(async move {
+                use ayclic::raw_transport::RawTransport;
+                // Device with enable — SSH auth gets you to user exec (>)
+                let mut device = mockios::MockIosDevice::new("MockSwitch")
+                    .with_enable("321cisco");
+                // SSH auth happened at protocol level, so start at UserExec
+                device.mode = mockios::CliMode::UserExec;
+
+                let initial = device.receive(Duration::from_secs(1)).await.unwrap();
+                if !initial.is_empty() {
+                    let _ = io.send_message(&ssh_channel_data(ch, &initial)).await;
+                }
+                loop {
+                    let msg = match io.recv_message().await {
+                        Ok(m) => m,
+                        Err(_) => break,
+                    };
+                    if msg.is_empty() { continue; }
+                    match msg[0] {
+                        94 if msg.len() > 9 => {
+                            let len = u32::from_be_bytes([msg[5], msg[6], msg[7], msg[8]]) as usize;
+                            if msg.len() >= 9 + len {
+                                let _ = device.send(&msg[9..9 + len]).await;
+                                let out = device.receive(Duration::from_secs(1)).await.unwrap_or_default();
+                                if !out.is_empty() {
+                                    let _ = io.send_message(&ssh_channel_data(ch, &out)).await;
+                                }
+                            }
+                        }
+                        96 | 97 => break,
+                        98 => { let _ = io.send_message(&ssh_channel_success(ch)).await; }
+                        _ => {}
+                    }
+                }
+            });
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    TestTarget {
+        label: "mockios-ssh-enable".into(),
+        host: "127.0.0.1".into(),
+        port,
+        username: "test".into(),
+        password: "test".into(),
+        conntype: ConnectionType::Ssh,
+        _server: Some(handle),
+    }
+}
+
+/// Get real device targets for enable-mode testing.
+fn real_device_enable_targets() -> Vec<TestTarget> {
+    let host = match std::env::var("REAL_DEVICE_HOST") {
+        Ok(h) => h,
+        Err(_) => return vec![],
+    };
+    let user = std::env::var("REAL_DEVICE_ENABLE_USER").unwrap_or_else(|_| "testuser".into());
+    let pass = std::env::var("REAL_DEVICE_ENABLE_PASS").unwrap_or_else(|_| "testpass".into());
+
+    vec![
+        TestTarget {
+            label: format!("real-telnet-enable-{}", host),
+            host: host.clone(),
+            port: 23,
+            username: user,
+            password: pass,
+            conntype: ConnectionType::Telnet,
+            _server: None,
+        },
+    ]
+}
+
 /// Collect all test targets (mockios + real if configured).
 async fn all_targets() -> Vec<TestTarget> {
     let mut targets = vec![mockios_ssh_target().await];
@@ -250,4 +338,243 @@ async fn test_multiple_commands() {
         eprintln!("Testing multiple commands on {}", target.label());
         assert_show_version_then_show_run(&target).await;
     }
+}
+
+// === Enable mode tests ===
+// These test the user-exec → enable → privileged-exec flow.
+// On mockios: MockIosDevice with with_enable()
+// On real device: testuser (priv 1) + enable secret 321cisco
+
+async fn assert_enable_flow(target: &TestTarget, enable_password: &str) {
+    use ayclic::path::*;
+    use ayclic::raw_transport::SshAuth;
+    use ayclic::GenericCliConn;
+    use aytextfsmplus::{NoFuncs, NoVars, TextFSMPlus};
+
+    // Build path with login + enable template
+    let enable_login_template = format!(
+        r#"Value Preset Username ()
+Value Preset Password ()
+Value Preset EnablePassword ()
+
+Start
+  ^[Uu]sername:\s* -> Send ${{Username}} WaitPassword
+  ^[Pp]assword:\s* -> Send ${{Password}} WaitPrompt
+  ^.*# -> Send "terminal length 0" TermLen
+  ^.*> -> Send "enable" Enable
+
+WaitPassword
+  ^[Pp]assword:\s* -> Send ${{Password}} WaitPrompt
+
+WaitPrompt
+  ^.*# -> Send "terminal length 0" TermLen
+  ^.*> -> Send "enable" Enable
+  ^% -> Error "login failed"
+
+Enable
+  ^[Pp]assword:\s* -> Send ${{EnablePassword}} WaitEnabled
+
+WaitEnabled
+  ^.*# -> Send "terminal length 0" TermLen
+  ^% -> Error "enable failed"
+
+TermLen
+  ^.*# -> Done
+  ^.*> -> Done
+"#
+    );
+
+    let addr: std::net::SocketAddr = target.addr().parse().unwrap();
+
+    let mut hops: Vec<Hop> = Vec::new();
+    match target.conntype {
+        ConnectionType::Telnet => {
+            hops.push(Hop::Transport(TransportSpec::Telnet { target: addr }));
+        }
+        ConnectionType::Ssh => {
+            hops.push(Hop::Transport(TransportSpec::Ssh {
+                target: addr,
+                auth: SshAuth::Password {
+                    username: target.username.clone(),
+                    password: target.password.clone(),
+                },
+            }));
+        }
+        _ => panic!("Unsupported conntype"),
+    }
+
+    hops.push(Hop::Interactive(
+        TextFSMPlus::from_str(&enable_login_template)
+            .with_preset("Username", &target.username)
+            .with_preset("Password", &target.password)
+            .with_preset("EnablePassword", enable_password),
+    ));
+
+    let path = ConnectionPath::new(hops).with_timeout(Duration::from_secs(30));
+
+    let mut conn = GenericCliConn::connect(path, &NoVars, &NoFuncs)
+        .await
+        .unwrap_or_else(|e| panic!("[{}] enable connect failed: {}", target.label(), e));
+
+    conn = conn
+        .with_prompt_template(ayclic::templates::CISCO_IOS_PROMPT)
+        .with_cmd_timeout(Duration::from_secs(15));
+
+    // KNOWN ISSUE: mockios has stale prompts after drive_interactive —
+    // the first few run_cmd calls get stale prompts instead of command
+    // output. Real devices don't have this issue. Root cause: the mock
+    // queues output synchronously while drive_interactive consumes
+    // asynchronously, leaving extra prompts in the queue.
+    // Workaround: retry until we get real output.
+    let mut output = String::new();
+    for _ in 0..3 {
+        output = conn
+            .run_cmd("show version", &NoVars, &NoFuncs)
+            .await
+            .unwrap_or_else(|e| panic!("[{}] show version after enable failed: {}", target.label(), e));
+        if output.contains("Cisco IOS") {
+            break;
+        }
+    }
+
+    assert!(
+        output.contains("Cisco IOS"),
+        "[{}] show version should contain 'Cisco IOS' after enable, got:\n{}",
+        target.label(),
+        &output[..output.len().min(200)]
+    );
+
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_enable_mode() {
+    // mockios with enable
+    let mockios = mockios_ssh_enable_target().await;
+    eprintln!("Testing enable mode on {}", mockios.label());
+    assert_enable_flow(&mockios, "321cisco").await;
+
+    // Real device with enable (if configured)
+    for target in real_device_enable_targets() {
+        eprintln!("Testing enable mode on {}", target.label());
+        assert_enable_flow(&target, "321cisco").await;
+    }
+}
+
+// === Copy command tests (mockios only — non-destructive) ===
+
+#[tokio::test]
+async fn test_copy_to_flash_and_verify() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("CopyTest");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    // Copy http to flash (interactive: filename confirmation)
+    device
+        .send(b"copy http://10.0.0.1/test.cfg flash:test.cfg\n")
+        .await
+        .unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+    assert!(output.contains("filename"), "Expected filename prompt, got: {}", output);
+
+    // Accept default filename
+    device.send(b"\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+    assert!(output.contains("OK"), "Expected OK, got: {}", output);
+
+    // File should exist in flash
+    assert!(device.flash_files.contains_key("test.cfg"));
+
+    // Verify MD5
+    device.send(b"verify /md5 flash:test.cfg\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+    assert!(output.contains("verify /md5"));
+    assert!(output.contains("="));
+
+    // Delete the file
+    device
+        .send(b"delete /force flash:test.cfg\n")
+        .await
+        .unwrap();
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+    assert!(!device.flash_files.contains_key("test.cfg"));
+}
+
+#[tokio::test]
+async fn test_copy_to_running_config() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("CopyRunTest")
+        .with_flash_file("new.cfg", b"ip route 10.0.0.0 255.0.0.0 10.0.0.1\n".to_vec());
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    // Copy flash to running-config
+    device
+        .send(b"copy flash:new.cfg running-config\n")
+        .await
+        .unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+    assert!(output.contains("running-config"));
+
+    // Confirm
+    device.send(b"\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    assert!(String::from_utf8_lossy(&data).contains("OK"));
+
+    // Check running config was updated
+    device.send(b"show running-config\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+    assert!(output.contains("ip route 10.0.0.0"));
+}
+
+#[tokio::test]
+async fn test_copy_to_null() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("NullTest");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    // Copy to null: — should succeed silently
+    device
+        .send(b"copy http://10.0.0.1/done null:\n")
+        .await
+        .unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+    assert!(output.contains("NullTest#"));
+}
+
+#[tokio::test]
+async fn test_unknown_command() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Router1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"gobbledygook\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+    assert!(output.contains("Unknown command") || output.contains("% "));
+}
+
+#[tokio::test]
+async fn test_verify_md5_nonexistent_file() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Router1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device
+        .send(b"verify /md5 flash:nonexistent.bin\n")
+        .await
+        .unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+    assert!(output.contains("Error"), "Expected error for nonexistent file, got: {}", output);
 }

@@ -67,7 +67,7 @@ pub struct MockIosDevice {
     /// Running configuration lines.
     running_config: Vec<String>,
     /// Flash files: filename → content.
-    flash_files: HashMap<String, Vec<u8>>,
+    pub flash_files: HashMap<String, Vec<u8>>,
     /// Username for login (None = skip login).
     username: Option<String>,
     /// Password for login.
@@ -114,6 +114,8 @@ enum PendingInteractive {
     },
     /// Reload save confirmation (yes/no).
     ReloadSave,
+    /// Enable password prompt.
+    EnablePassword,
 }
 
 impl std::fmt::Debug for MockIosDevice {
@@ -368,7 +370,8 @@ impl MockIosDevice {
         let cmd = line.to_lowercase();
         if cmd == "enable" {
             if self.enable_password.is_some() {
-                self.queue_output("Password: ");
+                self.pending_interactive = Some(PendingInteractive::EnablePassword);
+                self.queue_output("\nPassword: ");
             } else {
                 self.mode = CliMode::PrivilegedExec;
                 self.queue_output(&format!("\n{}", self.prompt()));
@@ -493,6 +496,12 @@ impl MockIosDevice {
         let source = parts[1].to_string();
         let dest = parts[2].to_string();
 
+        if dest == "null:" {
+            // copy X null: — used for /done endpoint, discard silently
+            self.queue_output(&format!("\n{}", self.prompt()));
+            return;
+        }
+
         if source.starts_with("http://") {
             // HTTP copy — simulate download
             // Extract filename from URL
@@ -535,9 +544,6 @@ impl MockIosDevice {
                     "\n[OK]\n{}", self.prompt()
                 ));
             }
-        } else if dest == "null:" {
-            // copy X null: — used for /done endpoint
-            self.queue_output(&format!("\n{}", self.prompt()));
         } else {
             self.pending_interactive = Some(PendingInteractive::CopyConfirm {
                 source,
@@ -683,6 +689,16 @@ impl MockIosDevice {
                         self.prompt()
                     ));
                 }
+            }
+            PendingInteractive::EnablePassword => {
+                if let Some(ref expected) = self.enable_password {
+                    if line == expected {
+                        self.mode = CliMode::PrivilegedExec;
+                        self.queue_output(&format!("\n{}", self.prompt()));
+                        return;
+                    }
+                }
+                self.queue_output(&format!("\n% Access denied\n{}", self.prompt()));
             }
             PendingInteractive::ReloadConfirm { .. } => {
                 // Enter reloading state — subsequent send/receive will error

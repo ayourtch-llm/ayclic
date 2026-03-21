@@ -55,7 +55,7 @@ pub enum CliMode {
 /// Responses are queued internally and returned on the next `receive()`.
 pub struct MockIosDevice {
     hostname: String,
-    mode: CliMode,
+    pub mode: CliMode,
     /// Pending output to be returned on next receive().
     output_queue: Vec<u8>,
     /// Registered command handlers: command prefix → response.
@@ -98,7 +98,7 @@ enum PendingInteractive {
     },
     /// Reload confirmation.
     ReloadConfirm {
-        minutes: Option<u32>,
+        _minutes: Option<u32>,
     },
     /// Reload save confirmation (yes/no).
     ReloadSave,
@@ -476,14 +476,14 @@ impl MockIosDevice {
                 self.prompt()
             ));
         } else if cmd.starts_with("reload in ") {
-            let minutes = cmd
+            let _minutes = cmd
                 .trim_start_matches("reload in ")
                 .parse::<u32>()
                 .ok();
             self.pending_interactive = Some(PendingInteractive::ReloadSave);
             self.queue_output("\nSystem configuration has been modified. Save? [yes/no]: ");
         } else {
-            self.pending_interactive = Some(PendingInteractive::ReloadConfirm { minutes: None });
+            self.pending_interactive = Some(PendingInteractive::ReloadConfirm { _minutes: None });
             self.queue_output("\nProceed with reload? [confirm]");
         }
     }
@@ -499,7 +499,7 @@ impl MockIosDevice {
 
     fn handle_interactive_response(&mut self, line: &str, pending: PendingInteractive) {
         match pending {
-            PendingInteractive::CopyConfirm { source, dest } => {
+            PendingInteractive::CopyConfirm { source: _, dest: _ } => {
                 // Any response confirms
                 self.queue_output(&format!(
                     "\n[OK - 0 bytes]\n\n{}", self.prompt()
@@ -554,7 +554,7 @@ impl MockIosDevice {
             PendingInteractive::ReloadSave => {
                 // yes/no to save before reload
                 self.pending_interactive =
-                    Some(PendingInteractive::ReloadConfirm { minutes: None });
+                    Some(PendingInteractive::ReloadConfirm { _minutes: None });
                 self.queue_output("\nProceed with reload? [confirm]");
             }
         }
@@ -670,7 +670,6 @@ fn default_running_config(hostname: &str) -> Vec<String> {
 
 fn compute_md5(data: &[u8]) -> String {
     // Simple MD5 using the same approach as ayclic
-    use std::io::Write;
     let mut hasher = Md5Hasher::new();
     hasher.update(data);
     hasher.finalize()
@@ -701,7 +700,7 @@ impl Md5Hasher {
         // a fake but deterministic "hash" that's sufficient for mock testing.
         // Tests that need real MD5 verification should pre-compute the hash.
         let mut hash: u128 = 0;
-        for (i, &byte) in self.data.iter().enumerate() {
+        for (_i, &byte) in self.data.iter().enumerate() {
             hash = hash.wrapping_mul(31).wrapping_add(byte as u128);
             hash = hash.rotate_left(7);
         }

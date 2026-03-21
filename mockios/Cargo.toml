@@ -8,8 +8,15 @@ description = "Mock Cisco IOS device for testing network automation tools"
 ayclic = { path = "../ayclic" }
 async-trait = "0.1"
 tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Optional server dependencies
+aytelnet = { path = "../../aytelnet" }
+ayssh = { path = "../../ayssh" }
+bytes = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
 tokio-test = "0.4"
 aytextfsmplus = { path = "../aytextfsmplus" }

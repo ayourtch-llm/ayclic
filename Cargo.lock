@@ -1118,10 +1118,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ayclic",
+ "ayssh",
+ "aytelnet",
  "aytextfsmplus",
+ "bytes",
+ "clap",
  "tokio",
  "tokio-test",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -37,8 +37,10 @@ use ayclic::raw_transport::RawTransport;
 /// The CLI mode the mock device is currently in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliMode {
-    /// Not yet authenticated — waiting for username/password.
+    /// Waiting for username.
     Login,
+    /// Username received, waiting for password.
+    LoginPassword,
     /// User EXEC mode (hostname>).
     UserExec,
     /// Privileged EXEC mode (hostname#).
@@ -195,7 +197,7 @@ impl MockIosDevice {
 
     fn prompt(&self) -> String {
         match &self.mode {
-            CliMode::Login => String::new(),
+            CliMode::Login | CliMode::LoginPassword => String::new(),
             CliMode::UserExec => format!("{}>", self.hostname),
             CliMode::PrivilegedExec => format!("{}#", self.hostname),
             CliMode::Config => format!("{}(config)#", self.hostname),
@@ -220,7 +222,7 @@ impl MockIosDevice {
 
         // Handle based on current mode
         match &self.mode {
-            CliMode::Login => self.handle_login(line),
+            CliMode::Login | CliMode::LoginPassword => self.handle_login(line),
             CliMode::UserExec => self.handle_user_exec(line),
             CliMode::PrivilegedExec => self.handle_privileged_exec(line),
             CliMode::Config => self.handle_config_mode(line),
@@ -229,28 +231,36 @@ impl MockIosDevice {
     }
 
     fn handle_login(&mut self, line: &str) {
-        // Simple login state machine — check if it's username or password
-        if let Some(ref expected_user) = self.username.clone() {
-            if line == expected_user {
-                self.queue_output("Password: ");
-                // Switch to password phase (reuse Login mode, username consumed)
-                self.username = None; // Mark username as consumed
-                return;
-            }
-        }
-        if let Some(ref expected_pass) = self.password.clone() {
-            if line == expected_pass {
-                self.password = None;
-                if self.enable_password.is_some() {
-                    self.mode = CliMode::UserExec;
-                } else {
-                    self.mode = CliMode::PrivilegedExec;
+        match &self.mode {
+            CliMode::Login => {
+                // Waiting for username
+                if let Some(ref expected_user) = self.username {
+                    if line == expected_user {
+                        self.mode = CliMode::LoginPassword;
+                        self.queue_output("\nPassword: ");
+                        return;
+                    }
                 }
-                self.queue_output(&format!("\n{}", self.prompt()));
-                return;
+                self.queue_output("\n% Login invalid\n\nUsername: ");
             }
+            CliMode::LoginPassword => {
+                // Waiting for password
+                if let Some(ref expected_pass) = self.password {
+                    if line == expected_pass {
+                        if self.enable_password.is_some() {
+                            self.mode = CliMode::UserExec;
+                        } else {
+                            self.mode = CliMode::PrivilegedExec;
+                        }
+                        self.queue_output(&format!("\n{}", self.prompt()));
+                        return;
+                    }
+                }
+                self.queue_output("\n% Login invalid\n\nUsername: ");
+                self.mode = CliMode::Login;
+            }
+            _ => unreachable!(),
         }
-        self.queue_output("\n% Login invalid\n\nUsername: ");
     }
 
     fn handle_user_exec(&mut self, line: &str) {

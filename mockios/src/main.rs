@@ -109,7 +109,8 @@ async fn run_interactive(cli: &Cli) {
         if (line == "quit" || line == "exit")
             && (device.mode == CliMode::PrivilegedExec
                 || device.mode == CliMode::UserExec
-                || device.mode == CliMode::Login)
+                || device.mode == CliMode::Login
+                || device.mode == CliMode::LoginPassword)
         {
             break;
         }

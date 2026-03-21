@@ -33,6 +33,8 @@ Value Hostname (\S+)
 Start
   ^[Uu]sername:\s* -> Send ${Username} WaitPassword
   ^[Pp]assword:\s* -> Send ${Password} WaitPrompt
+  ^.*# -> Send "terminal length 0" TermLen
+  ^.*> -> Send "terminal length 0" TermLen
 
 WaitPassword
   ^[Pp]assword:\s* -> Send ${Password} WaitPrompt

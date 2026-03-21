@@ -763,11 +763,13 @@ impl RawTransport for MockIosDevice {
             self.handle_line(&line);
         }
 
-        // NOTE: We do NOT eagerly process input_buffer for pending
-        // interactive prompts. Wait for the \n to arrive (via the next
-        // send() call) so we process exactly one response per line.
-        // This prevents double-prompt issues when the caller sends
-        // text and \n as separate send() calls.
+        // NOTE: Real IOS processes characters as they arrive (e.g., "?"
+        // triggers help immediately). However, for automation testing,
+        // all input is effectively line-buffered — commands, passwords,
+        // and interactive responses are all terminated by \n. We only
+        // process complete lines to avoid double-prompt issues when the
+        // caller sends text and \n as separate send() calls (which is
+        // how drive_interactive works).
 
         Ok(())
     }

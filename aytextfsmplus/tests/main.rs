@@ -618,18 +618,18 @@ Start
     }
 
     #[test]
-    fn test_feed_no_match_with_prefix_data() {
+    fn test_feed_matches_after_newline_in_buffer() {
         let template = r#"
 Start
   ^Password:\s* -> Done
 "#;
         let mut fsm = TextFSMPlus::from_str(template);
-        // ^ won't match in the middle of a buffer
+        // With multiline mode, ^ matches at line boundaries within
+        // the accumulated buffer — so Password: after a \n matches.
         let data = b"some banner\nPassword: ";
         let result = fsm.feed(data, &aytextfsmplus::NoVars, &aytextfsmplus::NoFuncs);
-        // No match because ^ anchors to start of buffer
-        assert_eq!(result.action, InteractiveAction::None);
-        assert_eq!(result.consumed, 0);
+        assert_eq!(result.action, InteractiveAction::Done);
+        assert!(result.consumed > 0);
     }
 
     #[test]

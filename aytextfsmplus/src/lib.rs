@@ -432,6 +432,12 @@ impl TextFSMPlusParser {
         }
         // println!("OUT_STR: {}", expanded_rule_match);
 
+        // Enable multiline mode so ^ matches at line boundaries within
+        // accumulated buffers (needed for feed() interactive mode).
+        // This doesn't affect parse_line() since single lines only have
+        // one line boundary anyway.
+        let mut expanded_rule_match = format!("(?m){}", expanded_rule_match);
+
         let regex_val = match Regex::new(&expanded_rule_match) {
             Ok(r) => MultiRegex::Classic(r),
             Err(_e) => {

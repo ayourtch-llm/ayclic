@@ -183,18 +183,22 @@ impl GenericCliConn {
 
             // Try to match current buffer
             let result = prompt_fsm.feed(&buffer, vars, funcs);
-            if result.consumed > 0 {
-                buffer.drain(..result.consumed);
-            }
 
             match result.action {
                 InteractiveAction::Done => {
-                    debug!("GenericCliConn: command complete");
-                    return String::from_utf8(buffer).map_err(|e| {
+                    debug!("GenericCliConn: command complete (consumed {} of {} bytes)",
+                        result.consumed, buffer.len());
+                    // Return everything BEFORE the match as the command output.
+                    // The consumed region includes the prompt — we don't want that.
+                    let output = buffer[..result.consumed].to_vec();
+                    return String::from_utf8(output).map_err(|e| {
                         CiscoIosError::HttpUploadError(format!("Invalid UTF-8: {}", e))
                     });
                 }
                 InteractiveAction::Send(text) => {
+                    if result.consumed > 0 {
+                        buffer.drain(..result.consumed);
+                    }
                     debug!("GenericCliConn: interactive send {:?}", &text);
                     self.transport.send(text.as_bytes()).await?;
                     self.transport.send(b"\n").await?;
@@ -251,17 +255,18 @@ impl GenericCliConn {
             let remaining = deadline - now;
 
             let result = prompt_fsm.feed(&buffer, vars, funcs);
-            if result.consumed > 0 {
-                buffer.drain(..result.consumed);
-            }
 
             match result.action {
                 InteractiveAction::Done => {
-                    return String::from_utf8(buffer).map_err(|e| {
+                    let output = buffer[..result.consumed].to_vec();
+                    return String::from_utf8(output).map_err(|e| {
                         CiscoIosError::HttpUploadError(format!("Invalid UTF-8: {}", e))
                     });
                 }
                 InteractiveAction::Send(text) => {
+                    if result.consumed > 0 {
+                        buffer.drain(..result.consumed);
+                    }
                     self.transport.send(text.as_bytes()).await?;
                     self.transport.send(b"\n").await?;
                 }

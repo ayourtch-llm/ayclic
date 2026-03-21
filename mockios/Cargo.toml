@@ -1,0 +1,15 @@
+[package]
+name = "mockios"
+version = "0.1.0"
+edition = "2021"
+description = "Mock Cisco IOS device for testing network automation tools"
+
+[dependencies]
+ayclic = { path = "../ayclic" }
+async-trait = "0.1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-test = "0.4"
+aytextfsmplus = { path = "../aytextfsmplus" }

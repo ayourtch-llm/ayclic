@@ -763,15 +763,11 @@ impl RawTransport for MockIosDevice {
             self.handle_line(&line);
         }
 
-        // Also handle input that doesn't end with newline (for login prompts, etc.)
-        if !self.input_buffer.is_empty() {
-            // Check if this looks like a response to an interactive prompt
-            if self.pending_interactive.is_some() {
-                let line = String::from_utf8_lossy(&self.input_buffer).to_string();
-                self.input_buffer.clear();
-                self.handle_line(&line);
-            }
-        }
+        // NOTE: We do NOT eagerly process input_buffer for pending
+        // interactive prompts. Wait for the \n to arrive (via the next
+        // send() call) so we process exactly one response per line.
+        // This prevents double-prompt issues when the caller sends
+        // text and \n as separate send() calls.
 
         Ok(())
     }
@@ -1248,5 +1244,101 @@ mod tests {
 
         // Flash files persist across reload
         assert!(post.flash_files.contains_key("new_image.bin"));
+    }
+
+    #[tokio::test]
+    async fn test_trace_enable_flow_step_by_step() {
+        // Trace every send/receive to find stale prompts
+        let mut device = MockIosDevice::new("R1")
+            .with_enable("secret");
+        device.mode = CliMode::UserExec;
+
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("STEP 1 initial: {:?}", String::from_utf8_lossy(&data));
+        assert_eq!(String::from_utf8_lossy(&data), "R1>");
+
+        // Send "enable\n"
+        device.send(b"enable\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("STEP 2 after enable: {:?}", String::from_utf8_lossy(&data));
+        assert!(String::from_utf8_lossy(&data).contains("Password:"));
+
+        // Send password
+        device.send(b"secret\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("STEP 3 after password: {:?}", String::from_utf8_lossy(&data));
+        assert!(String::from_utf8_lossy(&data).contains("R1#"));
+        assert_eq!(device.mode, CliMode::PrivilegedExec);
+
+        // Now send "terminal length 0\n"
+        device.send(b"terminal length 0\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("STEP 4 after term len: {:?}", String::from_utf8_lossy(&data));
+        assert!(String::from_utf8_lossy(&data).contains("R1#"));
+
+        // Check: is there anything leftover?
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("STEP 5 leftover: {:?} (len={})", String::from_utf8_lossy(&data), data.len());
+        assert!(data.is_empty(), "Should have no leftover data");
+
+        // Now send "show version\n"
+        device.send(b"show version\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        eprintln!("STEP 6 show version (first 100): {:?}", &output[..output.len().min(100)]);
+        assert!(output.contains("Cisco IOS"), "show version should contain Cisco IOS");
+    }
+
+    #[tokio::test]
+    async fn test_trace_drive_interactive_style() {
+        // Mimic how drive_interactive sends: text then \n separately
+        let mut device = MockIosDevice::new("R1")
+            .with_enable("secret");
+        device.mode = CliMode::UserExec;
+
+        // Step 1: receive initial prompt
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("DI-1 initial: {:?}", String::from_utf8_lossy(&data));
+
+        // Step 2: drive_interactive matches ">" and sends "enable" + "\n"
+        device.send(b"enable").await.unwrap();
+        device.send(b"\n").await.unwrap();
+
+        // Step 3: receive response
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("DI-2 after enable: {:?}", String::from_utf8_lossy(&data));
+
+        // Step 4: drive_interactive matches "Password:" and sends "secret" + "\n"
+        device.send(b"secret").await.unwrap();
+        device.send(b"\n").await.unwrap();
+
+        // Step 5: receive — should get the prompt
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("DI-3 after password: {:?}", String::from_utf8_lossy(&data));
+
+        // Step 6: drive_interactive matches "#" and sends "terminal length 0" + "\n"
+        device.send(b"terminal length 0").await.unwrap();
+        device.send(b"\n").await.unwrap();
+
+        // Step 7: receive — should get prompt after term len
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("DI-4 after term len: {:?}", String::from_utf8_lossy(&data));
+
+        // Step 8: drive_interactive matches "#" → Done. Interaction complete.
+
+        // Step 9: now run_cmd("show version") — sends text + \n
+        device.send(b"show version").await.unwrap();
+        device.send(b"\n").await.unwrap();
+
+        // Step 10: receive — should get version output
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        eprintln!("DI-5 show version (first 100): {:?}", &output[..output.len().min(100)]);
+
+        // Check for leftover
+        let data2 = device.receive(Duration::from_secs(1)).await.unwrap();
+        eprintln!("DI-6 leftover: {:?} (len={})", String::from_utf8_lossy(&data2), data2.len());
+
+        assert!(output.contains("Cisco IOS"), "show version should contain Cisco IOS");
     }
 }

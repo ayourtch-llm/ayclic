@@ -420,22 +420,10 @@ TermLen
         .with_prompt_template(ayclic::templates::CISCO_IOS_PROMPT)
         .with_cmd_timeout(Duration::from_secs(15));
 
-    // KNOWN ISSUE: mockios has stale prompts after drive_interactive —
-    // the first few run_cmd calls get stale prompts instead of command
-    // output. Real devices don't have this issue. Root cause: the mock
-    // queues output synchronously while drive_interactive consumes
-    // asynchronously, leaving extra prompts in the queue.
-    // Workaround: retry until we get real output.
-    let mut output = String::new();
-    for _ in 0..3 {
-        output = conn
-            .run_cmd("show version", &NoVars, &NoFuncs)
-            .await
-            .unwrap_or_else(|e| panic!("[{}] show version after enable failed: {}", target.label(), e));
-        if output.contains("Cisco IOS") {
-            break;
-        }
-    }
+    let output = conn
+        .run_cmd("show version", &NoVars, &NoFuncs)
+        .await
+        .unwrap_or_else(|e| panic!("[{}] show version after enable failed: {}", target.label(), e));
 
     assert!(
         output.contains("Cisco IOS"),

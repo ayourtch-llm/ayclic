@@ -31,10 +31,59 @@ pub fn handle_hostname(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
+/// Normalize IOS interface names, e.g. "loopback 0" → "Loopback0", "vlan 100" → "Vlan100".
+pub fn normalize_interface_name(input: &str) -> String {
+    let trimmed = input.trim();
+    let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
+    let (type_part, num_part) = match parts.as_slice() {
+        [t, n] => (*t, n.trim().to_string()),
+        [t] => (*t, String::new()),
+        _ => return trimmed.to_string(),
+    };
+
+    let type_lower = type_part.to_lowercase();
+    let (canonical_type, separator) = match type_lower.as_str() {
+        t if t.starts_with("lo") => ("Loopback", ""),
+        t if t.starts_with("vl") => ("Vlan", ""),
+        t if t.starts_with("gi") => ("GigabitEthernet", ""),
+        t if t.starts_with("fa") => ("FastEthernet", ""),
+        t if t.starts_with("te") => ("TenGigabitEthernet", ""),
+        t if t.starts_with("hu") => ("HundredGigE", ""),
+        t if t.starts_with("mg") => ("Mgmt", ""),
+        t if t.starts_with("se") => ("Serial", ""),
+        t if t.starts_with("tu") => ("Tunnel", ""),
+        _ => (type_part, " "),
+    };
+
+    // If the type_part itself already contained a number suffix (e.g. "GigabitEthernet0/0"),
+    // use it as-is and ignore num_part.
+    let type_has_trailing_digit = type_part.chars().last().map_or(false, |c| c.is_ascii_digit() || c == '/');
+    if type_has_trailing_digit && num_part.is_empty() {
+        return format!("{}", type_part);
+    }
+    if type_has_trailing_digit {
+        // Already fully specified like "GigabitEthernet0/0" with extra tokens — unlikely but safe
+        return format!("{} {}", type_part, num_part);
+    }
+
+    if num_part.is_empty() {
+        canonical_type.to_string()
+    } else {
+        format!("{}{}{}", canonical_type, separator, num_part)
+    }
+}
+
 pub fn handle_interface(d: &mut MockIosDevice, input: &str) {
     // "interface <name>" — enter config-if sub-mode
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    let iface_name = if parts.len() >= 2 { parts[1..].join(" ") } else { "unknown".to_string() };
+    // Input is the full line, e.g. "interface loopback 0" or "interface GigabitEthernet0/0"
+    let raw_name = if let Some(rest) = input.trim().strip_prefix("interface").map(|s| s.trim()) {
+        rest.to_string()
+    } else {
+        // Fallback: skip first token
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        if parts.len() >= 2 { parts[1..].join(" ") } else { "unknown".to_string() }
+    };
+    let iface_name = normalize_interface_name(&raw_name);
     d.mode = CliMode::ConfigSub("config-if".to_string());
     // Ensure the interface exists in state
     d.state.ensure_interface(&iface_name);
@@ -256,10 +305,11 @@ fn build_conf_tree() -> Vec<CommandNode> {
             ]),
 
         // interface <name>  [config only — enters config-if]
+        // Use RestOfLine so multi-word names like "loopback 0" or "vlan 100" are captured whole.
         keyword("interface", "Select an interface to configure")
             .mode(config_only())
             .children(vec![
-                param("<name>", ParamType::Word, "Interface name")
+                param("<name>", ParamType::RestOfLine, "Interface name")
                     .handler(handle_interface),
             ]),
 

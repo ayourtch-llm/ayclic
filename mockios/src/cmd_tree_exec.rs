@@ -291,6 +291,12 @@ pub fn handle_exit(d: &mut MockIosDevice, _input: &str) {
     d.mode = CliMode::Reloading; // signals connection close
 }
 
+pub fn handle_end_noop(d: &mut MockIosDevice, _input: &str) {
+    // In exec mode, "end" is a no-op (real IOS ignores it silently).
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}", p));
+}
+
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static EXEC_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -497,6 +503,10 @@ fn build_exec_tree() -> Vec<CommandNode> {
             .handler(handle_exit),
         keyword("quit", "Exit from the EXEC")
             .handler(handle_exit),
+
+        // end — no-op in exec mode (real IOS ignores it silently)
+        keyword("end", "Return to privileged EXEC mode (no-op in exec)")
+            .handler(handle_end_noop),
     ]
 }
 

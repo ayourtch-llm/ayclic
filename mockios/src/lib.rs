@@ -3671,4 +3671,79 @@ mod tests {
             "show startup should have 'Using NNN out of XXXXX bytes' header, got: {:?}", &output[..output.len().min(200)]);
         assert!(output.contains("hostname"), "Should contain hostname");
     }
+
+    // ─── Bug fix tests ─────────────────────────────────────────────────────────
+
+    // Bug 1: interface loopback 0 accepted in config mode
+    #[tokio::test]
+    async fn test_config_interface_loopback() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let output = send_cmd(&mut device, "interface loopback 0").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(_)),
+            "Should enter config-if for loopback, got mode: {:?}", device.mode);
+        assert!(output.contains("(config-if)#"), "Should show config-if prompt, got: {:?}", output);
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    #[tokio::test]
+    async fn test_config_interface_vlan() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let output = send_cmd(&mut device, "interface vlan 100").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(_)),
+            "Should enter config-if for vlan");
+        assert!(output.contains("(config-if)#"), "Should show config-if prompt, got: {:?}", output);
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    // Bug 3: end from priv exec is a no-op
+    #[tokio::test]
+    async fn test_end_from_priv_exec_is_noop() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "end").await;
+        assert_eq!(device.mode, CliMode::PrivilegedExec,
+            "end from priv exec should stay in priv exec");
+        assert!(!output.contains("Invalid"), "'end' from priv exec should not error, got: {:?}", output);
+    }
+
+    // Bug 4: interface name normalization
+    #[tokio::test]
+    async fn test_interface_name_normalization() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface loopback 0").await;
+        assert!(device.state.interfaces.iter().any(|i| i.name == "Loopback0"),
+            "Should have Loopback0 in interfaces, got: {:?}",
+            device.state.interfaces.iter().map(|i| &i.name).collect::<Vec<_>>());
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    // Bug 5: ip address and shutdown work in config-if after entering via loopback
+    #[tokio::test]
+    async fn test_config_if_ip_address_and_shutdown() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface loopback 0").await;
+        let out_ip = send_cmd(&mut device, "ip address 10.127.0.1 255.255.255.255").await;
+        assert!(!out_ip.contains("Invalid"), "ip address should be accepted in config-if, got: {:?}", out_ip);
+        let out_no_shut = send_cmd(&mut device, "no shutdown").await;
+        assert!(!out_no_shut.contains("Invalid"), "no shutdown should be accepted in config-if, got: {:?}", out_no_shut);
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ip interface brief").await;
+        assert!(output.contains("10.127.0.1"), "Loopback0 should have IP 10.127.0.1, got: {:?}", output);
+        assert!(output.contains("Loopback0"), "Should show Loopback0");
+    }
+
+    #[tokio::test]
+    async fn test_config_add_static_route() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ip route 192.168.1.0 255.255.255.0 10.0.0.2").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ip route").await;
+        assert!(output.contains("192.168.1.0"), "Should show new static route");
+    }
 }

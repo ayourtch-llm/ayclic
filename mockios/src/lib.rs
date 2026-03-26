@@ -4267,4 +4267,48 @@ mod tests {
             output
         );
     }
+
+    #[tokio::test]
+    async fn test_help_command() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "help").await;
+        assert!(output.contains("question mark"), "help should describe ? usage, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_enable_in_priv_exec_noop() {
+        let mut device = setup_device("R1").await;
+        assert_eq!(device.mode, CliMode::PrivilegedExec);
+        let output = send_cmd(&mut device, "enable").await;
+        assert_eq!(device.mode, CliMode::PrivilegedExec, "enable in priv exec should keep mode as PrivilegedExec, got mode: {:?}", device.mode);
+        assert!(!output.contains("% "), "enable in priv exec should produce no error, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_clock_set_accepted() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "clock set 14:30:00 28 February 2000").await;
+        assert!(!output.contains("% "), "clock set should produce no error, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_debug_command() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "debug ip routing").await;
+        assert!(output.contains("debugging is on"), "debug ip routing should say 'debugging is on', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_undebug_all() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "undebug all").await;
+        assert!(output.contains("turned off"), "undebug all should say 'turned off', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_no_debug_all() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "no debug all").await;
+        assert!(output.contains("turned off"), "no debug all should say 'turned off', got: {:?}", output);
+    }
 }

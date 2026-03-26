@@ -195,20 +195,36 @@ pub fn tokenize_with_offsets(input: &str) -> Vec<(String, usize)> {
 /// Find child nodes that match `token`, filtered by `mode`.
 /// Keyword nodes: match if keyword.starts_with(token_lowercase).
 /// Param nodes: match if param_type.matches(token).
+///
+/// Keywords always take priority over params: if any keyword matches,
+/// param nodes are excluded from the result (real IOS behavior).
 pub fn find_matches<'a>(
     token: &str,
     nodes: &'a [CommandNode],
     mode: &CliMode,
 ) -> Vec<&'a CommandNode> {
     let token_lower = token.to_lowercase();
-    nodes
+    let all_matches: Vec<&'a CommandNode> = nodes
         .iter()
         .filter(|n| n.mode_filter.matches(mode))
         .filter(|n| match &n.matcher {
             TokenMatcher::Keyword(kw) => kw.to_lowercase().starts_with(&token_lower),
             TokenMatcher::Param { param_type, .. } => param_type.matches(token),
         })
-        .collect()
+        .collect();
+
+    // If any keyword matched, return only keyword matches (keywords beat params).
+    let keyword_matches: Vec<&'a CommandNode> = all_matches
+        .iter()
+        .copied()
+        .filter(|n| matches!(&n.matcher, TokenMatcher::Keyword(_)))
+        .collect();
+
+    if !keyword_matches.is_empty() {
+        keyword_matches
+    } else {
+        all_matches
+    }
 }
 
 // ─── Parser ───────────────────────────────────────────────────────────────────

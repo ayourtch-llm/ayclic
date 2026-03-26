@@ -144,7 +144,11 @@ pub fn handle_configure_alone(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_enable(d: &mut MockIosDevice, _input: &str) {
-    if d.enable_password.is_some() {
+    if matches!(d.mode, CliMode::PrivilegedExec) {
+        // Already in priv exec — no-op (real IOS behavior)
+        let p = d.prompt();
+        d.queue_output(&format!("\n{}", p));
+    } else if d.enable_password.is_some() {
         d.pending_interactive = Some(PendingInteractive::EnablePassword);
         d.queue_output("\nPassword: ");
     } else {
@@ -297,6 +301,46 @@ pub fn handle_end_noop(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
+pub fn handle_help_command(d: &mut MockIosDevice, _input: &str) {
+    let text = "\
+Help may be requested at any point in a command by entering
+a question mark '?'.  If nothing matches, the help list will
+be empty and you must backup until entering a '?' shows the
+available options.
+Two styles of help are provided:
+1. Full help is available when you are ready to enter a
+   command argument (e.g. 'show ?') and describes each possible
+   argument.
+2. Partial help is provided when an abbreviated argument is entered
+   and you want to know what arguments match the input
+   (e.g. 'show pr?'.)
+";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", text, p));
+}
+
+pub fn handle_clock_set(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}", p));
+}
+
+pub fn handle_debug(d: &mut MockIosDevice, input: &str) {
+    let feature = input.trim().strip_prefix("debug").map(|s| s.trim()).unwrap_or("unknown");
+    let p = d.prompt();
+    d.queue_output(&format!("\n{} debugging is on\n{}", feature, p));
+}
+
+pub fn handle_undebug_all(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("\nAll possible debugging has been turned off\n{}", p));
+}
+
+pub fn handle_undebug(d: &mut MockIosDevice, input: &str) {
+    let feature = input.trim().strip_prefix("undebug").map(|s| s.trim()).unwrap_or("unknown");
+    let p = d.prompt();
+    d.queue_output(&format!("\n{} debugging is off\n{}", feature, p));
+}
+
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static EXEC_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -373,9 +417,8 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     .handler(handle_configure_terminal),
             ]),
 
-        // enable [user only]
+        // enable [user + priv — real IOS shows it in both, no-op in priv]
         keyword("enable", "Turn on privileged commands")
-            .mode(user_only())
             .handler(handle_enable),
 
         // disable [priv only]
@@ -495,6 +538,52 @@ fn build_exec_tree() -> Vec<CommandNode> {
             .children(vec![
                 param("<target>", ParamType::Word, "Target address")
                     .handler(handle_traceroute),
+            ]),
+
+        // help — available in all modes
+        keyword("help", "Description of the interactive help system")
+            .handler(handle_help_command),
+
+        // clock set [priv only]
+        keyword("clock", "Manage the system clock")
+            .mode(priv_only())
+            .children(vec![
+                keyword("set", "Set the time and date")
+                    .children(vec![
+                        param("<hh:mm:ss>", ParamType::RestOfLine, "Current Time")
+                            .handler(handle_clock_set),
+                    ]),
+            ]),
+
+        // debug [priv only]
+        keyword("debug", "Debugging functions (see also 'undebug')")
+            .mode(priv_only())
+            .children(vec![
+                param("<feature>", ParamType::RestOfLine, "Feature to debug")
+                    .handler(handle_debug),
+            ]),
+
+        // undebug [priv only]
+        keyword("undebug", "Disable debugging functions (see also 'debug')")
+            .mode(priv_only())
+            .children(vec![
+                keyword("all", "Disable all debugging")
+                    .handler(handle_undebug_all),
+                param("<feature>", ParamType::RestOfLine, "Feature to undebug")
+                    .handler(handle_undebug),
+            ]),
+
+        // no debug [priv only]
+        keyword("no", "Disable debugging functions")
+            .mode(priv_only())
+            .children(vec![
+                keyword("debug", "Debugging functions")
+                    .children(vec![
+                        keyword("all", "Disable all debugging")
+                            .handler(handle_undebug_all),
+                        param("<feature>", ParamType::RestOfLine, "Feature to undebug")
+                            .handler(handle_undebug),
+                    ]),
             ]),
 
         // exit / logout / quit
@@ -658,13 +747,14 @@ mod tests {
     }
 
     #[test]
-    fn test_exec_enable_hidden_in_priv() {
+    fn test_exec_enable_visible_in_priv() {
+        // Real IOS shows enable in priv exec (it's a no-op)
         let tree = exec_tree();
         let mode = CliMode::PrivilegedExec;
         let result = parse("enable", tree, &mode);
         assert!(
-            matches!(result, crate::cmd_tree::ParseResult::InvalidInput { .. }),
-            "enable should be invalid in priv exec"
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "enable should be visible in priv exec (no-op)"
         );
     }
 

@@ -269,6 +269,16 @@ impl DeviceState {
         let mut body_lines: Vec<String> = Vec::new();
 
         body_lines.push("!".to_string());
+
+        // Version line — extract major.minor from version string (e.g., "15.1" from "15.1(4)M")
+        let ver_short = self.version.find('(')
+            .map(|i| &self.version[..i])
+            .unwrap_or(&self.version);
+        body_lines.push(format!("version {}", ver_short));
+        body_lines.push("service timestamps debug datetime msec".to_string());
+        body_lines.push("service timestamps log datetime msec".to_string());
+        body_lines.push("!".to_string());
+
         body_lines.push(format!("hostname {}", self.hostname));
         body_lines.push("!".to_string());
 
@@ -334,6 +344,15 @@ impl DeviceState {
         let mut body_lines: Vec<String> = Vec::new();
 
         body_lines.push("!".to_string());
+
+        let ver_short = self.version.find('(')
+            .map(|i| &self.version[..i])
+            .unwrap_or(&self.version);
+        body_lines.push(format!("version {}", ver_short));
+        body_lines.push("service timestamps debug datetime msec".to_string());
+        body_lines.push("service timestamps log datetime msec".to_string());
+        body_lines.push("!".to_string());
+
         body_lines.push(format!("hostname {}", self.hostname));
         body_lines.push("!".to_string());
 
@@ -461,6 +480,15 @@ mod tests {
             output.contains("Current configuration"),
             "show run should show 'Current configuration : NNN bytes'"
         );
+    }
+
+    #[test]
+    fn test_show_run_has_version_and_service() {
+        let state = DeviceState::new("R1");
+        let output = state.generate_running_config();
+        assert!(output.contains("version 15.1"), "show run should have version line, got: {:?}", &output[..output.len().min(300)]);
+        assert!(output.contains("service timestamps debug datetime msec"), "show run should have service timestamps debug");
+        assert!(output.contains("service timestamps log datetime msec"), "show run should have service timestamps log");
     }
 
     #[test]

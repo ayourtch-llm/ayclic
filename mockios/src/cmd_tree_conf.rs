@@ -550,6 +550,14 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     .handler(handle_vlan),
             ]),
 
+        // help
+        keyword("help", "Description of the interactive help system")
+            .handler(crate::cmd_tree_exec::handle_help_command),
+
+        // help
+        keyword("help", "Description of the interactive help system")
+            .handler(crate::cmd_tree_exec::handle_help_command),
+
         // exit
         keyword("exit", "Exit from current mode")
             .handler(handle_config_exit),
@@ -630,6 +638,10 @@ fn build_config_if_tree() -> Vec<CommandNode> {
                     .handler(handle_config_sub_rest),
             ]),
 
+        // help
+        keyword("help", "Description of the interactive help system")
+            .handler(crate::cmd_tree_exec::handle_help_command),
+
         // exit
         keyword("exit", "Exit from current mode")
             .handler(handle_config_exit),
@@ -701,6 +713,10 @@ fn build_config_router_tree() -> Vec<CommandNode> {
                 param("<rest>", ParamType::RestOfLine, "Command to negate")
                     .handler(handle_config_sub_rest),
             ]),
+
+        // help
+        keyword("help", "Description of the interactive help system")
+            .handler(crate::cmd_tree_exec::handle_help_command),
 
         // exit
         keyword("exit", "Exit from current mode")
@@ -776,6 +792,10 @@ fn build_config_line_tree() -> Vec<CommandNode> {
                 param("<rest>", ParamType::RestOfLine, "Command to negate")
                     .handler(handle_config_sub_rest),
             ]),
+
+        // help
+        keyword("help", "Description of the interactive help system")
+            .handler(crate::cmd_tree_exec::handle_help_command),
 
         // exit
         keyword("exit", "Exit from current mode")

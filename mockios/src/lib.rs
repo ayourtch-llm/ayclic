@@ -296,6 +296,17 @@ impl MockIosDevice {
         self
     }
 
+    /// Return true if the current mode should suppress character echo (password prompts).
+    fn is_password_mode(&self) -> bool {
+        matches!(
+            self.mode,
+            CliMode::LoginPassword
+        ) || matches!(
+            self.pending_interactive,
+            Some(PendingInteractive::EnablePassword)
+        )
+    }
+
     /// Create a new device derived from this one, carrying over flash
     /// files, hostname, model, commands, and config. The new device
     /// starts in PrivilegedExec mode (as if freshly booted).
@@ -1093,25 +1104,75 @@ impl RawTransport for MockIosDevice {
         if self.mode == CliMode::Reloading {
             return Err(CiscoIosError::NotConnected);
         }
-        self.input_buffer.extend_from_slice(data);
 
-        // Process complete lines from the input buffer
-        while let Some(newline_pos) = self.input_buffer.iter().position(|&b| b == b'\n') {
-            let line_bytes: Vec<u8> = self.input_buffer.drain(..=newline_pos).collect();
-            let line = String::from_utf8_lossy(&line_bytes)
-                .trim_end_matches('\n')
-                .trim_end_matches('\r')
-                .to_string();
-            self.handle_line(&line);
+        // Always process character by character, echoing and handling `?` / backspace
+        // immediately — this is how real Cisco IOS works.
+        for &byte in data {
+            match byte {
+                b'\n' | b'\r' => {
+                    // Complete the line
+                    let line_bytes = std::mem::take(&mut self.input_buffer);
+                    let line = String::from_utf8_lossy(&line_bytes)
+                        .trim_end_matches('\r')
+                        .to_string();
+                    self.output_queue.extend_from_slice(b"\r\n");
+                    self.handle_line(&line);
+                }
+                b'?' => {
+                    // Immediate help — do NOT add '?' to the input buffer.
+                    use crate::cmd_tree::{help, HelpResult};
+                    use crate::cmd_tree_exec::exec_tree;
+                    use crate::cmd_tree_conf::conf_tree;
+
+                    let partial = String::from_utf8_lossy(&self.input_buffer).to_string();
+                    let mode = self.mode.clone();
+
+                    let tree: &[crate::cmd_tree::CommandNode] = match &mode {
+                        CliMode::Config | CliMode::ConfigSub(_) => conf_tree(),
+                        _ => exec_tree(),
+                    };
+
+                    let help_result = help(&partial, tree, &mode);
+
+                    // Format help output like real IOS
+                    let mut out = String::new();
+                    out.push_str("\r\n");
+                    match help_result {
+                        HelpResult::Subcommands(subs) => {
+                            for (name, desc) in subs {
+                                out.push_str(&format!("  {:<20}  {}\r\n", name, desc));
+                            }
+                        }
+                        HelpResult::PrefixMatches(names) => {
+                            for name in names {
+                                out.push_str(&format!("  {}\r\n", name));
+                            }
+                        }
+                        HelpResult::NotFound { .. } => {
+                            out.push_str("% Invalid input\r\n");
+                        }
+                    }
+                    // Re-display prompt + partial input
+                    let prompt = self.prompt();
+                    out.push_str(&prompt);
+                    out.push_str(&partial);
+                    self.output_queue.extend_from_slice(out.as_bytes());
+                }
+                b'\x7f' | b'\x08' => {
+                    // Backspace / DEL — remove last char from input buffer
+                    if self.input_buffer.pop().is_some() {
+                        self.output_queue.extend_from_slice(b"\x08 \x08");
+                    }
+                }
+                _ => {
+                    // Regular printable character — echo unless in password mode
+                    if !self.is_password_mode() {
+                        self.output_queue.push(byte);
+                    }
+                    self.input_buffer.push(byte);
+                }
+            }
         }
-
-        // NOTE: Real IOS processes characters as they arrive (e.g., "?"
-        // triggers help immediately). However, for automation testing,
-        // all input is effectively line-buffered — commands, passwords,
-        // and interactive responses are all terminated by \n. We only
-        // process complete lines to avoid double-prompt issues when the
-        // caller sends text and \n as separate send() calls (which is
-        // how drive_interactive works).
 
         Ok(())
     }
@@ -2431,5 +2492,90 @@ mod tests {
         // end → priv exec
         let _ = send_cmd(&mut device, "end").await;
         assert_eq!(device.mode, CliMode::PrivilegedExec);
+    }
+
+    // ── Echo / interactive behavior tests ────────────────────────────────────
+    // Echo is always on (real IOS always echoes). Password input is never echoed.
+
+    #[tokio::test]
+    async fn test_echo_characters() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // initial prompt
+
+        // Send individual characters — they should be echoed immediately
+        device.send(b"s").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(out, b"s", "Should echo 's'");
+
+        device.send(b"h").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(out, b"h", "Should echo 'h'");
+
+        // Send newline to complete command
+        device.send(b"ow version\n").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+        assert!(output.contains("Cisco IOS"), "Should get show version output");
+    }
+
+    #[tokio::test]
+    async fn test_question_mark_help() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // initial prompt
+
+        // Type "show " then "?"
+        device.send(b"show ").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // echo
+
+        device.send(b"?").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+        // Should list show subcommands
+        assert!(output.contains("version"), "? help should list 'version', got: {:?}", output);
+        // Should re-display the partial input
+        assert!(output.contains("R1#"), "Should re-display prompt after help");
+    }
+
+    #[tokio::test]
+    async fn test_no_echo_on_password() {
+        let mut device = MockIosDevice::new("R1")
+            .with_login("admin", "secret");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // "Username: "
+
+        // Username should echo
+        device.send(b"a").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(out, b"a", "Username should echo");
+
+        // Complete username
+        device.send(b"dmin\n").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+        assert!(output.contains("Password:"), "Should get password prompt");
+
+        // Password should NOT echo
+        device.send(b"s").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(out.is_empty(), "Password chars should not echo");
+    }
+
+    #[tokio::test]
+    async fn test_backspace() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"shox").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Backspace to erase 'x'
+        device.send(b"\x7f").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(out, b"\x08 \x08", "Backspace should send BS-space-BS");
+
+        // Now type 'w version\n' to complete "show version"
+        device.send(b"w version\n").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+        assert!(output.contains("Cisco IOS"), "After backspace correction, should get show version");
     }
 }

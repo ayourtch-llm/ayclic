@@ -21,6 +21,12 @@ pub fn handle_show_running_config(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("\n{}\n{}", config, p));
 }
 
+pub fn handle_show_startup_config(d: &mut MockIosDevice, _input: &str) {
+    let config = d.state.generate_startup_config();
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", config, p));
+}
+
 pub fn handle_show_clock(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!("\n*08:00:00.000 UTC Mon Jan 1 2024\n{}", p));
@@ -102,6 +108,16 @@ pub fn handle_show_vlan_brief(d: &mut MockIosDevice, _input: &str) {
 
 pub fn handle_show_flash(d: &mut MockIosDevice, _input: &str) {
     d.handle_dir_command("");
+}
+
+pub fn handle_show_history(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    let mut out = String::from("\n");
+    for cmd in &d.command_history {
+        out.push_str(&format!("  {}\n", cmd));
+    }
+    out.push_str(&p);
+    d.queue_output(&out);
 }
 
 /// "show" alone — hint about ?
@@ -299,11 +315,13 @@ fn build_exec_tree() -> Vec<CommandNode> {
             .children(vec![
                 keyword("version", "System hardware and software status")
                     .handler(handle_show_version),
+                keyword("history", "Display the session command history")
+                    .handler(handle_show_history),
                 keyword("running-config", "Current operating configuration")
                     .handler(handle_show_running_config),
                 keyword("startup-config", "Contents of startup configuration")
                     .mode(priv_only())
-                    .handler(handle_show_running_config), // stub: same as running
+                    .handler(handle_show_startup_config),
                 keyword("clock", "Display the system clock")
                     .handler(handle_show_clock),
                 keyword("ip", "IP information")

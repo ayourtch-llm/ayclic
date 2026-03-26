@@ -328,6 +328,65 @@ impl DeviceState {
         )
     }
 
+    /// Generate a startup-config string (same content as running config, different header).
+    pub fn generate_startup_config(&self) -> String {
+        // Build the config body (same as running config body)
+        let mut body_lines: Vec<String> = Vec::new();
+
+        body_lines.push("!".to_string());
+        body_lines.push(format!("hostname {}", self.hostname));
+        body_lines.push("!".to_string());
+
+        for iface in &self.interfaces {
+            body_lines.push(format!("interface {}", iface.name));
+            if !iface.description.is_empty() {
+                body_lines.push(format!(" description {}", iface.description));
+            }
+            if let Some((addr, mask)) = &iface.ip_address {
+                body_lines.push(format!(" ip address {} {}", addr, mask));
+            }
+            if !iface.admin_up {
+                body_lines.push(" shutdown".to_string());
+            } else {
+                body_lines.push(" no shutdown".to_string());
+            }
+            body_lines.push("!".to_string());
+        }
+
+        for route in &self.static_routes {
+            if let Some(nh) = route.next_hop {
+                body_lines.push(format!(
+                    "ip route {} {} {}",
+                    route.prefix, route.mask, nh
+                ));
+            } else if let Some(iface) = &route.interface {
+                body_lines.push(format!(
+                    "ip route {} {} {}",
+                    route.prefix, route.mask, iface
+                ));
+            }
+        }
+
+        if !self.static_routes.is_empty() {
+            body_lines.push("!".to_string());
+        }
+
+        for line in &self.unmodeled_config {
+            body_lines.push(line.clone());
+        }
+
+        if !self.unmodeled_config.is_empty() {
+            body_lines.push("!".to_string());
+        }
+
+        body_lines.push("end".to_string());
+
+        let body = body_lines.join("\n");
+        let byte_count = body.len();
+
+        format!("Using {} out of 524288 bytes\n{}", byte_count, body)
+    }
+
     /// Find an interface by name, returning a mutable reference.
     pub fn get_interface_mut(&mut self, name: &str) -> Option<&mut InterfaceState> {
         self.interfaces.iter_mut().find(|i| i.name == name)

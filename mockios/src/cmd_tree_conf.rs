@@ -130,6 +130,23 @@ pub fn handle_no(d: &mut MockIosDevice, input: &str) {
                 iface.admin_up = true;
             }
         }
+    } else if trimmed.starts_with("no ip route ") {
+        // no ip route <prefix> <mask> <nexthop> — remove matching static route
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        // parts: ["no", "ip", "route", prefix, mask, nexthop]
+        if parts.len() >= 6 {
+            if let (Ok(prefix), Ok(mask), Ok(next_hop)) = (
+                parts[3].parse::<Ipv4Addr>(),
+                parts[4].parse::<Ipv4Addr>(),
+                parts[5].parse::<Ipv4Addr>(),
+            ) {
+                d.state.static_routes.retain(|r| {
+                    !(r.prefix == prefix
+                        && r.mask == mask
+                        && r.next_hop == Some(next_hop))
+                });
+            }
+        }
     }
     d.running_config.push(input.to_string());
     let p = d.prompt();

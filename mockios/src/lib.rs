@@ -136,7 +136,7 @@ pub struct MockIosDevice {
     /// Cursor position within input_buffer.
     pub cursor_pos: usize,
     /// Command history (most recent at end).
-    command_history: Vec<String>,
+    pub command_history: Vec<String>,
     /// Current position when recalling history (None = not recalling).
     history_index: Option<usize>,
     /// Escape sequence parser state.
@@ -626,15 +626,51 @@ impl MockIosDevice {
     }
 
     pub fn handle_show_ip_route(&mut self) {
-        let mut output = String::from("\nCodes: C - connected, S - static\n\n");
+        let codes_header = "\
+Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n\
+       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area \n\
+       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2\n\
+       E1 - OSPF external type 1, E2 - OSPF external type 2\n\
+       i - IS-IS, su - IS-IS summary, L1 - IS-IS level-1, L2 - IS-IS level-2\n\
+       ia - IS-IS inter area, * - candidate default, U - per-user static route\n\
+       o - ODR, P - periodic downloaded static route, H - NHRP, l - LISP\n\
+       a - application route\n\
+       + - replicated route, % - next hop override, p - overrides from PfR\n";
+
+        let mut output = format!("\n{}\n", codes_header);
+
+        // Find default route for "Gateway of last resort"
+        let default_route = self.state.static_routes.iter().find(|r| {
+            r.prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
+                && r.mask == std::net::Ipv4Addr::new(0, 0, 0, 0)
+        });
+        if let Some(dr) = default_route {
+            if let Some(nh) = dr.next_hop {
+                output.push_str(&format!(
+                    "Gateway of last resort is {} to network 0.0.0.0\n\n",
+                    nh
+                ));
+            } else {
+                output.push_str("Gateway of last resort is not set\n\n");
+            }
+        } else {
+            output.push_str("Gateway of last resort is not set\n\n");
+        }
 
         // Connected routes from interfaces that are admin_up and have an IP
         for iface in &self.state.interfaces {
             if iface.admin_up {
                 if let Some((addr, mask)) = iface.ip_address {
+                    let prefix_len = u32::from(mask).count_ones();
+                    let net = u32::from(addr) & u32::from(mask);
+                    let net_addr = std::net::Ipv4Addr::from(net);
                     output.push_str(&format!(
-                        "C    {} {} is directly connected, {}\n",
-                        addr, mask, iface.name
+                        "C        {}/{} is directly connected, {}\n",
+                        net_addr, prefix_len, iface.name
+                    ));
+                    output.push_str(&format!(
+                        "L        {}/{} is directly connected, {}\n",
+                        addr, 32, iface.name
                     ));
                 }
             }
@@ -645,25 +681,20 @@ impl MockIosDevice {
             let prefix = route.prefix;
             let mask = route.mask;
             let dist = route.admin_distance;
-            let prefix_str = format!("{} {}", prefix, mask);
-            if prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
-                && mask == std::net::Ipv4Addr::new(0, 0, 0, 0)
-            {
-                if let Some(nh) = route.next_hop {
-                    output.push_str(&format!(
-                        "S*   {} [{}/0] via {}\n",
-                        prefix_str, dist, nh
-                    ));
-                }
-            } else if let Some(nh) = route.next_hop {
+            let prefix_len = u32::from(mask).count_ones();
+            let is_default = prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
+                && mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
+            let code = if is_default { "S*" } else { "S" };
+            let prefix_str = format!("{}/{}", prefix, prefix_len);
+            if let Some(nh) = route.next_hop {
                 output.push_str(&format!(
-                    "S    {} [{}/0] via {}\n",
-                    prefix_str, dist, nh
+                    "{:<6}{} [{}/0] via {}\n",
+                    code, prefix_str, dist, nh
                 ));
             } else if let Some(iface) = &route.interface {
                 output.push_str(&format!(
-                    "S    {} is directly connected, {}\n",
-                    prefix_str, iface
+                    "{:<6}{} is directly connected, {}\n",
+                    code, prefix_str, iface
                 ));
             }
         }
@@ -3588,5 +3619,56 @@ mod tests {
             output
         );
         assert!(output.contains("default"), "Should show default VLAN 1");
+    }
+
+    // ─── Feature tests: show history ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_show_history() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "show version").await;
+        let _ = send_cmd(&mut device, "show clock").await;
+        let output = send_cmd(&mut device, "show history").await;
+        assert!(output.contains("show version"), "History should contain previous commands");
+        assert!(output.contains("show clock"), "History should contain previous commands");
+    }
+
+    // ─── Feature tests: no ip route ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_no_ip_route_removes_route() {
+        let mut device = setup_device("R1").await;
+        // Add a route
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ip route 172.16.0.0 255.255.0.0 10.0.0.1").await;
+        assert!(!device.state.static_routes.is_empty(), "Should have added a route");
+        let initial_count = device.state.static_routes.len();
+        // Remove it
+        let _ = send_cmd(&mut device, "no ip route 172.16.0.0 255.255.0.0 10.0.0.1").await;
+        assert_eq!(device.state.static_routes.len(), initial_count - 1, "Should have removed route");
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    // ─── Feature tests: show ip route full format ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_show_ip_route_full_format() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip route").await;
+        assert!(output.contains("Codes:"), "Should have Codes header");
+        assert!(output.contains("Gateway of last resort"), "Should show gateway of last resort");
+        assert!(output.contains("directly connected"), "Should show connected routes");
+        assert!(output.contains("GigabitEthernet0/0"), "Should reference interface name");
+    }
+
+    // ─── Feature tests: show startup-config ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_show_startup_config() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show startup-config").await;
+        assert!(output.contains("Using") && output.contains("bytes"),
+            "show startup should have 'Using NNN out of XXXXX bytes' header, got: {:?}", &output[..output.len().min(200)]);
+        assert!(output.contains("hostname"), "Should contain hostname");
     }
 }

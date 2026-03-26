@@ -31,11 +31,17 @@ pub fn config_sub_tree(sub_mode: &str) -> &'static Vec<CommandNode> {
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 pub fn handle_hostname(d: &mut MockIosDevice, input: &str) {
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.len() >= 2 {
-        let name = parts[1].to_string();
-        d.hostname = name.clone();
-        d.state.hostname = name;
+    let negated = input.trim().starts_with("no");
+    if negated {
+        d.hostname = "Router".to_string();
+        d.state.hostname = "Router".to_string();
+    } else {
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let name = parts[1].to_string();
+            d.hostname = name.clone();
+            d.state.hostname = name;
+        }
     }
     d.running_config.push(input.to_string());
     let p = d.prompt();
@@ -126,21 +132,37 @@ pub fn handle_router_eigrp(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_ip_route(d: &mut MockIosDevice, input: &str) {
-    // Parse "ip route <prefix> <mask> <nexthop>"
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.len() >= 5 {
+    let trimmed = input.trim();
+    let negated = trimmed.starts_with("no");
+    // Strip "no " prefix if present, then strip "ip route " prefix
+    let route_part = if negated {
+        trimmed.strip_prefix("no").unwrap_or(trimmed).trim()
+    } else {
+        trimmed
+    };
+    let route_part = route_part.strip_prefix("ip").unwrap_or(route_part).trim();
+    let route_part = route_part.strip_prefix("route").unwrap_or(route_part).trim();
+
+    let parts: Vec<&str> = route_part.split_whitespace().collect();
+    if parts.len() >= 3 {
         if let (Ok(prefix), Ok(mask), Ok(next_hop)) = (
+            parts[0].parse::<Ipv4Addr>(),
+            parts[1].parse::<Ipv4Addr>(),
             parts[2].parse::<Ipv4Addr>(),
-            parts[3].parse::<Ipv4Addr>(),
-            parts[4].parse::<Ipv4Addr>(),
         ) {
-            d.state.static_routes.push(StaticRoute {
-                prefix,
-                mask,
-                next_hop: Some(next_hop),
-                interface: None,
-                admin_distance: 1,
-            });
+            if negated {
+                d.state.static_routes.retain(|r| {
+                    !(r.prefix == prefix && r.mask == mask && r.next_hop == Some(next_hop))
+                });
+            } else {
+                d.state.static_routes.push(StaticRoute {
+                    prefix,
+                    mask,
+                    next_hop: Some(next_hop),
+                    interface: None,
+                    admin_distance: 1,
+                });
+            }
         }
     }
     d.running_config.push(input.to_string());
@@ -149,16 +171,26 @@ pub fn handle_ip_route(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_ip_address(d: &mut MockIosDevice, input: &str) {
-    // Parse "ip address <addr> <mask>"
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.len() >= 4 {
-        if let (Ok(addr), Ok(mask)) = (
-            parts[2].parse::<Ipv4Addr>(),
-            parts[3].parse::<Ipv4Addr>(),
-        ) {
-            if let Some(ref iface_name) = d.current_interface.clone() {
-                if let Some(iface) = d.state.get_interface_mut(iface_name) {
-                    iface.ip_address = Some((addr, mask));
+    let negated = input.trim().starts_with("no");
+    if negated {
+        // "no ip address" — remove IP from current interface
+        if let Some(ref iface_name) = d.current_interface.clone() {
+            if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                iface.ip_address = None;
+            }
+        }
+    } else {
+        // Parse "ip address <addr> <mask>"
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        if parts.len() >= 4 {
+            if let (Ok(addr), Ok(mask)) = (
+                parts[2].parse::<Ipv4Addr>(),
+                parts[3].parse::<Ipv4Addr>(),
+            ) {
+                if let Some(ref iface_name) = d.current_interface.clone() {
+                    if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                        iface.ip_address = Some((addr, mask));
+                    }
                 }
             }
         }
@@ -181,37 +213,6 @@ pub fn handle_ip_name_server(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
-pub fn handle_no(d: &mut MockIosDevice, input: &str) {
-    let trimmed = input.trim();
-    if trimmed == "no shutdown" {
-        // no shutdown in config-if — bring interface up
-        if let Some(ref iface_name) = d.current_interface.clone() {
-            if let Some(iface) = d.state.get_interface_mut(iface_name) {
-                iface.admin_up = true;
-            }
-        }
-    } else if trimmed.starts_with("no ip route ") {
-        // no ip route <prefix> <mask> <nexthop> — remove matching static route
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        // parts: ["no", "ip", "route", prefix, mask, nexthop]
-        if parts.len() >= 6 {
-            if let (Ok(prefix), Ok(mask), Ok(next_hop)) = (
-                parts[3].parse::<Ipv4Addr>(),
-                parts[4].parse::<Ipv4Addr>(),
-                parts[5].parse::<Ipv4Addr>(),
-            ) {
-                d.state.static_routes.retain(|r| {
-                    !(r.prefix == prefix
-                        && r.mask == mask
-                        && r.next_hop == Some(next_hop))
-                });
-            }
-        }
-    }
-    d.running_config.push(input.to_string());
-    let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
-}
 
 pub fn handle_line_vty(d: &mut MockIosDevice, input: &str) {
     d.mode = CliMode::ConfigSub("config-line".to_string());
@@ -228,12 +229,21 @@ pub fn handle_line_console(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_enable_secret(d: &mut MockIosDevice, input: &str) {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    // input can be "enable secret <pw>" or "no enable secret"
+    if !input.trim().starts_with("no") && parts.len() >= 3 {
+        d.state.enable_secret = Some(parts[2..].join(" "));
+    }
     d.running_config.push(input.to_string());
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));
 }
 
 pub fn handle_enable_password(d: &mut MockIosDevice, input: &str) {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if !input.trim().starts_with("no") && parts.len() >= 3 {
+        d.state.enable_secret = Some(parts[2..].join(" "));
+    }
     d.running_config.push(input.to_string());
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));
@@ -246,6 +256,12 @@ pub fn handle_rest_of_line(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_banner_motd(d: &mut MockIosDevice, input: &str) {
+    if input.trim().starts_with("no") {
+        d.state.banner_motd = String::new();
+        let p = d.prompt();
+        d.queue_output(&format!("\n{}", p));
+        return;
+    }
     // Parse: "banner motd <delim><text><delim>"
     let rest = input.trim()
         .strip_prefix("banner").map(|s| s.trim())
@@ -266,20 +282,31 @@ pub fn handle_banner_motd(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
-pub fn handle_shutdown(d: &mut MockIosDevice, _input: &str) {
-    // Update state for current interface
+pub fn handle_shutdown(d: &mut MockIosDevice, input: &str) {
+    let negated = input.trim().starts_with("no");
     if let Some(ref iface_name) = d.current_interface.clone() {
         if let Some(iface) = d.state.get_interface_mut(iface_name) {
-            iface.admin_up = false;
+            iface.admin_up = negated; // "no shutdown" = up, "shutdown" = down
         }
     }
-    d.running_config.push(" shutdown".to_string());
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));
 }
 
 pub fn handle_description(d: &mut MockIosDevice, input: &str) {
-    d.running_config.push(format!(" {}", input.trim()));
+    let negated = input.trim().starts_with("no");
+    if let Some(ref iface_name) = d.current_interface.clone() {
+        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+            if negated {
+                iface.description.clear();
+            } else {
+                let desc = input.trim()
+                    .strip_prefix("description").map(|s| s.trim())
+                    .unwrap_or("");
+                iface.description = desc.to_string();
+            }
+        }
+    }
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));
 }
@@ -319,19 +346,41 @@ pub fn handle_config_end(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
-    // Parse: access-list <number> <permit|deny> <protocol> <source> <dest> [extra]
+    let negated = input.trim().starts_with("no");
+    // Parse: [no] access-list <number> ...
     let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.len() < 4 {
+    // When negated: ["no", "access-list", <number>, ...]
+    // When not:     ["access-list", <number>, ...]
+    let (list_num_idx, action_idx) = if negated { (2, 3) } else { (1, 2) };
+
+    if parts.len() <= list_num_idx {
         let p = d.prompt();
         d.queue_output(&format!("\n% Incomplete command.\n{}", p));
         return;
     }
-    let list_num = parts[1];
-    let action = parts[2].to_string();
-    let protocol = parts.get(3).unwrap_or(&"ip").to_string();
-    let source = parts.get(4).map(|s| s.to_string()).unwrap_or_else(|| "any".to_string());
-    let destination = parts.get(5).map(|s| s.to_string()).unwrap_or_else(|| "any".to_string());
-    let extra = parts.get(6..).map(|s| s.join(" ")).unwrap_or_default();
+
+    let list_num = parts[list_num_idx];
+    let list_num_owned = list_num.to_string();
+
+    if negated {
+        // Remove the entire ACL by this number
+        d.state.access_lists.retain(|a| a.name != list_num_owned);
+        let p = d.prompt();
+        d.queue_output(&format!("\n{}", p));
+        return;
+    }
+
+    if parts.len() < action_idx + 1 {
+        let p = d.prompt();
+        d.queue_output(&format!("\n% Incomplete command.\n{}", p));
+        return;
+    }
+
+    let action = parts[action_idx].to_string();
+    let protocol = parts.get(action_idx + 1).unwrap_or(&"ip").to_string();
+    let source = parts.get(action_idx + 2).map(|s| s.to_string()).unwrap_or_else(|| "any".to_string());
+    let destination = parts.get(action_idx + 3).map(|s| s.to_string()).unwrap_or_else(|| "any".to_string());
+    let extra = parts.get(action_idx + 4..).map(|s| s.join(" ")).unwrap_or_default();
 
     let acl_type = if list_num.parse::<u32>().map(|n| n >= 100).unwrap_or(true) {
         "Extended".to_string()
@@ -341,7 +390,6 @@ pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
 
     // Find or create the access list
     let entry = AccessListEntry { action, protocol, source, destination, extra };
-    let list_num_owned = list_num.to_string();
     let acl = d.state.access_lists.iter_mut().find(|a| a.name == list_num_owned);
 
     if let Some(acl) = acl {
@@ -366,6 +414,27 @@ pub fn handle_config_sub_rest(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
+// ─── Tree helpers ─────────────────────────────────────────────────────────────
+
+/// Filter out node names that shouldn't be cloned into the "no" subtree.
+fn should_exclude_from_no(node: &CommandNode) -> bool {
+    if let crate::cmd_tree::TokenMatcher::Keyword(kw) = &node.matcher {
+        matches!(kw.as_str(), "no" | "exit" | "end" | "help" | "do")
+    } else {
+        false
+    }
+}
+
+/// Build the "no" keyword node whose children are a clone of the provided commands.
+fn build_no_node(main_commands: &[CommandNode]) -> CommandNode {
+    let no_children: Vec<CommandNode> = main_commands.iter()
+        .filter(|n| !should_exclude_from_no(n))
+        .cloned()
+        .collect();
+    keyword("no", "Negate a command or set its defaults")
+        .children(no_children)
+}
+
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static CONF_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -375,10 +444,11 @@ pub fn conf_tree() -> &'static Vec<CommandNode> {
 }
 
 fn build_conf_tree() -> Vec<CommandNode> {
-    vec![
-        // hostname <name>
+    let mut main_commands: Vec<CommandNode> = vec![
+        // hostname <name>  (bare handler for "no hostname")
         keyword("hostname", "Set system's network name")
             .mode(config_only())
+            .handler(handle_hostname)
             .children(vec![
                 param("<name>", ParamType::Word, "Hostname string")
                     .handler(handle_hostname),
@@ -518,13 +588,6 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     ]),
             ]),
 
-        // no <rest-of-line>
-        keyword("no", "Negate a command or set its defaults")
-            .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Command to negate")
-                    .handler(handle_no),
-            ]),
-
         // line vty/console
         keyword("line", "Configure a terminal line")
             .mode(config_only())
@@ -629,23 +692,26 @@ fn build_conf_tree() -> Vec<CommandNode> {
                             .handler(handle_banner_motd),
                     ]),
             ]),
+    ];
 
-        // help
+    // Build "no" with cloned children (excluding no/exit/end/help/do)
+    let no_node = build_no_node(&main_commands);
+    main_commands.push(no_node);
+
+    main_commands.push(
         keyword("help", "Description of the interactive help system")
             .handler(crate::cmd_tree_exec::handle_help_command),
-
-        // help
-        keyword("help", "Description of the interactive help system")
-            .handler(crate::cmd_tree_exec::handle_help_command),
-
-        // exit
+    );
+    main_commands.push(
         keyword("exit", "Exit from current mode")
             .handler(handle_config_exit),
-
-        // end
+    );
+    main_commands.push(
         keyword("end", "Exit to privileged EXEC mode")
             .handler(handle_config_end),
-    ]
+    );
+
+    main_commands
 }
 
 // ─── Sub-mode trees ───────────────────────────────────────────────────────────
@@ -658,11 +724,12 @@ pub fn config_if_tree() -> &'static Vec<CommandNode> {
 }
 
 fn build_config_if_tree() -> Vec<CommandNode> {
-    vec![
-        // ip address <ip> <mask>
+    let mut main_commands: Vec<CommandNode> = vec![
+        // ip address <ip> <mask>  (bare "address" handler for "no ip address")
         keyword("ip", "IP configuration subcommands")
             .children(vec![
                 keyword("address", "Set the IP address of an interface")
+                    .handler(handle_ip_address)
                     .children(vec![
                         param("<ip>", ParamType::Word, "IP address")
                             .children(vec![
@@ -676,15 +743,9 @@ fn build_config_if_tree() -> Vec<CommandNode> {
         keyword("shutdown", "Shutdown the selected interface")
             .handler(handle_shutdown),
 
-        // no <rest>
-        keyword("no", "Negate a command or set its defaults")
-            .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Command to negate")
-                    .handler(handle_no),
-            ]),
-
-        // description <rest>
+        // description <rest>  (also handle bare "description" for "no description")
         keyword("description", "Interface specific description")
+            .handler(handle_description)
             .children(vec![
                 param("<rest>", ParamType::RestOfLine, "Description text")
                     .handler(handle_description),
@@ -717,19 +778,25 @@ fn build_config_if_tree() -> Vec<CommandNode> {
                 param("<rest>", ParamType::RestOfLine, "Duplex mode")
                     .handler(handle_config_sub_rest),
             ]),
+    ];
 
-        // help
+    let no_node = build_no_node(&main_commands);
+    main_commands.push(no_node);
+
+    main_commands.push(
         keyword("help", "Description of the interactive help system")
             .handler(crate::cmd_tree_exec::handle_help_command),
-
-        // exit
+    );
+    main_commands.push(
         keyword("exit", "Exit from current mode")
             .handler(handle_config_exit),
-
-        // end
+    );
+    main_commands.push(
         keyword("end", "Exit to privileged EXEC mode")
             .handler(handle_config_end),
-    ]
+    );
+
+    main_commands
 }
 
 static CONFIG_ROUTER_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -740,7 +807,7 @@ pub fn config_router_tree() -> &'static Vec<CommandNode> {
 }
 
 fn build_config_router_tree() -> Vec<CommandNode> {
-    vec![
+    let mut main_commands: Vec<CommandNode> = vec![
         // network <rest>
         keyword("network", "Enable routing on an IP network")
             .children(vec![
@@ -786,26 +853,25 @@ fn build_config_router_tree() -> Vec<CommandNode> {
                 param("<rest>", ParamType::RestOfLine, "Neighbor parameters")
                     .handler(handle_config_sub_rest),
             ]),
+    ];
 
-        // no <rest>
-        keyword("no", "Negate a command or set its defaults")
-            .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Command to negate")
-                    .handler(handle_config_sub_rest),
-            ]),
+    let no_node = build_no_node(&main_commands);
+    main_commands.push(no_node);
 
-        // help
+    main_commands.push(
         keyword("help", "Description of the interactive help system")
             .handler(crate::cmd_tree_exec::handle_help_command),
-
-        // exit
+    );
+    main_commands.push(
         keyword("exit", "Exit from current mode")
             .handler(handle_config_exit),
-
-        // end
+    );
+    main_commands.push(
         keyword("end", "Exit to privileged EXEC mode")
             .handler(handle_config_end),
-    ]
+    );
+
+    main_commands
 }
 
 static CONFIG_LINE_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -816,7 +882,7 @@ pub fn config_line_tree() -> &'static Vec<CommandNode> {
 }
 
 fn build_config_line_tree() -> Vec<CommandNode> {
-    vec![
+    let mut main_commands: Vec<CommandNode> = vec![
         // transport <rest>
         keyword("transport", "Define transport protocols for line")
             .children(vec![
@@ -865,26 +931,25 @@ fn build_config_line_tree() -> Vec<CommandNode> {
                 param("<rest>", ParamType::RestOfLine, "Password")
                     .handler(handle_config_sub_rest),
             ]),
+    ];
 
-        // no <rest>
-        keyword("no", "Negate a command or set its defaults")
-            .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Command to negate")
-                    .handler(handle_config_sub_rest),
-            ]),
+    let no_node = build_no_node(&main_commands);
+    main_commands.push(no_node);
 
-        // help
+    main_commands.push(
         keyword("help", "Description of the interactive help system")
             .handler(crate::cmd_tree_exec::handle_help_command),
-
-        // exit
+    );
+    main_commands.push(
         keyword("exit", "Exit from current mode")
             .handler(handle_config_exit),
-
-        // end
+    );
+    main_commands.push(
         keyword("end", "Exit to privileged EXEC mode")
             .handler(handle_config_end),
-    ]
+    );
+
+    main_commands
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -984,10 +1049,22 @@ mod tests {
 
     #[test]
     fn test_conf_no_command_parses() {
+        // "no shutdown" should parse in config-if mode (shutdown is config-if only)
+        let tree = config_if_tree();
+        let mode = CliMode::ConfigSub("config-if".to_string());
+        let result = parse("no shutdown", tree, &mode);
+        assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "no shutdown should parse in config-if mode");
+    }
+
+    #[test]
+    fn test_conf_no_ip_route_parses() {
+        // "no ip route ..." should parse in config mode
         let tree = conf_tree();
         let mode = CliMode::Config;
-        let result = parse("no shutdown", tree, &mode);
-        assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }));
+        let result = parse("no ip route 0.0.0.0 0.0.0.0 10.0.0.1", tree, &mode);
+        assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "no ip route should parse in config mode");
     }
 
     #[test]

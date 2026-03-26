@@ -4552,4 +4552,126 @@ mod tests {
             "Initial output should contain banner text, got: {:?}", output
         );
     }
+
+    // ─── "no" prefix tree tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_no_shutdown_via_tree() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
+
+        // shutdown — admin_up should become false
+        let _ = send_cmd(&mut device, "shutdown").await;
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        assert!(!iface.admin_up, "shutdown should set admin_up=false");
+
+        // no shutdown — admin_up should become true
+        let out = send_cmd(&mut device, "no shutdown").await;
+        assert!(!out.contains("Invalid"), "no shutdown should be accepted, got: {:?}", out);
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        assert!(iface.admin_up, "no shutdown should set admin_up=true");
+
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    #[tokio::test]
+    async fn test_no_ip_address_removes_ip() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface loopback 0").await;
+        let _ = send_cmd(&mut device, "ip address 10.1.2.3 255.255.255.0").await;
+
+        // Verify IP was set
+        let iface = device.state.interfaces.iter().find(|i| i.name == "Loopback0").unwrap();
+        assert!(iface.ip_address.is_some(), "ip address should have been set");
+
+        // no ip address — removes the IP
+        let out = send_cmd(&mut device, "no ip address").await;
+        assert!(!out.contains("Invalid"), "no ip address should be accepted, got: {:?}", out);
+        let iface = device.state.interfaces.iter().find(|i| i.name == "Loopback0").unwrap();
+        assert!(iface.ip_address.is_none(), "no ip address should clear ip_address");
+
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    #[tokio::test]
+    async fn test_no_description_clears() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
+        let _ = send_cmd(&mut device, "description My uplink interface").await;
+
+        // Verify description was set
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        assert_eq!(iface.description, "My uplink interface", "description should have been set");
+
+        // no description — clears it
+        let out = send_cmd(&mut device, "no description").await;
+        assert!(!out.contains("Invalid"), "no description should be accepted, got: {:?}", out);
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        assert!(iface.description.is_empty(), "no description should clear description");
+
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    #[tokio::test]
+    async fn test_no_hostname_resets() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "hostname MyRouter").await;
+        assert_eq!(device.state.hostname, "MyRouter", "hostname should have been set");
+
+        let out = send_cmd(&mut device, "no hostname").await;
+        assert!(!out.contains("Invalid"), "no hostname should be accepted, got: {:?}", out);
+        assert_eq!(device.state.hostname, "Router", "no hostname should reset to 'Router'");
+
+        // Restore original
+        let _ = send_cmd(&mut device, "hostname R1").await;
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    #[tokio::test]
+    async fn test_no_tab_completion() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Enter config mode
+        device.send(b"configure terminal\r").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Enter config-if sub-mode (shutdown is only available there)
+        device.send(b"interface GigabitEthernet 0/0\r").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Type "no shut" then Tab — should complete to "no shutdown "
+        device.send(b"no shut").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"\t").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("down ") || output.contains("shutdown"),
+            "Tab after 'no shut' should complete to 'no shutdown', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_description_writes_to_state() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
+        let _ = send_cmd(&mut device, "description WAN uplink").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        // Verify state was updated
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        assert_eq!(iface.description, "WAN uplink",
+            "description should be stored in device state, got: {:?}", iface.description);
+
+        // Also verify show running-config contains it
+        let output = send_cmd(&mut device, "show running-config").await;
+        assert!(output.contains("WAN uplink"),
+            "show running-config should contain description text, got: {:?}",
+            &output[..output.len().min(500)]);
+    }
 }

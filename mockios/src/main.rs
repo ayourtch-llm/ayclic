@@ -199,6 +199,11 @@ async fn run_telnet_server(cli: &Cli, addr: SocketAddr) {
                         break;
                     }
                 }
+
+                // Check if device wants to disconnect (exit/quit)
+                if device.is_reloading() {
+                    break;
+                }
             }
             info!("Connection from {} closed", peer);
         });
@@ -305,6 +310,11 @@ async fn run_ssh_server(cli: &Cli, addr: SocketAddr) {
                                     if io.send_message(&ssh_channel_data(client_channel, &output)).await.is_err() {
                                         break;
                                     }
+                                }
+
+                                // Check if device wants to disconnect (exit/quit)
+                                if device.is_reloading() {
+                                    break;
                                 }
                             }
                         }

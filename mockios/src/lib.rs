@@ -1078,7 +1078,61 @@ Configuration register is 0x2102"#,
     }
 
     pub fn queue_output(&mut self, text: &str) {
-        self.output_queue.extend_from_slice(text.as_bytes());
+        // Normalize line endings to \r\n for terminal compatibility.
+        // First remove any existing \r to avoid doubling, then replace \n with \r\n.
+        let normalized = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        self.output_queue.extend_from_slice(normalized.as_bytes());
+    }
+
+    fn try_tab_complete(&self, partial_input: &str) -> Option<String> {
+        use crate::cmd_tree::{tokenize_with_offsets, find_matches};
+
+        let tree: &[crate::cmd_tree::CommandNode] = match &self.mode {
+            CliMode::Config | CliMode::ConfigSub(_) => crate::cmd_tree_conf::conf_tree(),
+            _ => crate::cmd_tree_exec::exec_tree(),
+        };
+
+        let tokens = tokenize_with_offsets(partial_input);
+        if tokens.is_empty() {
+            return None;
+        }
+
+        // Walk tree to the parent of the last token.
+        // We store intermediate match results in a Vec to extend their lifetime
+        // long enough for the borrow of their children.
+        let path_len = tokens.len() - 1;
+        let mut owned_matches: Vec<Vec<&crate::cmd_tree::CommandNode>> = Vec::new();
+        let mut current_nodes: &[crate::cmd_tree::CommandNode] = tree;
+        for i in 0..path_len {
+            let matches = find_matches(&tokens[i].0, current_nodes, &self.mode);
+            if matches.len() != 1 {
+                return None;
+            }
+            owned_matches.push(matches);
+            current_nodes = &owned_matches.last().unwrap()[0].children;
+        }
+
+        // Try to complete the last token
+        let last_token = &tokens[tokens.len() - 1].0;
+        let matches = find_matches(last_token, current_nodes, &self.mode);
+
+        if matches.len() == 1 {
+            if let crate::cmd_tree::TokenMatcher::Keyword(kw) = &matches[0].matcher {
+                if kw.len() > last_token.len() {
+                    // Return the suffix to complete + a space
+                    let suffix = format!("{} ", &kw[last_token.len()..]);
+                    return Some(suffix);
+                } else if kw == last_token {
+                    // Already complete, just add space if not there
+                    if !partial_input.ends_with(' ') {
+                        return Some(" ".to_string());
+                    }
+                }
+            }
+            None
+        } else {
+            None // ambiguous or no match
+        }
     }
 
     /// Synchronous receive for unit tests (no async runtime needed).
@@ -1163,6 +1217,27 @@ impl RawTransport for MockIosDevice {
                     if self.input_buffer.pop().is_some() {
                         self.output_queue.extend_from_slice(b"\x08 \x08");
                     }
+                }
+                0x09 => {
+                    // Tab — attempt command completion
+                    let partial = String::from_utf8_lossy(&self.input_buffer).to_string();
+                    let completion = self.try_tab_complete(&partial);
+                    match completion {
+                        Some(completed_suffix) => {
+                            self.output_queue.extend_from_slice(completed_suffix.as_bytes());
+                            self.input_buffer.extend_from_slice(completed_suffix.as_bytes());
+                        }
+                        None => {
+                            // No unique completion — beep
+                            self.output_queue.push(0x07);
+                        }
+                    }
+                }
+                0x03 => {
+                    // Ctrl+C — cancel current input, show new prompt
+                    self.input_buffer.clear();
+                    let p = self.prompt();
+                    self.queue_output(&format!("\n{}", p));
                 }
                 _ => {
                     // Regular printable character — echo unless in password mode
@@ -2577,5 +2652,55 @@ mod tests {
         let out = device.receive(Duration::from_secs(1)).await.unwrap();
         let output = String::from_utf8_lossy(&out);
         assert!(output.contains("Cisco IOS"), "After backspace correction, should get show version");
+    }
+
+    #[tokio::test]
+    async fn test_output_uses_crlf() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Initial prompt doesn't have newlines, so just check a command
+        device.send(b"show version\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let raw = String::from_utf8_lossy(&data);
+        // Should have \r\n, not bare \n
+        assert!(!raw.contains('\n') || raw.contains("\r\n"),
+            "Output should use \\r\\n, not bare \\n");
+        // More specifically: every \n should be preceded by \r
+        for (i, &b) in data.iter().enumerate() {
+            if b == b'\n' && (i == 0 || data[i-1] != b'\r') {
+                panic!("Found bare \\n at position {} in output: {:?}", i, &raw[..raw.len().min(100)]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tab_completion_unique() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Type "sh" then Tab — should complete to "show "
+        device.send(b"sh").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // echo "sh"
+
+        device.send(b"\t").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("ow "), "Tab should complete 'sh' to 'show ', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_tab_completion_ambiguous() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Type "co" then Tab — ambiguous (configure, copy)
+        device.send(b"co").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"\t").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Should beep (BEL = 0x07) or produce no completion
+        assert!(data.contains(&0x07) || data.is_empty(),
+            "Ambiguous tab should beep or be empty, got: {:?}", data);
     }
 }

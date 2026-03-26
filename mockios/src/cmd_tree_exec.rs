@@ -171,9 +171,9 @@ pub fn handle_traceroute(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_exit(d: &mut MockIosDevice, _input: &str) {
-    // In exec mode, exit doesn't really do much (session ends)
-    let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    // In exec mode, exit closes the session
+    d.queue_output("\n");
+    d.mode = CliMode::Reloading; // signals connection close
 }
 
 // ─── Tree ─────────────────────────────────────────────────────────────────────
@@ -368,8 +368,12 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     .handler(handle_traceroute),
             ]),
 
-        // exit
+        // exit / logout / quit
         keyword("exit", "Exit from the EXEC")
+            .handler(handle_exit),
+        keyword("logout", "Exit from the EXEC")
+            .handler(handle_exit),
+        keyword("quit", "Exit from the EXEC")
             .handler(handle_exit),
     ]
 }

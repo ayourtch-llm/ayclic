@@ -1526,6 +1526,10 @@ Configuration register is {}"#,
     pub fn receive_sync(&mut self) -> Vec<u8> {
         if !self.initial_sent {
             self.initial_sent = true;
+            if !self.state.banner_motd.is_empty() {
+                let banner = self.state.banner_motd.clone();
+                self.queue_output(&format!("\n{}\n", banner));
+            }
             self.queue_output(&format!("{}", self.prompt()));
         }
         std::mem::take(&mut self.output_queue)
@@ -1955,6 +1959,10 @@ impl RawTransport for MockIosDevice {
         // Send initial prompt on first receive
         if !self.initial_sent {
             self.initial_sent = true;
+            if !self.state.banner_motd.is_empty() {
+                let banner = self.state.banner_motd.clone();
+                self.queue_output(&format!("\n{}\n", banner));
+            }
             match &self.mode {
                 CliMode::Login => {
                     self.queue_output("Username: ");
@@ -4433,6 +4441,115 @@ mod tests {
         assert!(
             output.contains("permit ip any any"),
             "show access-lists should contain 'permit ip any any', got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_ntp_status() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ntp status").await;
+        assert!(
+            output.contains("unsynchronized"),
+            "show ntp status should contain 'unsynchronized', got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_snmp() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show snmp").await;
+        assert!(
+            output.contains("SNMP packets"),
+            "show snmp should contain 'SNMP packets', got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_privilege() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show privilege").await;
+        assert!(
+            output.contains("privilege level is 15"),
+            "show privilege should contain 'privilege level is 15', got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_line() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show line").await;
+        assert!(
+            output.contains("Tty"),
+            "show line should contain 'Tty', got: {:?}", output
+        );
+        assert!(
+            output.contains("VTY"),
+            "show line should contain 'VTY', got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_inventory() {
+        let mut device = MockIosDevice::new("Router1")
+            .with_model("WS-C3560CX-12PD-S");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = send_cmd(&mut device, "show inventory").await;
+        assert!(
+            output.contains("PID:"),
+            "show inventory should contain 'PID:', got: {:?}", output
+        );
+        assert!(
+            output.contains("WS-C3560CX-12PD-S"),
+            "show inventory should contain the model name, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_environment() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show environment").await;
+        assert!(
+            output.contains("TEMPERATURE"),
+            "show environment should contain 'TEMPERATURE', got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_banner_motd_config() {
+        let mut device = setup_device("R1").await;
+
+        // Enter config mode
+        let _ = send_cmd(&mut device, "configure terminal").await;
+
+        // Set banner motd using # as delimiter
+        let _ = send_cmd(&mut device, "banner motd #Welcome to Router#").await;
+
+        // Exit back to privileged exec
+        let _ = send_cmd(&mut device, "end").await;
+
+        // Verify banner appears in running-config
+        let output = send_cmd(&mut device, "show running-config").await;
+        assert!(
+            output.contains("banner motd"),
+            "show running-config should contain 'banner motd', got: {:?}", output
+        );
+        assert!(
+            output.contains("Welcome to Router"),
+            "show running-config should contain banner text, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_banner_displayed_on_connect() {
+        let mut device = MockIosDevice::new("R1");
+        device.state.banner_motd = "Welcome".to_string();
+
+        // First receive should include the banner
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(
+            output.contains("Welcome"),
+            "Initial output should contain banner text, got: {:?}", output
         );
     }
 }

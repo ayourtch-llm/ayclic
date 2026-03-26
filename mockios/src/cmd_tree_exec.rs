@@ -480,6 +480,42 @@ Total Mac Addresses for this criterion: 0
     d.queue_output(&format!("\n{}{}", output, p));
 }
 
+pub fn handle_show_line(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!(
+        "\n   Tty Line Typ     Tx/Rx    A Modem  Roty AccO AccI   Uses   Noise  Overruns   Int\n\
+*    0    0 CTY              -    -      -    -    -      0       0     0/0       -\n\
+     1    1 AUX   9600/9600  -    -      -    -    -      0       0     0/0       -\n\
+   386  386 VTY              -    -      -    -    -      0       0     0/0       -\n\
+   387  387 VTY              -    -      -    -    -      0       0     0/0       -\n\
+\n{}",
+        p
+    ));
+}
+
+pub fn handle_show_inventory(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!(
+        "\nNAME: \"1\", DESCR: \"{model}\"\n\nPID: {model}   , VID: V02  , SN: {sn}\n\n{p}",
+        model = d.state.model,
+        sn = d.state.serial_number,
+        p = p
+    ));
+}
+
+pub fn handle_show_environment(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!(
+        "\nSYSTEM TEMPERATURE is OK\n\
+System Temperature Value: 37 Degree Celsius\n\
+System Temperature State: GREEN\n\
+Yellow Threshold : 56 Degree Celsius\n\
+Red Threshold    : 68 Degree Celsius\n\
+\n{}",
+        p
+    ));
+}
+
 pub fn handle_show_spanning_tree(d: &mut MockIosDevice, _input: &str) {
     let output = "\
 VLAN0001
@@ -492,6 +528,65 @@ VLAN0001
 ";
     let p = d.prompt();
     d.queue_output(&format!("\n{}{}", output, p));
+}
+
+pub fn handle_show_ntp_status(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+Clock is unsynchronized, stratum 16, no reference clock
+nominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10
+ntp uptime is 0 (1/100 of seconds), resolution is 4016
+reference time is 00000000.00000000 (00:00:00.000 UTC Mon Jan 1 1900)
+clock offset is 0.0000 msec, root delay is 0.00 msec
+root dispersion is 0.00 msec, peer dispersion is 0.00 msec
+loopfilter state is 'FSET' (Drift set from file), drift is 0.000000000 s/s
+system poll interval is 8, never updated.";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", output, p));
+}
+
+pub fn handle_show_ntp_associations(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+  address         ref clock       st   when   poll reach  delay  offset   disp
+*~127.127.1.1     .LOCL.           0      -     16   377  0.000   0.000  0.000
+ * sys.peer, # selected, + candidate, - outlyer, x falseticker, ~ configured";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", output, p));
+}
+
+pub fn handle_show_snmp(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+Chassis: FCZ123456789
+0 SNMP packets input
+    0 Bad SNMP version errors
+    0 Unknown community name
+    0 Illegal operation for community name supplied
+    0 Encoding errors
+    0 Number of requested variables
+    0 Number of altered variables
+    0 Get-request PDUs
+    0 Get-next PDUs
+    0 Set-request PDUs
+    0 Input queue packet drops (Maximum queue size 1000)
+0 SNMP packets output
+    0 Too big errors (Maximum packet size 1500)
+    0 No such name errors
+    0 Bad values errors
+    0 General errors
+    0 Response PDUs
+    0 Trap PDUs
+SNMP global trap: disabled";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", output, p));
+}
+
+pub fn handle_show_privilege(d: &mut MockIosDevice, _input: &str) {
+    let level = if matches!(d.mode, CliMode::PrivilegedExec | CliMode::Config | CliMode::ConfigSub(_)) {
+        15
+    } else {
+        1
+    };
+    let p = d.prompt();
+    d.queue_output(&format!("\nCurrent privilege level is {}\n{}", level, p));
 }
 
 // ─── Tree ─────────────────────────────────────────────────────────────────────
@@ -586,6 +681,23 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     ]),
                 keyword("access-lists", "List access lists")
                     .handler(handle_show_access_lists),
+                keyword("ntp", "Network time protocol")
+                    .children(vec![
+                        keyword("status", "NTP status")
+                            .handler(handle_show_ntp_status),
+                        keyword("associations", "NTP associations")
+                            .handler(handle_show_ntp_associations),
+                    ]),
+                keyword("snmp", "SNMP statistics")
+                    .handler(handle_show_snmp),
+                keyword("privilege", "Show current privilege level")
+                    .handler(handle_show_privilege),
+                keyword("line", "TTY line information")
+                    .handler(handle_show_line),
+                keyword("inventory", "Show the physical inventory")
+                    .handler(handle_show_inventory),
+                keyword("environment", "Show environmental conditions")
+                    .handler(handle_show_environment),
             ]),
 
         // configure [priv only]

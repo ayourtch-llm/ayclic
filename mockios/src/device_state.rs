@@ -298,6 +298,11 @@ impl DeviceState {
         body_lines.push(format!("hostname {}", self.hostname));
         body_lines.push("!".to_string());
 
+        if !self.banner_motd.is_empty() {
+            body_lines.push(format!("banner motd ^{}^", self.banner_motd));
+            body_lines.push("!".to_string());
+        }
+
         // Interfaces
         for iface in &self.interfaces {
             body_lines.push(format!("interface {}", iface.name));

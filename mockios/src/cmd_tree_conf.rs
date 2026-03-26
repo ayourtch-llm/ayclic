@@ -245,6 +245,27 @@ pub fn handle_rest_of_line(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
+pub fn handle_banner_motd(d: &mut MockIosDevice, input: &str) {
+    // Parse: "banner motd <delim><text><delim>"
+    let rest = input.trim()
+        .strip_prefix("banner").map(|s| s.trim())
+        .and_then(|s| s.strip_prefix("motd")).map(|s| s.trim())
+        .unwrap_or("");
+
+    if let Some(delim) = rest.chars().next() {
+        let after_delim = &rest[delim.len_utf8()..];
+        if let Some(end) = after_delim.find(delim) {
+            d.state.banner_motd = after_delim[..end].to_string();
+        } else {
+            // No closing delimiter — use rest of line
+            d.state.banner_motd = after_delim.to_string();
+        }
+    }
+
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}", p));
+}
+
 pub fn handle_shutdown(d: &mut MockIosDevice, _input: &str) {
     // Update state for current interface
     if let Some(ref iface_name) = d.current_interface.clone() {
@@ -596,6 +617,17 @@ fn build_conf_tree() -> Vec<CommandNode> {
             .children(vec![
                 param("<rest>", ParamType::RestOfLine, "VLAN parameters")
                     .handler(handle_vlan),
+            ]),
+
+        // banner motd <delim><text><delim>
+        keyword("banner", "Define a login banner")
+            .mode(config_only())
+            .children(vec![
+                keyword("motd", "Set Message of the Day banner")
+                    .children(vec![
+                        param("<text>", ParamType::RestOfLine, "Banner text (delimiter char + text + delimiter)")
+                            .handler(handle_banner_motd),
+                    ]),
             ]),
 
         // help

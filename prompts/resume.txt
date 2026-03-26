@@ -1,0 +1,35 @@
+We're improving the mockios crate to make it indistinguishable from a real Cisco IOS device. Read these docs to get up to speed:
+
+1. docs/plans/next-steps.md — immediate TODO items and current stats
+2. docs/plans/device-state-model.md — the structured state model architecture
+3. docs/plans/command-tree.md — the command tree dispatch system
+4. docs/plans/cli-editing-keys.md — CLI editing key reference
+
+The workflow is:
+1. Connect to real IOS devices (192.168.0.113 via telnet, user ayourtch/cisco123, enable 321cisco — this is a lab device; 192.168.0.130 is LIVE read-only) and observe behavior
+2. Compare with mockios (build with `cargo build -p mockios --release`, run SSH server with `./target/release/mockios --ssh 127.0.0.1:2222`)
+3. Write failing tests in mockios/src/lib.rs capturing real IOS behavior
+4. Dispatch Sonnet agents (`Agent` tool with `model: sonnet`) to fix the mockios code — always use TDD
+5. Verify all tests pass (`cargo test -p mockios`), commit, repeat
+
+Key architectural points:
+- mockios/src/cmd_tree.rs — command tree parser with abbreviation matching, ? help, tab completion
+- mockios/src/cmd_tree_exec.rs — exec mode commands and handlers
+- mockios/src/cmd_tree_conf.rs — config mode trees (separate trees per sub-mode: config-if, config-router, config-line)
+- mockios/src/device_state.rs — structured DeviceState model (interfaces, routes, VLANs)
+- mockios/src/lib.rs — MockIosDevice with send()/receive(), character echo, CLI editing, escape sequences
+- Handlers are fn(&mut MockIosDevice, &str) — they read/write DeviceState, not static strings
+
+The immediate priorities from user feedback are:
+1. Parameter value completion — `int <TAB>` should list interfaces from device state (needs completer fn on Param nodes)
+2. Sub-submodes support (config-router-af etc.) — architecture supports it, just needs more trees
+3. IPv6 support
+4. Remove old running_config Vec<String> field (superseded by DeviceState)
+5. Keep comparing with real devices and fixing differences
+
+Important rules:
+- .130 is a LIVE network device — read-only, no changes
+- .113 is lab — avoid GigabitEthernet1/0/13 and Vlan2
+- Always delegate coding to Sonnet agents, review and commit yourself
+- The mock device should always behave identically whether accessed via telnet or SSH — no mode flags
+- All command output should be backed by the DeviceState model, not static strings

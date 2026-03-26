@@ -2,6 +2,8 @@
 
 use std::sync::OnceLock;
 
+use std::net::Ipv4Addr;
+
 use crate::cmd_tree::{keyword, param, CliModeClass, CmdHandler, CommandNode, ModeFilter, ParamType};
 use crate::{CliMode, MockIosDevice, PendingInteractive};
 
@@ -14,7 +16,7 @@ pub fn handle_show_version(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_running_config(d: &mut MockIosDevice, _input: &str) {
-    let config = d.running_config.join("\n");
+    let config = d.state.generate_running_config();
     let p = d.prompt();
     d.queue_output(&format!("\n{}\n{}", config, p));
 }
@@ -160,9 +162,59 @@ pub fn handle_install_remove_inactive(d: &mut MockIosDevice, _input: &str) {
     d.handle_install_remove_inactive();
 }
 
-pub fn handle_ping(d: &mut MockIosDevice, _input: &str) {
+/// Check if an IP address is reachable via the routing table in device state.
+fn is_reachable(d: &MockIosDevice, target: Ipv4Addr) -> bool {
+    let target_u32 = u32::from(target);
+
+    // Check connected routes first (admin_up interfaces with IP)
+    for iface in &d.state.interfaces {
+        if iface.admin_up {
+            if let Some((addr, mask)) = iface.ip_address {
+                let net = u32::from(addr) & u32::from(mask);
+                let host_masked = target_u32 & u32::from(mask);
+                if net == host_masked {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Check static routes (longest-prefix match, simplified)
+    for route in &d.state.static_routes {
+        let prefix_u32 = u32::from(route.prefix);
+        let mask_u32 = u32::from(route.mask);
+        let host_masked = target_u32 & mask_u32;
+        if prefix_u32 == host_masked {
+            return true;
+        }
+    }
+
+    false
+}
+
+pub fn handle_ping(d: &mut MockIosDevice, input: &str) {
+    // Extract target from the input line: "ping <target>"
+    let target_str = input.split_whitespace().nth(1).unwrap_or("");
     let p = d.prompt();
-    d.queue_output(&format!("\nSending 5, 100-byte ICMP Echos\n!!!!!\nSuccess rate is 100 percent\n{}", p));
+
+    let reachable = if let Ok(target_ip) = target_str.parse::<Ipv4Addr>() {
+        is_reachable(d, target_ip)
+    } else {
+        // Can't parse IP — try hostname resolution (always succeed for now)
+        true
+    };
+
+    if reachable {
+        d.queue_output(&format!(
+            "\nType escape sequence to abort.\nSending 5, 100-byte ICMP Echos to {}, timeout is 2 seconds:\n!!!!!\nSuccess rate is 100 percent (5/5), round-trip min/avg/max = 1/1/1 ms\n{}",
+            target_str, p
+        ));
+    } else {
+        d.queue_output(&format!(
+            "\nType escape sequence to abort.\nSending 5, 100-byte ICMP Echos to {}, timeout is 2 seconds:\n.....\nSuccess rate is 0 percent (0/5)\n{}",
+            target_str, p
+        ));
+    }
 }
 
 pub fn handle_traceroute(d: &mut MockIosDevice, _input: &str) {

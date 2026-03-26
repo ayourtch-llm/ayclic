@@ -28,7 +28,9 @@
 pub mod cmd_tree;
 pub mod cmd_tree_exec;
 pub mod cmd_tree_conf;
+pub mod device_state;
 
+use device_state::DeviceState;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -96,7 +98,7 @@ pub enum CliMode {
 /// Feed it commands via `send()`, read responses via `receive()`.
 /// Responses are queued internally and returned on the next `receive()`.
 pub struct MockIosDevice {
-    hostname: String,
+    pub hostname: String,
     pub mode: CliMode,
     /// Pending output to be returned on next receive().
     output_queue: Vec<u8>,
@@ -111,17 +113,17 @@ pub struct MockIosDevice {
     /// Password for login.
     password: Option<String>,
     /// Enable password (None = already privileged).
-    enable_password: Option<String>,
+    pub enable_password: Option<String>,
     /// IOS version string.
-    version: String,
+    pub version: String,
     /// Model string.
-    model: String,
+    pub model: String,
     /// Pending interactive state.
     pending_interactive: Option<PendingInteractive>,
     /// Input buffer (accumulates send() data).
     input_buffer: Vec<u8>,
     /// Whether the initial banner/prompt has been sent.
-    initial_sent: bool,
+    pub initial_sent: bool,
     /// Queued reload transforms. Each reload pops the next one.
     reload_transforms: Vec<Box<dyn FnOnce(&mut MockIosDevice) + Send>>,
     /// Total flash size in bytes (for `dir` output).
@@ -132,6 +134,10 @@ pub struct MockIosDevice {
     reload_delay: Duration,
     /// IOS-XE install mode state (None = not IOS-XE / bundle mode only).
     install_state: Option<InstallState>,
+    /// Structured device state — the authoritative data model.
+    pub state: DeviceState,
+    /// Current interface being configured in config-if mode.
+    pub current_interface: Option<String>,
 }
 
 /// Pending interactive prompt state.
@@ -196,6 +202,8 @@ impl MockIosDevice {
             boot_variable: String::new(),
             reload_delay: Duration::from_secs(0),
             install_state: None,
+            state: DeviceState::new(hostname),
+            current_interface: None,
         };
         device.register_default_commands();
         device
@@ -223,12 +231,14 @@ impl MockIosDevice {
     /// Set the IOS version string.
     pub fn with_version(mut self, version: &str) -> Self {
         self.version = version.to_string();
+        self.state.version = version.to_string();
         self
     }
 
     /// Set the model string.
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
+        self.state.model = model.to_string();
         self
     }
 
@@ -248,19 +258,22 @@ impl MockIosDevice {
 
     /// Add a file to flash storage.
     pub fn with_flash_file(mut self, name: &str, content: Vec<u8>) -> Self {
-        self.flash_files.insert(name.to_string(), content);
+        self.flash_files.insert(name.to_string(), content.clone());
+        self.state.flash_files.insert(name.to_string(), content);
         self
     }
 
     /// Set total flash size in bytes (for `dir` output).
     pub fn with_flash_size(mut self, size: u64) -> Self {
         self.flash_total_size = size;
+        self.state.flash_total_size = size;
         self
     }
 
     /// Set the boot variable.
     pub fn with_boot_variable(mut self, boot_var: &str) -> Self {
         self.boot_variable = boot_var.to_string();
+        self.state.boot_variable = boot_var.to_string();
         self
     }
 
@@ -278,15 +291,18 @@ impl MockIosDevice {
     ///
     /// When set, `show install summary`, `show version`, and `show boot`
     /// automatically reflect the install mode state.
-    pub fn with_install_state(mut self, state: InstallState) -> Self {
+    pub fn with_install_state(mut self, install_state: InstallState) -> Self {
         // Auto-set boot variable based on mode
         if self.boot_variable.is_empty() {
-            self.boot_variable = match state.mode {
+            let boot_var = match install_state.mode {
                 InstallMode::Install => "flash:packages.conf".to_string(),
                 InstallMode::Bundle => String::new(), // will use default
             };
+            self.boot_variable = boot_var.clone();
+            self.state.boot_variable = boot_var;
         }
-        self.install_state = Some(state);
+        self.state.install_state = Some(install_state.clone());
+        self.install_state = Some(install_state);
         self
     }
 
@@ -316,6 +332,38 @@ impl MockIosDevice {
     /// let post = pre.derive().with_version("17.09.04a");
     /// ```
     pub fn derive(&self) -> Self {
+        // Build a derived state that mirrors the top-level fields
+        let mut derived_state = DeviceState::new(&self.hostname);
+        derived_state.version = self.state.version.clone();
+        derived_state.model = self.state.model.clone();
+        derived_state.flash_files = self.state.flash_files.clone();
+        derived_state.flash_total_size = self.state.flash_total_size;
+        derived_state.boot_variable = self.state.boot_variable.clone();
+        derived_state.install_state = self.state.install_state.clone();
+        derived_state.interfaces = self.state.interfaces.iter().map(|i| {
+            let mut ni = device_state::InterfaceState::new(&i.name);
+            ni.description = i.description.clone();
+            ni.admin_up = i.admin_up;
+            ni.link_up = i.link_up;
+            ni.ip_address = i.ip_address;
+            ni.speed = i.speed.clone();
+            ni.duplex = i.duplex.clone();
+            ni.mtu = i.mtu;
+            ni.switchport_mode = i.switchport_mode.clone();
+            ni.vlan = i.vlan;
+            ni
+        }).collect();
+        derived_state.static_routes = self.state.static_routes.iter().map(|r| {
+            device_state::StaticRoute {
+                prefix: r.prefix,
+                mask: r.mask,
+                next_hop: r.next_hop,
+                interface: r.interface.clone(),
+                admin_distance: r.admin_distance,
+            }
+        }).collect();
+        derived_state.unmodeled_config = self.state.unmodeled_config.clone();
+
         Self {
             hostname: self.hostname.clone(),
             mode: CliMode::PrivilegedExec,
@@ -336,6 +384,8 @@ impl MockIosDevice {
             boot_variable: self.boot_variable.clone(),
             reload_delay: self.reload_delay,
             install_state: self.install_state.clone(),
+            state: derived_state,
+            current_interface: None,
         }
     }
 
@@ -505,45 +555,27 @@ impl MockIosDevice {
         let header = "Interface              IP-Address      OK? Method Status                Protocol";
         let mut lines = vec![String::new(), header.to_string()];
 
-        // Parse running config for interfaces
-        let mut current_iface: Option<String> = None;
-        let mut current_ip: Option<String> = None;
-        let mut current_shutdown = false;
-
-        // Collect interface info
-        let mut ifaces: Vec<(String, String, bool)> = Vec::new();
-        for line in &self.running_config {
-            let trimmed = line.trim();
-            if trimmed.starts_with("interface ") {
-                if let Some(iface) = current_iface.take() {
-                    let ip = current_ip.take().unwrap_or_else(|| "unassigned".to_string());
-                    ifaces.push((iface, ip, current_shutdown));
-                }
-                current_iface = Some(trimmed.trim_start_matches("interface ").to_string());
-                current_ip = None;
-                current_shutdown = false;
-            } else if trimmed.starts_with("ip address ") {
-                let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    current_ip = Some(parts[2].to_string());
-                }
-            } else if trimmed == "shutdown" {
-                current_shutdown = true;
-            } else if trimmed == "no shutdown" {
-                current_shutdown = false;
-            }
-        }
-        if let Some(iface) = current_iface.take() {
-            let ip = current_ip.take().unwrap_or_else(|| "unassigned".to_string());
-            ifaces.push((iface, ip, current_shutdown));
-        }
-
-        for (iface, ip, shutdown) in &ifaces {
-            let status = if *shutdown { "administratively down" } else { "up" };
-            let protocol = if *shutdown { "down" } else { "up" };
+        // Read from structured state
+        for iface in &self.state.interfaces {
+            let ip = iface
+                .ip_address
+                .map(|(a, _)| a.to_string())
+                .unwrap_or_else(|| "unassigned".to_string());
+            let status = if !iface.admin_up {
+                "administratively down"
+            } else if iface.link_up {
+                "up"
+            } else {
+                "down"
+            };
+            let protocol = if !iface.admin_up || !iface.link_up {
+                "down"
+            } else {
+                "up"
+            };
             lines.push(format!(
                 "{:<23}{:<16}YES NVRAM  {:<22}{}",
-                iface, ip, status, protocol
+                iface.name, ip, status, protocol
             ));
         }
 
@@ -553,21 +585,47 @@ impl MockIosDevice {
 
     pub fn handle_show_ip_route(&mut self) {
         let mut output = String::from("\nCodes: C - connected, S - static\n\n");
-        // Generate connected routes from interfaces
-        for line in &self.running_config {
-            let trimmed = line.trim();
-            if trimmed.starts_with("ip address ") {
-                let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    output.push_str(&format!("C    {}/{} is directly connected\n", parts[2], parts[3]));
-                }
-            } else if trimmed.starts_with("ip route ") {
-                let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                if parts.len() >= 5 {
-                    output.push_str(&format!("S*   {}/{} [1/0] via {}\n", parts[2], parts[3], parts[4]));
+
+        // Connected routes from interfaces that are admin_up and have an IP
+        for iface in &self.state.interfaces {
+            if iface.admin_up {
+                if let Some((addr, mask)) = iface.ip_address {
+                    output.push_str(&format!(
+                        "C    {} {} is directly connected, {}\n",
+                        addr, mask, iface.name
+                    ));
                 }
             }
         }
+
+        // Static routes
+        for route in &self.state.static_routes {
+            let prefix = route.prefix;
+            let mask = route.mask;
+            let dist = route.admin_distance;
+            let prefix_str = format!("{} {}", prefix, mask);
+            if prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
+                && mask == std::net::Ipv4Addr::new(0, 0, 0, 0)
+            {
+                if let Some(nh) = route.next_hop {
+                    output.push_str(&format!(
+                        "S*   {} [{}/0] via {}\n",
+                        prefix_str, dist, nh
+                    ));
+                }
+            } else if let Some(nh) = route.next_hop {
+                output.push_str(&format!(
+                    "S    {} [{}/0] via {}\n",
+                    prefix_str, dist, nh
+                ));
+            } else if let Some(iface) = &route.interface {
+                output.push_str(&format!(
+                    "S    {} is directly connected, {}\n",
+                    prefix_str, iface
+                ));
+            }
+        }
+
         output.push_str(&self.prompt());
         self.queue_output(&output);
     }
@@ -651,6 +709,76 @@ impl MockIosDevice {
         }
     }
 
+    /// Parse config text and apply relevant lines to device state.
+    /// Handles: hostname, interface, ip address, shutdown, no shutdown, ip route.
+    fn apply_config_text_to_state(&mut self, config_text: &str) {
+        use std::net::Ipv4Addr;
+        let mut current_iface: Option<String> = None;
+
+        for line in config_text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("hostname ") {
+                let name = trimmed["hostname ".len()..].trim().to_string();
+                self.hostname = name.clone();
+                self.state.hostname = name;
+            } else if trimmed.starts_with("interface ") {
+                let iface_name = trimmed["interface ".len()..].trim().to_string();
+                self.state.ensure_interface(&iface_name);
+                current_iface = Some(iface_name);
+            } else if trimmed.starts_with("ip address ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    if let (Ok(addr), Ok(mask)) = (
+                        parts[2].parse::<Ipv4Addr>(),
+                        parts[3].parse::<Ipv4Addr>(),
+                    ) {
+                        if let Some(ref iface_name) = current_iface.clone() {
+                            if let Some(iface) = self.state.get_interface_mut(iface_name) {
+                                iface.ip_address = Some((addr, mask));
+                            }
+                        }
+                    }
+                }
+            } else if trimmed == "shutdown" {
+                if let Some(ref iface_name) = current_iface.clone() {
+                    if let Some(iface) = self.state.get_interface_mut(iface_name) {
+                        iface.admin_up = false;
+                    }
+                }
+            } else if trimmed == "no shutdown" {
+                if let Some(ref iface_name) = current_iface.clone() {
+                    if let Some(iface) = self.state.get_interface_mut(iface_name) {
+                        iface.admin_up = true;
+                    }
+                }
+            } else if trimmed.starts_with("ip route ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 5 {
+                    if let (Ok(prefix), Ok(mask), Ok(nh)) = (
+                        parts[2].parse::<Ipv4Addr>(),
+                        parts[3].parse::<Ipv4Addr>(),
+                        parts[4].parse::<Ipv4Addr>(),
+                    ) {
+                        self.state.static_routes.push(device_state::StaticRoute {
+                            prefix,
+                            mask,
+                            next_hop: Some(nh),
+                            interface: None,
+                            admin_distance: 1,
+                        });
+                    }
+                }
+            } else if !trimmed.starts_with('!') && !trimmed.is_empty()
+                && !trimmed.starts_with(' ')
+                && !trimmed.starts_with("end")
+            {
+                // Reset current_iface context when we leave interface block
+                // (any top-level line that isn't interface/ip route)
+                current_iface = None;
+            }
+        }
+    }
+
     pub fn handle_copy_command(&mut self, line: &str) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
@@ -692,14 +820,15 @@ impl MockIosDevice {
             // copy X running-config — apply config from flash
             if source.starts_with("flash:") {
                 let flash_file = source.trim_start_matches("flash:");
-                if let Some(content) = self.flash_files.get(flash_file) {
-                    let config_text = String::from_utf8_lossy(content);
-                    // Apply config lines to running config
+                if let Some(content) = self.flash_files.get(flash_file).cloned() {
+                    let config_text = String::from_utf8_lossy(&content).to_string();
+                    // Apply config lines to running config AND state
                     for config_line in config_text.lines() {
                         if !config_line.trim().is_empty() {
                             self.running_config.push(config_line.to_string());
                         }
                     }
+                    self.apply_config_text_to_state(&config_text);
                 }
                 self.pending_interactive = Some(PendingInteractive::CopyFilename {
                     source,
@@ -776,8 +905,13 @@ impl MockIosDevice {
     }
 
     pub fn handle_show_boot(&mut self) {
+        // Use legacy fields as source of truth for backward compat
         let boot_var = if self.boot_variable.is_empty() {
-            format!("flash:c{}-universalk9-mz.SPA.{}.bin", self.model.to_lowercase(), self.version)
+            format!(
+                "flash:c{}-universalk9-mz.SPA.{}.bin",
+                self.model.to_lowercase(),
+                self.version
+            )
         } else {
             self.boot_variable.clone()
         };
@@ -789,7 +923,9 @@ impl MockIosDevice {
     }
 
     pub fn handle_show_install_summary(&mut self) {
-        match &self.install_state {
+        // Use legacy install_state; clone to avoid borrow conflict
+        let install_state = self.install_state.clone();
+        match install_state {
             Some(state) => {
                 let mode_str = match state.mode {
                     InstallMode::Install => "INSTALL",
@@ -868,7 +1004,15 @@ install_add: SUCCESS
         );
         self.queue_output(&output);
 
-        // Add packages as Inactive
+        // Add packages as Inactive — update both state fields
+        if let Some(ref mut state) = self.state.install_state {
+            for name in &pkg_names {
+                state.packages.push(PackageInfo {
+                    name: name.clone(),
+                    state: PackageState::Inactive,
+                });
+            }
+        }
         if let Some(ref mut state) = self.install_state {
             for name in pkg_names {
                 state.packages.push(PackageInfo {
@@ -880,7 +1024,7 @@ install_add: SUCCESS
     }
 
     pub fn handle_install_activate(&mut self) {
-        if self.install_state.is_none() {
+        if self.state.install_state.is_none() {
             self.queue_output(&format!(
                 "\n% Install mode is not supported\n{}",
                 self.prompt()
@@ -894,11 +1038,23 @@ install_add: SUCCESS
     }
 
     pub fn handle_install_commit(&mut self) {
-        if let Some(ref mut state) = self.install_state {
-            let had_activated = state.packages.iter().any(|p| p.state == PackageState::Activated);
-            for pkg in &mut state.packages {
-                if pkg.state == PackageState::Activated {
-                    pkg.state = PackageState::Committed;
+        let has_state = self.state.install_state.is_some();
+        if has_state {
+            let had_activated = self.state.install_state.as_ref()
+                .map(|s| s.packages.iter().any(|p| p.state == PackageState::Activated))
+                .unwrap_or(false);
+            if let Some(ref mut state) = self.state.install_state {
+                for pkg in &mut state.packages {
+                    if pkg.state == PackageState::Activated {
+                        pkg.state = PackageState::Committed;
+                    }
+                }
+            }
+            if let Some(ref mut state) = self.install_state {
+                for pkg in &mut state.packages {
+                    if pkg.state == PackageState::Activated {
+                        pkg.state = PackageState::Committed;
+                    }
                 }
             }
             if had_activated {
@@ -918,8 +1074,13 @@ install_add: SUCCESS
     }
 
     pub fn handle_install_remove_inactive(&mut self) {
-        if let Some(ref mut state) = self.install_state {
-            state.packages.retain(|p| p.state != PackageState::Inactive);
+        if self.state.install_state.is_some() {
+            if let Some(ref mut state) = self.state.install_state {
+                state.packages.retain(|p| p.state != PackageState::Inactive);
+            }
+            if let Some(ref mut state) = self.install_state {
+                state.packages.retain(|p| p.state != PackageState::Inactive);
+            }
             self.queue_output(&format!(
                 "\ninstall_remove: START\ninstall_remove: SUCCESS\n{}",
                 self.prompt()
@@ -992,7 +1153,14 @@ install_add: SUCCESS
             }
             PendingInteractive::InstallActivateConfirm => {
                 if line == "y" || line == "Y" || line == "yes" {
-                    // Activate packages
+                    // Activate packages — update both state fields
+                    if let Some(ref mut state) = self.state.install_state {
+                        for pkg in &mut state.packages {
+                            if pkg.state == PackageState::Inactive {
+                                pkg.state = PackageState::Activated;
+                            }
+                        }
+                    }
                     if let Some(ref mut state) = self.install_state {
                         for pkg in &mut state.packages {
                             if pkg.state == PackageState::Inactive {
@@ -1040,7 +1208,10 @@ install_add: SUCCESS
     }
 
     pub fn generate_show_version(&self) -> String {
-        let system_image = match &self.install_state {
+        // Use the legacy fields (hostname, version, model) as the source of truth
+        // because tests may set them directly. state.* mirrors them for structured access.
+        let install_state = self.install_state.as_ref().or(self.state.install_state.as_ref());
+        let system_image = match install_state {
             Some(InstallState { mode: InstallMode::Install, .. }) => {
                 "flash:packages.conf".to_string()
             }
@@ -1057,21 +1228,24 @@ Copyright (c) 1986-2024 by Cisco Systems, Inc.
 
 ROM: System Bootstrap, Version 15.0(1r)M16
 
-{} uptime is 42 days, 3 hours, 17 minutes
+{} uptime is {}
 System returned to ROM by reload
 System image file is "{}"
 
 Cisco {} ({}) processor with 524288K/262144K bytes of memory.
-Processor board ID FCZ123456789
+Processor board ID {}
 
-Configuration register is 0x2102"#,
+Configuration register is {}"#,
             self.model,
             self.model,
             self.version,
             self.hostname,
+            self.state.uptime,
             system_image,
             self.model,
             self.model,
+            self.state.serial_number,
+            self.state.config_register,
         )
     }
 

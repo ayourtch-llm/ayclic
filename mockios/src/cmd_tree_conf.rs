@@ -1,8 +1,10 @@
 //! Config-mode command tree definitions and handlers for MockIOS.
 
+use std::net::Ipv4Addr;
 use std::sync::OnceLock;
 
 use crate::cmd_tree::{keyword, param, CliModeClass, CommandNode, ModeFilter, ParamType};
+use crate::device_state::StaticRoute;
 use crate::{CliMode, MockIosDevice};
 
 // ─── Mode helpers ─────────────────────────────────────────────────────────────
@@ -20,7 +22,9 @@ fn config_if_only() -> ModeFilter {
 pub fn handle_hostname(d: &mut MockIosDevice, input: &str) {
     let parts: Vec<&str> = input.split_whitespace().collect();
     if parts.len() >= 2 {
-        d.hostname = parts[1].to_string();
+        let name = parts[1].to_string();
+        d.hostname = name.clone();
+        d.state.hostname = name;
     }
     d.running_config.push(input.to_string());
     let p = d.prompt();
@@ -32,6 +36,9 @@ pub fn handle_interface(d: &mut MockIosDevice, input: &str) {
     let parts: Vec<&str> = input.split_whitespace().collect();
     let iface_name = if parts.len() >= 2 { parts[1..].join(" ") } else { "unknown".to_string() };
     d.mode = CliMode::ConfigSub("config-if".to_string());
+    // Ensure the interface exists in state
+    d.state.ensure_interface(&iface_name);
+    d.current_interface = Some(iface_name.clone());
     d.running_config.push(format!("interface {}", iface_name));
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));
@@ -59,12 +66,43 @@ pub fn handle_router_eigrp(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_ip_route(d: &mut MockIosDevice, input: &str) {
+    // Parse "ip route <prefix> <mask> <nexthop>"
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.len() >= 5 {
+        if let (Ok(prefix), Ok(mask), Ok(next_hop)) = (
+            parts[2].parse::<Ipv4Addr>(),
+            parts[3].parse::<Ipv4Addr>(),
+            parts[4].parse::<Ipv4Addr>(),
+        ) {
+            d.state.static_routes.push(StaticRoute {
+                prefix,
+                mask,
+                next_hop: Some(next_hop),
+                interface: None,
+                admin_distance: 1,
+            });
+        }
+    }
     d.running_config.push(input.to_string());
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));
 }
 
 pub fn handle_ip_address(d: &mut MockIosDevice, input: &str) {
+    // Parse "ip address <addr> <mask>"
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.len() >= 4 {
+        if let (Ok(addr), Ok(mask)) = (
+            parts[2].parse::<Ipv4Addr>(),
+            parts[3].parse::<Ipv4Addr>(),
+        ) {
+            if let Some(ref iface_name) = d.current_interface.clone() {
+                if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                    iface.ip_address = Some((addr, mask));
+                }
+            }
+        }
+    }
     // Store as indented sub-config line
     d.running_config.push(format!(" {}", input.trim()));
     let p = d.prompt();
@@ -84,6 +122,15 @@ pub fn handle_ip_name_server(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_no(d: &mut MockIosDevice, input: &str) {
+    let trimmed = input.trim();
+    if trimmed == "no shutdown" {
+        // no shutdown in config-if — bring interface up
+        if let Some(ref iface_name) = d.current_interface.clone() {
+            if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                iface.admin_up = true;
+            }
+        }
+    }
     d.running_config.push(input.to_string());
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));
@@ -122,6 +169,12 @@ pub fn handle_rest_of_line(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_shutdown(d: &mut MockIosDevice, _input: &str) {
+    // Update state for current interface
+    if let Some(ref iface_name) = d.current_interface.clone() {
+        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+            iface.admin_up = false;
+        }
+    }
     d.running_config.push(" shutdown".to_string());
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));

@@ -1188,6 +1188,8 @@ impl RawTransport for MockIosDevice {
                     // NUL — telnet sends \r\0 for bare CR. Just ignore the NUL.
                 }
                 b'?' => {
+                    // Echo the '?' like real IOS does
+                    self.output_queue.push(b'?');
                     // Immediate help — do NOT add '?' to the input buffer.
                     use crate::cmd_tree::{help, HelpResult};
                     use crate::cmd_tree_exec::exec_tree;

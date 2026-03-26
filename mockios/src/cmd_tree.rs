@@ -314,8 +314,16 @@ pub fn help(input_before_question: &str, tree: &[CommandNode], mode: &CliMode) -
             return HelpResult::Subcommands(subs);
         }
         let tokens = tokenize_with_offsets(trimmed);
-        match resolve_path(&tokens, 0, tree, mode) {
-            Ok(children) => HelpResult::Subcommands(visible_children_help(children, mode)),
+        match resolve_path_with_node(&tokens, 0, tree, mode) {
+            Ok((children, parent_has_handler)) => {
+                let mut subs = visible_children_help(children, mode);
+                // If the resolved node has a handler, the command is already
+                // complete — show <cr> like real IOS does.
+                if parent_has_handler {
+                    subs.push(("<cr>".to_string(), String::new()));
+                }
+                HelpResult::Subcommands(subs)
+            }
             Err(caret_pos) => HelpResult::NotFound { caret_pos },
         }
     } else {
@@ -359,8 +367,18 @@ fn resolve_path<'a>(
     nodes: &'a [CommandNode],
     mode: &CliMode,
 ) -> Result<&'a [CommandNode], usize> {
+    resolve_path_with_node(tokens, idx, nodes, mode).map(|(children, _)| children)
+}
+
+/// Walk the token path, returning (children, parent_has_handler).
+fn resolve_path_with_node<'a>(
+    tokens: &[(String, usize)],
+    idx: usize,
+    nodes: &'a [CommandNode],
+    mode: &CliMode,
+) -> Result<(&'a [CommandNode], bool), usize> {
     if idx >= tokens.len() {
-        return Ok(nodes);
+        return Ok((nodes, false));
     }
 
     let (token, offset) = &tokens[idx];
@@ -370,9 +388,9 @@ fn resolve_path<'a>(
         0 => Err(*offset),
         1 => {
             if idx + 1 >= tokens.len() {
-                Ok(&matches[0].children)
+                Ok((&matches[0].children, matches[0].handler.is_some()))
             } else {
-                resolve_path(tokens, idx + 1, &matches[0].children, mode)
+                resolve_path_with_node(tokens, idx + 1, &matches[0].children, mode)
             }
         }
         _ => Err(*offset), // Ambiguous — treat as not found for help

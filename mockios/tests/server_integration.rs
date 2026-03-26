@@ -389,3 +389,135 @@ async fn test_cisco_ios_conn_via_ssh_mockios() {
     conn.disconnect().await.unwrap();
     server.abort();
 }
+
+#[tokio::test]
+async fn test_ssh_show_clock() {
+    let (port, server) = start_ssh_server("ClockTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    let output = conn.run_cmd("show clock").await.unwrap();
+    assert!(output.contains("UTC"), "show clock should contain UTC, got: {}", output);
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_show_ip_interface_brief() {
+    let (port, server) = start_ssh_server("IntBriefTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    let output = conn.run_cmd("show ip interface brief").await.unwrap();
+    assert!(output.contains("Interface") && output.contains("IP-Address"),
+        "show ip int brief should have table header, got: {}", output);
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_show_ip_route() {
+    let (port, server) = start_ssh_server("RouteTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    let output = conn.run_cmd("show ip route").await.unwrap();
+    assert!(!output.contains("Unknown command"), "show ip route should not be unknown, got: {}", output);
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_abbreviation_show_ver() {
+    let (port, server) = start_ssh_server("AbbrTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    let output = conn.run_cmd("sh ver").await.unwrap();
+    assert!(output.contains("Cisco IOS"), "'sh ver' should return show version, got: {}", output);
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_write_memory() {
+    let (port, server) = start_ssh_server("WrTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    let output = conn.run_cmd("write memory").await.unwrap();
+    assert!(output.contains("OK") || output.contains("Building"),
+        "write memory should succeed, got: {}", output);
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_config_mode_and_do() {
+    let (port, server) = start_ssh_server("DoTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    // Enter config mode
+    let output = conn.run_cmd("configure terminal").await.unwrap();
+    assert!(output.contains("config"), "Should enter config mode, got: {}", output);
+    // do show version from config
+    let output = conn.run_cmd("do show version").await.unwrap();
+    assert!(output.contains("Cisco IOS"), "'do show version' should work from config, got: {}", output);
+    // Return to priv exec
+    let _output = conn.run_cmd("end").await.unwrap();
+    // Verify we're back - run a priv exec command
+    let output = conn.run_cmd("show version").await.unwrap();
+    assert!(output.contains("Cisco IOS"), "Should be back in priv exec, got: {}", output);
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_config_mode_abbreviation() {
+    let (port, server) = start_ssh_server("ConfTTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    // "conf t" should enter config mode
+    let output = conn.run_cmd("conf t").await.unwrap();
+    assert!(output.contains("config"), "'conf t' should enter config mode, got: {}", output);
+    let _ = conn.run_cmd("end").await.unwrap();
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_incomplete_command() {
+    let (port, server) = start_ssh_server("IncomplTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    let output = conn.run_cmd("show ip").await.unwrap();
+    assert!(output.contains("Incomplete command"), "'show ip' should be incomplete, got: {}", output);
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_config_invalid_command() {
+    let (port, server) = start_ssh_server("InvalidTest").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    let _ = conn.run_cmd("configure terminal").await.unwrap();
+    let output = conn.run_cmd("bogusconfigcmd").await.unwrap();
+    assert!(output.contains("Invalid input") || output.contains("^"),
+        "Config mode invalid cmd should show caret/error, got: {}", output);
+    let _ = conn.run_cmd("end").await.unwrap();
+    conn.disconnect().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_ssh_multiple_show_commands() {
+    let (port, server) = start_ssh_server("MultiShow").await;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut conn = CiscoIosConn::new(&addr, ConnectionType::Ssh, "test", "test").await.unwrap();
+    let ver = conn.run_cmd("show version").await.unwrap();
+    assert!(ver.contains("Cisco IOS"));
+    let clock = conn.run_cmd("show clock").await.unwrap();
+    assert!(clock.contains("UTC"));
+    let run = conn.run_cmd("show running-config").await.unwrap();
+    assert!(run.contains("hostname"));
+    let boot = conn.run_cmd("show boot").await.unwrap();
+    assert!(boot.contains("BOOT"));
+    conn.disconnect().await.unwrap();
+    server.abort();
+}

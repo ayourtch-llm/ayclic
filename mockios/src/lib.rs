@@ -3947,6 +3947,14 @@ mod tests {
         assert!(output.contains("hostname"), "Should contain hostname");
     }
 
+    #[tokio::test]
+    async fn test_show_terminal() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show terminal").await;
+        assert!(output.contains("Width: 80 columns"),
+            "show terminal should contain 'Width: 80 columns', got: {:?}", output);
+    }
+
     // ─── Bug fix tests ─────────────────────────────────────────────────────────
 
     // Bug 1: interface loopback 0 accepted in config mode
@@ -4310,5 +4318,53 @@ mod tests {
         let mut device = setup_device("R1").await;
         let output = send_cmd(&mut device, "no debug all").await;
         assert!(output.contains("turned off"), "no debug all should say 'turned off', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_clear_command() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "clear counters").await;
+        assert!(!output.contains("% "), "clear counters should produce no error, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_ssh_connection_refused() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "ssh -l admin 10.0.0.1").await;
+        assert!(output.contains("Connection refused"), "ssh should say 'Connection refused', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_telnet_connection_refused() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "telnet 10.0.0.1").await;
+        assert!(output.contains("Connection refused"), "telnet should say 'Connection refused', got: {:?}", output);
+        assert!(output.contains("Trying"), "telnet should say 'Trying ...', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_cdp_neighbors() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show cdp neighbors").await;
+        assert!(output.contains("Capability Codes"),
+            "show cdp neighbors should contain 'Capability Codes', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_users() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show users").await;
+        assert!(output.contains("Line"),
+            "show users should contain 'Line', got: {:?}", output);
+        assert!(output.contains("User"),
+            "show users should contain 'User', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_logging() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show logging").await;
+        assert!(output.contains("Syslog logging"),
+            "show logging should contain 'Syslog logging', got: {:?}", output);
     }
 }

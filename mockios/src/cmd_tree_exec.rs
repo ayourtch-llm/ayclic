@@ -110,6 +110,14 @@ pub fn handle_show_flash(d: &mut MockIosDevice, _input: &str) {
     d.handle_dir_command("");
 }
 
+pub fn handle_show_terminal(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!(
+        "\nLine 0, Location: \"\", Type: \"\"\nLength: 0 lines, Width: 80 columns\nStatus: Ready, Active\nCapabilities: none\n{}",
+        p
+    ));
+}
+
 pub fn handle_show_history(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     let mut out = String::from("\n");
@@ -341,6 +349,61 @@ pub fn handle_undebug(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("\n{} debugging is off\n{}", feature, p));
 }
 
+pub fn handle_clear(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}", p));
+}
+
+pub fn handle_ssh(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("\n% Connection refused by remote host\n{}", p));
+}
+
+pub fn handle_telnet(d: &mut MockIosDevice, input: &str) {
+    let host = input.split_whitespace().nth(1).unwrap_or("unknown");
+    let p = d.prompt();
+    d.queue_output(&format!("\nTrying {} ... \n% Connection refused by remote host\n{}", host, p));
+}
+
+pub fn handle_show_cdp_neighbors(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge
+                  S - Switch, H - Host, I - IGMP, r - Repeater, P - Phone,
+                  D - Remote, C - CVTA, M - Two-port Mac Relay
+
+Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID
+";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", output, p));
+}
+
+pub fn handle_show_users(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+    Line       User       Host(s)              Idle       Location
+*  0 con 0                idle                 00:00:00
+";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}{}", output, p));
+}
+
+pub fn handle_show_logging(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,
+    0 flushes, 0 overruns, xml disabled, filtering disabled)
+
+    Console logging: level debugging, 0 messages logged, xml disabled,
+                     filtering disabled
+    Monitor logging: level debugging, 0 messages logged, xml disabled,
+                     filtering disabled
+    Buffer logging:  disabled, xml disabled,
+                     filtering disabled
+
+Log Buffer (4096 bytes):
+";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}{}", output, p));
+}
+
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static EXEC_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -406,6 +469,17 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     ]),
                 keyword("flash:", "Display flash filesystem information")
                     .handler(handle_show_flash),
+                keyword("terminal", "Display terminal configuration parameters")
+                    .handler(handle_show_terminal),
+                keyword("cdp", "CDP information")
+                    .children(vec![
+                        keyword("neighbors", "CDP neighbor entries")
+                            .handler(handle_show_cdp_neighbors),
+                    ]),
+                keyword("users", "Display information about terminal lines")
+                    .handler(handle_show_users),
+                keyword("logging", "Show the contents of logging buffers")
+                    .handler(handle_show_logging),
             ]),
 
         // configure [priv only]
@@ -584,6 +658,28 @@ fn build_exec_tree() -> Vec<CommandNode> {
                         param("<feature>", ParamType::RestOfLine, "Feature to undebug")
                             .handler(handle_undebug),
                     ]),
+            ]),
+
+        // clear [priv only]
+        keyword("clear", "Reset functions")
+            .mode(priv_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "What to clear")
+                    .handler(handle_clear),
+            ]),
+
+        // ssh
+        keyword("ssh", "Open a secure shell client connection")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "SSH parameters")
+                    .handler(handle_ssh),
+            ]),
+
+        // telnet
+        keyword("telnet", "Open a telnet connection")
+            .children(vec![
+                param("<host>", ParamType::Word, "Hostname or IP address")
+                    .handler(handle_telnet),
             ]),
 
         // exit / logout / quit

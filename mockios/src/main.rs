@@ -23,6 +23,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+use aytelnet::{TelnetDecoder, TelnetEncoder, TelnetCommand};
+use aytelnet::protocol::{OPT_ECHO, OPT_SUPPRESS_GA};
+
 use mockios::{CliMode, MockIosDevice};
 use ayclic::raw_transport::RawTransport;
 
@@ -169,9 +172,19 @@ async fn run_telnet_server(cli: &Cli, addr: SocketAddr) {
                 device = device.with_enable(enable);
             }
 
+            // Send WILL ECHO and WILL SUPPRESS_GA to tell the telnet client
+            // that the server handles echo — this prevents double-echo.
+            let will_echo = TelnetEncoder::encode_command(&TelnetCommand::Will(OPT_ECHO));
+            let will_sga = TelnetEncoder::encode_command(&TelnetCommand::Will(OPT_SUPPRESS_GA));
+            let _ = stream.write_all(&will_echo).await;
+            let _ = stream.write_all(&will_sga).await;
+
+            let mut decoder = TelnetDecoder::new();
+
             // Send initial prompt/banner
             let initial = device.receive(Duration::from_secs(1)).await.unwrap();
-            if stream.write_all(&initial).await.is_err() {
+            let encoded_initial = TelnetEncoder::encode_data(&initial);
+            if stream.write_all(&encoded_initial).await.is_err() {
                 return;
             }
 
@@ -183,9 +196,27 @@ async fn run_telnet_server(cli: &Cli, addr: SocketAddr) {
                     Err(_) => break,
                 };
 
-                // Feed input to the mock device
-                if device.send(&buf[..n]).await.is_err() {
-                    break;
+                // Decode telnet protocol — strip IAC sequences, extract data bytes
+                let commands = decoder.decode(&buf[..n]);
+                let mut data_bytes: Vec<u8> = Vec::new();
+                for cmd in commands {
+                    match cmd {
+                        TelnetCommand::Data(byte) => data_bytes.push(byte),
+                        TelnetCommand::Do(_)
+                        | TelnetCommand::Dont(_)
+                        | TelnetCommand::Will(_)
+                        | TelnetCommand::Wont(_) => {
+                            // Ignore client option negotiations for now
+                        }
+                        _ => {} // ignore other telnet commands
+                    }
+                }
+
+                if !data_bytes.is_empty() {
+                    // Feed clean data bytes to the mock device
+                    if device.send(&data_bytes).await.is_err() {
+                        break;
+                    }
                 }
 
                 // Get response
@@ -195,7 +226,8 @@ async fn run_telnet_server(cli: &Cli, addr: SocketAddr) {
                 };
 
                 if !output.is_empty() {
-                    if stream.write_all(&output).await.is_err() {
+                    let encoded = TelnetEncoder::encode_data(&output);
+                    if stream.write_all(&encoded).await.is_err() {
                         break;
                     }
                 }

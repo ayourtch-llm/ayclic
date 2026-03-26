@@ -1163,14 +1163,29 @@ impl RawTransport for MockIosDevice {
         // immediately — this is how real Cisco IOS works.
         for &byte in data {
             match byte {
-                b'\n' | b'\r' => {
-                    // Complete the line
+                b'\r' => {
+                    // Carriage return — telnet sends \r\n or \r\0 for Enter.
+                    // Process the line now; the following \n (if any) will be
+                    // silently consumed since the buffer will be empty.
                     let line_bytes = std::mem::take(&mut self.input_buffer);
-                    let line = String::from_utf8_lossy(&line_bytes)
-                        .trim_end_matches('\r')
-                        .to_string();
+                    let line = String::from_utf8_lossy(&line_bytes).to_string();
                     self.output_queue.extend_from_slice(b"\r\n");
                     self.handle_line(&line);
+                }
+                b'\n' => {
+                    // Line feed — if buffer is empty (just consumed by \r), skip.
+                    // Otherwise process as a line ending (e.g., automation sends \n only).
+                    if self.input_buffer.is_empty() && !self.output_queue.is_empty() {
+                        // Already processed by preceding \r — skip
+                        continue;
+                    }
+                    let line_bytes = std::mem::take(&mut self.input_buffer);
+                    let line = String::from_utf8_lossy(&line_bytes).to_string();
+                    self.output_queue.extend_from_slice(b"\r\n");
+                    self.handle_line(&line);
+                }
+                b'\0' => {
+                    // NUL — telnet sends \r\0 for bare CR. Just ignore the NUL.
                 }
                 b'?' => {
                     // Immediate help — do NOT add '?' to the input buffer.

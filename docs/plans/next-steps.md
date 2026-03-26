@@ -38,9 +38,14 @@ read from DeviceState. Remove it and migrate with_running_config() builder.
 - MOTD/login banners
 
 ## Current stats
-- 197 unit tests + 10 device tests + 11 SSH integration tests
-- Structured DeviceState model with interfaces, routes, VLANs
-- Command tree with abbreviation matching, ?, tab, help
+- 225 unit tests + 10 device tests + 11 SSH integration tests
+- Structured DeviceState model with interfaces, routes, VLANs, ACLs
+- Command tree with abbreviation matching, ?, tab, help (proper-cased interface types)
 - Full CLI editing (Emacs keys, arrows, history)
 - Telnet (aytelnet protocol) and SSH servers
 - Sub-mode-specific command trees (config-if, config-router, config-line)
+- show commands: version, run, startup, ip int brief, ip route (grouped), interfaces,
+  vlan, clock, boot, history, terminal, cdp, users, logging, arp, mac, spanning-tree,
+  ip ospf, ip protocols, processes cpu, access-lists, flash, install
+- Exec commands: help, enable (priv noop), debug/undebug, clock set, clear, ssh, telnet
+- Config: access-list with data model, interface type tab completion

@@ -48,19 +48,33 @@ builder can be added when the test suite needs dynamic redundancy state.
 
 ## Observation 4: Install mode state (`show install summary`)
 
-**Status: DEFERRED**
+**Status: IMPLEMENTED** (commit 1bae1a3)
 
-Needs `InstallState` struct and command handlers. Can be incrementally
-built as ayiosupdate develops the install mode upgrade workflow tests.
-For initial testing, `with_command()` works.
+- `InstallMode` enum: `Bundle` / `Install`
+- `PackageState` enum: `Inactive` / `Activated` / `Committed`
+- `PackageInfo` struct: name + state
+- `with_install_state()`: configure install mode + packages
+- `show install summary`: lists packages with state flags (C/U/I)
+- `show version`: automatically uses `packages.conf` in install mode,
+  `.bin` in bundle mode
+- `show boot`: auto-set to `flash:packages.conf` in install mode
 
 ## Observation 5: `install` command family
 
-**Status: DEFERRED**
+**Status: IMPLEMENTED** (commit 1bae1a3)
 
-Depends on #4. The interactive simulation pattern is already proven
-(copy, reload handlers). Adding `install add/activate/commit/rollback`
-follows the same approach.
+All requested commands:
+- `install add file flash:<image>.bin`: generates package names from
+  image filename, adds as Inactive, outputs progress text
+- `install activate`: prompts `[y/n]`, on "y" activates Inactive→Activated
+  packages and triggers reload (Reloading state)
+- `install commit`: transitions Activated→Committed packages
+- `install remove inactive`: removes all Inactive packages
+
+Not yet implemented:
+- `install rollback to committed`: can be added when needed
+- `with_install_behavior()` for failure simulation: can be added
+- Configurable `add_duration` for timing simulation
 
 ## Observation 6: `show boot` output
 
@@ -102,8 +116,8 @@ to pre-populate before the copy.
 | 1 | Reload simulation (server) | Deferred |
 | 2 | Stack simulation | Deferred (use `with_command()`) |
 | 3 | SSO simulation | Deferred (use `with_command()`) |
-| 4 | Install mode state | Deferred |
-| 5 | Install command family | Deferred |
+| 4 | Install mode state | **DONE** |
+| 5 | Install command family | **DONE** |
 | 6 | `show boot` output | **DONE** |
 | 7 | Flash space simulation | **DONE** |
 | 8 | Platform variant profiles | Deferred |

@@ -205,7 +205,7 @@ pub fn find_matches<'a>(
         .iter()
         .filter(|n| n.mode_filter.matches(mode))
         .filter(|n| match &n.matcher {
-            TokenMatcher::Keyword(kw) => kw.starts_with(&token_lower),
+            TokenMatcher::Keyword(kw) => kw.to_lowercase().starts_with(&token_lower),
             TokenMatcher::Param { param_type, .. } => param_type.matches(token),
         })
         .collect()
@@ -351,7 +351,7 @@ pub fn help(input_before_question: &str, tree: &[CommandNode], mode: &CliMode) -
             .iter()
             .filter(|n| n.mode_filter.matches(mode))
             .filter_map(|n| match &n.matcher {
-                TokenMatcher::Keyword(kw) if kw.starts_with(&partial_lower) => Some(kw.clone()),
+                TokenMatcher::Keyword(kw) if kw.to_lowercase().starts_with(&partial_lower) => Some(kw.clone()),
                 _ => None,
             })
             .collect();

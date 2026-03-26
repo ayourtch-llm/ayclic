@@ -1338,7 +1338,11 @@ Configuration register is {}"#,
         self.output_queue.extend_from_slice(normalized.as_bytes());
     }
 
-    fn try_tab_complete(&self, partial_input: &str) -> Option<String> {
+    /// Try to tab-complete the partial input.
+    /// Returns (erase_count, insert_text) where erase_count is the number of
+    /// characters to erase backwards (the typed prefix) and insert_text is the
+    /// canonical keyword + space to insert. This ensures proper casing.
+    fn try_tab_complete(&self, partial_input: &str) -> Option<(usize, String)> {
         use crate::cmd_tree::{tokenize_with_offsets, find_matches};
 
         let tree: &[crate::cmd_tree::CommandNode] = match &self.mode {
@@ -1373,15 +1377,15 @@ Configuration register is {}"#,
 
         if matches.len() == 1 {
             if let crate::cmd_tree::TokenMatcher::Keyword(kw) = &matches[0].matcher {
-                if kw.len() > last_token.len() {
-                    // Return the suffix to complete + a space
-                    let suffix = format!("{} ", &kw[last_token.len()..]);
-                    return Some(suffix);
-                } else if kw == last_token {
-                    // Already complete, just add space if not there
+                let kw_lower = kw.to_lowercase();
+                if kw_lower == last_token.to_lowercase() {
+                    // Already complete — just add space if not there
                     if !partial_input.ends_with(' ') {
-                        return Some(" ".to_string());
+                        return Some((0, " ".to_string()));
                     }
+                } else if kw_lower.starts_with(&last_token.to_lowercase()) {
+                    // Erase the typed prefix and replace with canonical keyword + space
+                    return Some((last_token.len(), format!("{} ", kw)));
                 }
             }
             None
@@ -1619,9 +1623,22 @@ impl RawTransport for MockIosDevice {
                     let partial = String::from_utf8_lossy(&self.input_buffer).to_string();
                     let completion = self.try_tab_complete(&partial);
                     match completion {
-                        Some(completed_suffix) => {
-                            self.output_queue.extend_from_slice(completed_suffix.as_bytes());
-                            self.input_buffer.extend_from_slice(completed_suffix.as_bytes());
+                        Some((erase_count, insert_text)) => {
+                            // Erase the typed prefix (backspace over it)
+                            for _ in 0..erase_count {
+                                if self.cursor_pos > 0 {
+                                    self.cursor_pos -= 1;
+                                    self.input_buffer.remove(self.cursor_pos);
+                                    self.output_queue.extend_from_slice(b"\x08");
+                                }
+                            }
+                            // Erase old text on screen, then write new text
+                            if erase_count > 0 {
+                                // Clear from cursor to end of line
+                                self.output_queue.extend_from_slice(b"\x1b[K");
+                            }
+                            self.output_queue.extend_from_slice(insert_text.as_bytes());
+                            self.input_buffer.extend_from_slice(insert_text.as_bytes());
                             self.cursor_pos = self.input_buffer.len();
                         }
                         None => {
@@ -2711,7 +2728,7 @@ mod tests {
     async fn test_do_command_in_config_sub_mode() {
         let mut device = setup_device("Router1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
         assert!(matches!(device.mode, CliMode::ConfigSub(_)));
 
         let output = send_cmd(&mut device, "do show version").await;
@@ -2837,7 +2854,7 @@ mod tests {
     async fn test_config_sub_exit_returns_to_config() {
         let mut device = setup_device("Router1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
         assert!(matches!(device.mode, CliMode::ConfigSub(_)));
 
         let output = send_cmd(&mut device, "exit").await;
@@ -2849,7 +2866,7 @@ mod tests {
     async fn test_config_sub_end_returns_to_priv_exec() {
         let mut device = setup_device("Router1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
 
         let output = send_cmd(&mut device, "end").await;
         assert_eq!(device.mode, CliMode::PrivilegedExec);
@@ -3060,10 +3077,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_config_interface_enters_submode() {
-        // "interface Gi0/0" should enter config-if
+        // "interface GigabitEthernet 1/0" should enter config-if
         let mut device = setup_device("Router1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let output = send_cmd(&mut device, "interface GigabitEthernet1/0").await;
+        let output = send_cmd(&mut device, "interface GigabitEthernet 1/0").await;
         assert!(
             matches!(device.mode, CliMode::ConfigSub(ref s) if s == "config-if"),
             "interface should enter config-if, mode={:?}, output={:?}", device.mode, output
@@ -3088,7 +3105,7 @@ mod tests {
         // exit from config-if → config, end from config → priv exec
         let mut device = setup_device("Router1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
         assert!(matches!(device.mode, CliMode::ConfigSub(_)));
 
         // exit → back to config
@@ -3261,7 +3278,7 @@ mod tests {
     async fn test_ctrl_z_exits_config_if_to_priv_exec() {
         let mut device = setup_device("R1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
         assert!(matches!(device.mode, CliMode::ConfigSub(_)));
 
         // Ctrl+Z goes straight to priv exec (not config first)
@@ -3814,7 +3831,7 @@ mod tests {
     async fn test_config_if_help_shows_if_commands() {
         let mut device = setup_device("R1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
 
         device.send(b"?").await.unwrap();
         let data = device.receive(Duration::from_secs(1)).await.unwrap();
@@ -3855,5 +3872,62 @@ mod tests {
         // Should beep
         assert!(data.contains(&0x07) || data.is_empty(),
             "Tab with multiple options should beep, got: {:?}", data);
+    }
+
+    // Interface type keyword tab completion tests
+
+    #[tokio::test]
+    async fn test_tab_complete_interface_type() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Enter config mode
+        device.send(b"configure terminal\r").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Type "interface Gi" then Tab — should complete to "interface GigabitEthernet "
+        device.send(b"interface Gi").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"\t").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("GigabitEthernet"),
+            "Tab after 'interface Gi' should complete to GigabitEthernet, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_interface_help_shows_types() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Enter config mode
+        device.send(b"configure terminal\r").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Send "interface ?" to see available interface types
+        device.send(b"interface ?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        assert!(output.contains("GigabitEthernet"),
+            "interface ? should show GigabitEthernet, got: {:?}", output);
+        assert!(output.contains("Loopback"),
+            "interface ? should show Loopback, got: {:?}", output);
+        assert!(output.contains("Vlan"),
+            "interface ? should show Vlan, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_interface_abbreviation_still_works() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+
+        // "int lo 0" should abbreviate to "interface Loopback 0" and enter config-if
+        let output = send_cmd(&mut device, "int lo 0").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(ref s) if s == "config-if"),
+            "Should be in config-if after 'int lo 0', mode: {:?}, output: {:?}",
+            device.mode, output);
+
+        let _ = send_cmd(&mut device, "end").await;
     }
 }

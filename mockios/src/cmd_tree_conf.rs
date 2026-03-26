@@ -323,13 +323,67 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     .handler(handle_hostname),
             ]),
 
-        // interface <name>  [config only — enters config-if]
-        // Use RestOfLine so multi-word names like "loopback 0" or "vlan 100" are captured whole.
+        // interface <type> <number>  [config only — enters config-if]
+        // Keywords use proper case (matching real IOS help output).
+        // find_matches() lowercases both sides, so "int gi 0/0" still works.
         keyword("interface", "Select an interface to configure")
             .mode(config_only())
             .children(vec![
-                param("<name>", ParamType::RestOfLine, "Interface name")
-                    .handler(handle_interface),
+                keyword("GigabitEthernet", "GigabitEthernet IEEE 802.3z")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("FastEthernet", "FastEthernet IEEE 802.3")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("TenGigabitEthernet", "Ten Gigabit Ethernet")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("HundredGigE", "Hundred Gigabit Ethernet")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("Loopback", "Loopback interface")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("Vlan", "Catalyst Vlans")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "VLAN interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("Tunnel", "Tunnel interface")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Tunnel interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("Serial", "Serial interface")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("Mgmt", "Management interface")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("Null", "Null interface")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
+                keyword("Port-channel", "Ethernet Channel of interfaces")
+                    .children(vec![
+                        param("<number>", ParamType::RestOfLine, "Interface number")
+                            .handler(handle_interface),
+                    ]),
             ]),
 
         // router ospf/bgp/eigrp  [config only]
@@ -762,7 +816,7 @@ mod tests {
     fn test_conf_interface_parses() {
         let tree = conf_tree();
         let mode = CliMode::Config;
-        let result = parse("interface GigabitEthernet0/0", tree, &mode);
+        let result = parse("interface GigabitEthernet 0/0", tree, &mode);
         assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }));
     }
 

@@ -616,8 +616,8 @@ impl MockIosDevice {
                 "up"
             };
             lines.push(format!(
-                "{:<23}{:<16}YES NVRAM  {:<22}{}",
-                iface.name, ip, status, protocol
+                "{:<23}{:<16}{:<4}{:<7}{:<22}{:<8}",
+                iface.name, ip, "YES", "NVRAM", status, protocol
             ));
         }
 
@@ -657,6 +657,38 @@ Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n\
             output.push_str("Gateway of last resort is not set\n\n");
         }
 
+        // A route entry: (code, prefix_addr, prefix_len, description_line)
+        struct RouteEntry {
+            code: String,
+            prefix: std::net::Ipv4Addr,
+            prefix_len: u32,
+            description: String,
+        }
+
+        // Helper: given a prefix, return (major_network_addr, classful_prefix_len)
+        // Returns None for 0.0.0.0/0 (default route — no grouping).
+        fn classful_major(prefix: std::net::Ipv4Addr) -> Option<(std::net::Ipv4Addr, u32)> {
+            let octets = prefix.octets();
+            let first = octets[0];
+            if first == 0 {
+                // 0.0.0.0/0 default — no group
+                return None;
+            }
+            let (major_mask_len, major_addr) = if first <= 127 {
+                // Class A
+                (8u32, std::net::Ipv4Addr::new(first, 0, 0, 0))
+            } else if first <= 191 {
+                // Class B
+                (16u32, std::net::Ipv4Addr::new(first, octets[1], 0, 0))
+            } else {
+                // Class C (192–223) and beyond
+                (24u32, std::net::Ipv4Addr::new(first, octets[1], octets[2], 0))
+            };
+            Some((major_addr, major_mask_len))
+        }
+
+        let mut entries: Vec<RouteEntry> = Vec::new();
+
         // Connected routes from interfaces that are admin_up and have an IP
         for iface in &self.state.interfaces {
             if iface.admin_up {
@@ -664,19 +696,23 @@ Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n\
                     let prefix_len = u32::from(mask).count_ones();
                     let net = u32::from(addr) & u32::from(mask);
                     let net_addr = std::net::Ipv4Addr::from(net);
-                    output.push_str(&format!(
-                        "C        {}/{} is directly connected, {}\n",
-                        net_addr, prefix_len, iface.name
-                    ));
-                    output.push_str(&format!(
-                        "L        {}/{} is directly connected, {}\n",
-                        addr, 32, iface.name
-                    ));
+                    entries.push(RouteEntry {
+                        code: "C".to_string(),
+                        prefix: net_addr,
+                        prefix_len,
+                        description: format!("is directly connected, {}", iface.name),
+                    });
+                    entries.push(RouteEntry {
+                        code: "L".to_string(),
+                        prefix: addr,
+                        prefix_len: 32,
+                        description: format!("is directly connected, {}", iface.name),
+                    });
                 }
             }
         }
 
-        // Static routes
+        // Static routes (non-default)
         for route in &self.state.static_routes {
             let prefix = route.prefix;
             let mask = route.mask;
@@ -684,16 +720,107 @@ Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n\
             let prefix_len = u32::from(mask).count_ones();
             let is_default = prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
                 && mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
-            let code = if is_default { "S*" } else { "S" };
+            if is_default {
+                continue; // handled separately below
+            }
+            let description = if let Some(nh) = route.next_hop {
+                format!("[{}/0] via {}", dist, nh)
+            } else if let Some(iface) = &route.interface {
+                format!("is directly connected, {}", iface)
+            } else {
+                continue;
+            };
+            entries.push(RouteEntry {
+                code: "S".to_string(),
+                prefix,
+                prefix_len,
+                description,
+            });
+        }
+
+        // Group entries by classful major network.
+        // Use a Vec to preserve insertion order of groups.
+        let mut group_keys: Vec<(std::net::Ipv4Addr, u32)> = Vec::new();
+        let mut groups: std::collections::HashMap<
+            (std::net::Ipv4Addr, u32),
+            Vec<usize>,
+        > = std::collections::HashMap::new();
+        let mut ungrouped: Vec<usize> = Vec::new(); // entries with no classful group
+
+        for (i, entry) in entries.iter().enumerate() {
+            match classful_major(entry.prefix) {
+                Some(key) => {
+                    if !groups.contains_key(&key) {
+                        group_keys.push(key);
+                        groups.insert(key, Vec::new());
+                    }
+                    groups.get_mut(&key).unwrap().push(i);
+                }
+                None => {
+                    ungrouped.push(i);
+                }
+            }
+        }
+
+        // Emit grouped routes
+        for key in &group_keys {
+            let indices = &groups[key];
+            let (major_addr, major_len) = key;
+            // Count distinct subnets (unique prefix/len combos) and distinct mask lengths
+            let mut subnet_set: std::collections::HashSet<(u32, u32)> =
+                std::collections::HashSet::new();
+            let mut mask_set: std::collections::HashSet<u32> =
+                std::collections::HashSet::new();
+            for &i in indices {
+                let e = &entries[i];
+                subnet_set.insert((u32::from(e.prefix), e.prefix_len));
+                mask_set.insert(e.prefix_len);
+            }
+            let n_subnets = subnet_set.len();
+            let n_masks = mask_set.len();
+            output.push_str(&format!(
+                "      {}/{} is variably subnetted, {} subnets, {} masks\n",
+                major_addr, major_len, n_subnets, n_masks
+            ));
+            for &i in indices {
+                let e = &entries[i];
+                output.push_str(&format!(
+                    "{:<9}{}/{} {}\n",
+                    e.code, e.prefix, e.prefix_len, e.description
+                ));
+            }
+        }
+
+        // Emit ungrouped (shouldn't normally happen for non-default)
+        for i in ungrouped {
+            let e = &entries[i];
+            output.push_str(&format!(
+                "{:<9}{}/{} {}\n",
+                e.code, e.prefix, e.prefix_len, e.description
+            ));
+        }
+
+        // Emit default/static routes that were skipped above
+        for route in &self.state.static_routes {
+            let prefix = route.prefix;
+            let mask = route.mask;
+            let dist = route.admin_distance;
+            let prefix_len = u32::from(mask).count_ones();
+            let is_default = prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
+                && mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
+            if !is_default {
+                continue;
+            }
+            let code = "S*";
             let prefix_str = format!("{}/{}", prefix, prefix_len);
             if let Some(nh) = route.next_hop {
                 output.push_str(&format!(
-                    "{:<6}{} [{}/0] via {}\n",
+                    "{:<9}{} [{}/0] via {}\n",
                     code, prefix_str, dist, nh
                 ));
             } else if let Some(iface) = &route.interface {
                 output.push_str(&format!(
-                    "{:<6}{} is directly connected, {}\n",
+                    "{:<9}{} is directly connected, {}\n",
                     code, prefix_str, iface
                 ));
             }
@@ -1587,10 +1714,34 @@ impl RawTransport for MockIosDevice {
                     // Format help output like real IOS
                     let mut out = String::new();
                     out.push_str("\r\n");
+                    // Determine if this is top-level help (nothing typed before ?)
+                    let trimmed = partial.trim();
                     match help_result {
                         HelpResult::Subcommands(subs) => {
+                            // Add header line for top-level help, matching real IOS
+                            if trimmed.is_empty() {
+                                let header = match &mode {
+                                    CliMode::UserExec | CliMode::PrivilegedExec => {
+                                        "Exec commands:\r\n".to_string()
+                                    }
+                                    CliMode::Config => "Configure commands:\r\n".to_string(),
+                                    CliMode::ConfigSub(sub) => {
+                                        // Convert sub-mode name to human-readable header
+                                        // e.g. "config-if" -> "Interface configuration commands:"
+                                        let label = match sub.as_str() {
+                                            "config-if" => "Interface",
+                                            "config-router" => "Router",
+                                            "config-line" => "Line",
+                                            _ => "Sub-mode",
+                                        };
+                                        format!("{} configuration commands:\r\n", label)
+                                    }
+                                    _ => String::new(),
+                                };
+                                out.push_str(&header);
+                            }
                             for (name, desc) in subs {
-                                out.push_str(&format!("  {:<20}  {}\r\n", name, desc));
+                                out.push_str(&format!("  {:<17}  {}\r\n", name, desc));
                             }
                         }
                         HelpResult::PrefixMatches(names) => {
@@ -2775,6 +2926,10 @@ mod tests {
             "show ip int brief should show interface table header, got: {:?}", output);
         assert!(output.contains("GigabitEthernet") || output.contains("Gigabit") || output.contains("Ethernet"),
             "Should list interfaces");
+        // Protocol column must be padded to 8 chars (for screen-scraping tools)
+        // An "up" protocol entry should appear as "up      " (with trailing spaces)
+        assert!(output.contains("up      ") || output.contains("down    "),
+            "Protocol column should be padded to 8 chars with trailing spaces, got: {:?}", output);
     }
 
     // --- dir flash: format ---
@@ -3689,6 +3844,96 @@ mod tests {
         assert!(output.contains("Gateway of last resort"), "Should show gateway of last resort");
         assert!(output.contains("directly connected"), "Should show connected routes");
         assert!(output.contains("GigabitEthernet0/0"), "Should reference interface name");
+        // Default state has GigabitEthernet0/0 at 10.0.0.1/24 — class A major is 10.0.0.0/8
+        assert!(
+            output.contains("variably subnetted"),
+            "Should show 'variably subnetted' grouping header, got: {:?}",
+            &output[..output.len().min(500)]
+        );
+        assert!(
+            output.contains("10.0.0.0/8 is variably subnetted"),
+            "Should group 10.x routes under 10.0.0.0/8, got: {:?}",
+            &output[..output.len().min(500)]
+        );
+        // Default route should appear standalone (not under a group header)
+        assert!(
+            output.contains("S*"),
+            "Should show S* for default route, got: {:?}",
+            &output[..output.len().min(500)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_route_multiple_subnets() {
+        // Build a device with multiple interfaces in the same class A major (10.0.0.0/8)
+        // and one in a class C major (192.168.0.0/24), plus a default route.
+        let mut device = setup_device("R1").await;
+
+        // Configure extra interfaces via CLI
+        let _ = send_cmd(&mut device, "configure terminal").await;
+
+        let _ = send_cmd(&mut device, "interface loopback 0").await;
+        let _ = send_cmd(&mut device, "ip address 10.127.0.1 255.255.255.255").await;
+        let _ = send_cmd(&mut device, "no shutdown").await;
+        let _ = send_cmd(&mut device, "exit").await;
+
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/1").await;
+        let _ = send_cmd(&mut device, "ip address 192.168.0.113 255.255.255.0").await;
+        let _ = send_cmd(&mut device, "no shutdown").await;
+        let _ = send_cmd(&mut device, "exit").await;
+
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ip route").await;
+
+        // 10.0.0.0/8 group should exist and cover multiple 10.x subnets
+        assert!(
+            output.contains("10.0.0.0/8 is variably subnetted"),
+            "Should have 10.0.0.0/8 variably subnetted header, got:\n{}",
+            output
+        );
+
+        // 192.168.0.0/24 group (class C)
+        assert!(
+            output.contains("192.168.0.0/24 is variably subnetted"),
+            "Should have 192.168.0.0/24 variably subnetted header, got:\n{}",
+            output
+        );
+
+        // Both 10.x connected routes and loopback should appear under the 10/8 group
+        assert!(
+            output.contains("10.0.0.0/24"),
+            "Should show 10.0.0.0/24 network route"
+        );
+        assert!(
+            output.contains("10.127.0.1/32"),
+            "Should show 10.127.0.1/32 loopback host route"
+        );
+
+        // The 192.168.x routes should appear
+        assert!(
+            output.contains("192.168.0.0/24"),
+            "Should show 192.168.0.0/24 network route"
+        );
+        assert!(
+            output.contains("192.168.0.113/32"),
+            "Should show 192.168.0.113/32 host route"
+        );
+
+        // Default route still standalone
+        assert!(output.contains("S*"), "Should still show S* default route");
+        assert!(
+            output.contains("0.0.0.0/0"),
+            "Should show 0.0.0.0/0 default route"
+        );
+
+        // Verify the 10/8 group header comes before its member routes
+        let pos_10_header = output.find("10.0.0.0/8 is variably subnetted").unwrap();
+        let pos_10_route = output.find("10.0.0.0/24").unwrap();
+        assert!(
+            pos_10_header < pos_10_route,
+            "Group header should precede member routes"
+        );
     }
 
     // ─── Feature tests: show startup-config ────────────────────────────────────
@@ -3929,5 +4174,97 @@ mod tests {
             device.mode, output);
 
         let _ = send_cmd(&mut device, "end").await;
+    }
+
+    #[tokio::test]
+    async fn test_help_shows_header() {
+        // 1. Top-level ? in privileged exec shows "Exec commands:" header
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // consume initial prompt
+
+        device.send(b"?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data).to_string();
+        assert!(
+            output.contains("Exec commands:"),
+            "? in priv-exec should show 'Exec commands:' header, got: {:?}",
+            output
+        );
+
+        // 2. Top-level ? in config mode shows "Configure commands:" header
+        device.send(b"configure terminal\r").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data).to_string();
+        assert!(
+            output.contains("Configure commands:"),
+            "? in config mode should show 'Configure commands:' header, got: {:?}",
+            output
+        );
+
+        // 3. "show ?" does NOT show a header — only subcommands
+        device.send(b"end\r").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"show ?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data).to_string();
+        assert!(
+            !output.contains("Exec commands:"),
+            "'show ?' should NOT show 'Exec commands:' header, got: {:?}",
+            output
+        );
+        assert!(
+            !output.contains("Configure commands:"),
+            "'show ?' should NOT show 'Configure commands:' header, got: {:?}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_help_shows_exec_header() {
+        // 1. Top-level ? in privileged exec shows "Exec commands:" header
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data).to_string();
+        assert!(
+            output.contains("Exec commands:"),
+            "? in priv-exec should show 'Exec commands:' header, got: {:?}",
+            output
+        );
+
+        // 2. "show ?" does NOT show "Exec commands:" header
+        device.send(b"show ?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data).to_string();
+        assert!(
+            !output.contains("Exec commands:"),
+            "'show ?' should NOT show 'Exec commands:' header, got: {:?}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_help_shows_config_header() {
+        // Top-level ? in config mode shows "Configure commands:" header
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"configure terminal\r").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data).to_string();
+        assert!(
+            output.contains("Configure commands:"),
+            "? in config mode should show 'Configure commands:' header, got: {:?}",
+            output
+        );
     }
 }

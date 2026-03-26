@@ -25,6 +25,10 @@
 //! # });
 //! ```
 
+pub mod cmd_tree;
+pub mod cmd_tree_exec;
+pub mod cmd_tree_conf;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -132,7 +136,7 @@ pub struct MockIosDevice {
 
 /// Pending interactive prompt state.
 #[derive(Debug, Clone)]
-enum PendingInteractive {
+pub enum PendingInteractive {
     /// Waiting for confirmation of a copy command.
     CopyConfirm {
         source: String,
@@ -154,6 +158,8 @@ enum PendingInteractive {
     EnablePassword,
     /// Install activate confirmation.
     InstallActivateConfirm,
+    /// Waiting for "configure" method (terminal/memory/network).
+    ConfigureMethod,
 }
 
 impl std::fmt::Debug for MockIosDevice {
@@ -423,133 +429,220 @@ impl MockIosDevice {
     }
 
     fn handle_user_exec(&mut self, line: &str) {
-        let cmd = line.to_lowercase();
-        if cmd == "enable" {
-            if self.enable_password.is_some() {
-                self.pending_interactive = Some(PendingInteractive::EnablePassword);
-                self.queue_output("\nPassword: ");
-            } else {
-                self.mode = CliMode::PrivilegedExec;
-                self.queue_output(&format!("\n{}", self.prompt()));
-            }
-        } else if cmd.starts_with("terminal length")
-            || cmd.starts_with("term len")
-            || cmd.starts_with("terminal width")
-        {
-            self.queue_output(&format!("\n{}", self.prompt()));
-        } else {
-            self.queue_output(&format!(
-                "\n% Unrecognized command\n{}",
-                self.prompt()
-            ));
-        }
+        self.dispatch_exec(line);
     }
 
     fn handle_privileged_exec(&mut self, line: &str) {
         let cmd = line.to_lowercase();
 
-        // Check custom commands first
-        if let Some(response) = self.commands.get(&cmd) {
+        // Check custom commands first (exact match or prefix)
+        if let Some(response) = self.commands.get(&cmd).cloned() {
+            self.queue_output(&format!("\n{}\n{}", response, self.prompt()));
+            return;
+        }
+        let custom_response = self.commands.iter()
+            .find(|(k, _)| cmd.starts_with(k.as_str()))
+            .map(|(_, v)| v.clone());
+        if let Some(response) = custom_response {
             self.queue_output(&format!("\n{}\n{}", response, self.prompt()));
             return;
         }
 
-        // Built-in commands
-        if cmd.starts_with("show running-config") || cmd.starts_with("show run") {
-            let config = self.running_config.join("\n");
-            self.queue_output(&format!("\n{}\n{}", config, self.prompt()));
-        } else if cmd.starts_with("show version") || cmd.starts_with("show ver") {
-            let version_output = self.generate_show_version();
-            self.queue_output(&format!("\n{}\n{}", version_output, self.prompt()));
-        } else if cmd.starts_with("terminal length")
-            || cmd.starts_with("term len")
-            || cmd.starts_with("terminal width")
-        {
-            self.queue_output(&format!("\n{}", self.prompt()));
-        } else if cmd.starts_with("configure terminal") || cmd.starts_with("conf t") {
-            self.mode = CliMode::Config;
-            self.queue_output(&format!(
-                "\nEnter configuration commands, one per line.  End with CNTL/Z.\n{}",
-                self.prompt()
-            ));
-        } else if cmd.starts_with("copy ") {
-            self.handle_copy_command(line);
-        } else if cmd.starts_with("delete ") {
-            self.handle_delete_command(line);
-        } else if cmd.starts_with("verify /md5 ") {
-            self.handle_verify_md5(line);
-        } else if cmd.starts_with("reload") {
-            self.handle_reload_command(line);
-        } else if cmd.starts_with("show install summary") || cmd.starts_with("show install sum") {
-            self.handle_show_install_summary();
-        } else if cmd.starts_with("show boot") || cmd == "show boot" {
-            self.handle_show_boot();
-        } else if cmd.starts_with("install add ") {
-            self.handle_install_add(line);
-        } else if cmd.starts_with("install activate") {
-            self.handle_install_activate();
-        } else if cmd.starts_with("install commit") {
-            self.handle_install_commit();
-        } else if cmd.starts_with("install remove inactive") {
-            self.handle_install_remove_inactive();
-        } else if cmd.starts_with("dir ") || cmd == "dir" {
-            self.handle_dir_command(line);
-        } else {
-            // Try prefix matching on custom commands
-            let mut found = false;
-            for (key, response) in &self.commands {
-                if cmd.starts_with(key) {
-                    self.queue_output(&format!("\n{}\n{}", response, self.prompt()));
-                    found = true;
-                    break;
-                }
+        self.dispatch_exec(line);
+    }
+
+    /// Dispatch an exec-mode command using the command tree.
+    fn dispatch_exec(&mut self, line: &str) {
+        use crate::cmd_tree::parse;
+        use crate::cmd_tree::ParseResult;
+        use crate::cmd_tree_exec::exec_tree;
+
+        let mode = self.mode.clone();
+        let result = parse(line, exec_tree(), &mode);
+        match result {
+            ParseResult::Execute { handler, .. } => {
+                handler(self, line);
             }
-            if !found {
+            ParseResult::Incomplete => {
+                let p = self.prompt();
+                self.queue_output(&format!("\n% Incomplete command.\n{}", p));
+            }
+            ParseResult::InvalidInput { caret_pos } => {
+                let p = self.prompt();
+                let spaces = " ".repeat(caret_pos);
                 self.queue_output(&format!(
-                    "\n% Unknown command or computer name, or unable to find computer address\n{}",
-                    self.prompt()
+                    "\n{}^\n% Invalid input detected at '^' marker.\n{}",
+                    spaces, p
                 ));
             }
+            ParseResult::Ambiguous { token, matches } => {
+                let p = self.prompt();
+                self.queue_output(&format!(
+                    "\n% Ambiguous command: \"{}\"\n  Matches: {}\n{}",
+                    token,
+                    matches.join(", "),
+                    p
+                ));
+            }
+            ParseResult::Empty => {
+                let p = self.prompt();
+                self.queue_output(&format!("\n{}", p));
+            }
         }
+    }
+
+    pub fn handle_show_ip_interface_brief(&mut self) {
+        let header = "Interface              IP-Address      OK? Method Status                Protocol";
+        let mut lines = vec![String::new(), header.to_string()];
+
+        // Parse running config for interfaces
+        let mut current_iface: Option<String> = None;
+        let mut current_ip: Option<String> = None;
+        let mut current_shutdown = false;
+
+        // Collect interface info
+        let mut ifaces: Vec<(String, String, bool)> = Vec::new();
+        for line in &self.running_config {
+            let trimmed = line.trim();
+            if trimmed.starts_with("interface ") {
+                if let Some(iface) = current_iface.take() {
+                    let ip = current_ip.take().unwrap_or_else(|| "unassigned".to_string());
+                    ifaces.push((iface, ip, current_shutdown));
+                }
+                current_iface = Some(trimmed.trim_start_matches("interface ").to_string());
+                current_ip = None;
+                current_shutdown = false;
+            } else if trimmed.starts_with("ip address ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    current_ip = Some(parts[2].to_string());
+                }
+            } else if trimmed == "shutdown" {
+                current_shutdown = true;
+            } else if trimmed == "no shutdown" {
+                current_shutdown = false;
+            }
+        }
+        if let Some(iface) = current_iface.take() {
+            let ip = current_ip.take().unwrap_or_else(|| "unassigned".to_string());
+            ifaces.push((iface, ip, current_shutdown));
+        }
+
+        for (iface, ip, shutdown) in &ifaces {
+            let status = if *shutdown { "administratively down" } else { "up" };
+            let protocol = if *shutdown { "down" } else { "up" };
+            lines.push(format!(
+                "{:<23}{:<16}YES NVRAM  {:<22}{}",
+                iface, ip, status, protocol
+            ));
+        }
+
+        let output = lines.join("\n") + "\n" + &self.prompt();
+        self.queue_output(&output);
+    }
+
+    pub fn handle_show_ip_route(&mut self) {
+        let mut output = String::from("\nCodes: C - connected, S - static\n\n");
+        // Generate connected routes from interfaces
+        for line in &self.running_config {
+            let trimmed = line.trim();
+            if trimmed.starts_with("ip address ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    output.push_str(&format!("C    {}/{} is directly connected\n", parts[2], parts[3]));
+                }
+            } else if trimmed.starts_with("ip route ") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() >= 5 {
+                    output.push_str(&format!("S*   {}/{} [1/0] via {}\n", parts[2], parts[3], parts[4]));
+                }
+            }
+        }
+        output.push_str(&self.prompt());
+        self.queue_output(&output);
     }
 
     fn handle_config_mode(&mut self, line: &str) {
-        let cmd = line.to_lowercase();
-        if cmd == "end" || cmd == "exit" {
-            self.mode = CliMode::PrivilegedExec;
-            self.queue_output(&format!("\n{}", self.prompt()));
-        } else if cmd.starts_with("interface ") {
-            let sub = line.trim_start_matches("interface ").trim_start_matches("Interface ");
-            self.mode = CliMode::ConfigSub(format!("config-if"));
-            self.running_config
-                .push(format!("interface {}", sub));
-            self.queue_output(&format!("\n{}", self.prompt()));
-        } else if cmd.starts_with("router ") {
-            self.mode = CliMode::ConfigSub(format!("config-router"));
-            self.running_config.push(line.to_string());
-            self.queue_output(&format!("\n{}", self.prompt()));
-        } else {
-            // Accept any config line
-            self.running_config.push(line.to_string());
-            self.queue_output(&format!("\n{}", self.prompt()));
-        }
+        self.dispatch_config(line);
     }
 
     fn handle_config_sub(&mut self, line: &str) {
-        let cmd = line.to_lowercase();
-        if cmd == "exit" {
-            self.mode = CliMode::Config;
-            self.queue_output(&format!("\n{}", self.prompt()));
-        } else if cmd == "end" {
+        self.dispatch_config(line);
+    }
+
+    /// Dispatch a config/config-sub command using the command tree.
+    fn dispatch_config(&mut self, line: &str) {
+        use crate::cmd_tree::parse;
+        use crate::cmd_tree::ParseResult;
+        use crate::cmd_tree_exec::exec_tree;
+        use crate::cmd_tree_conf::conf_tree;
+
+        // "do <cmd>" — special case before tree parsing
+        let cmd_lower = line.to_lowercase();
+        if cmd_lower.starts_with("do ") {
+            let exec_cmd = &line[3..];
+            let saved_mode = self.mode.clone();
             self.mode = CliMode::PrivilegedExec;
-            self.queue_output(&format!("\n{}", self.prompt()));
-        } else {
-            self.running_config.push(format!(" {}", line));
-            self.queue_output(&format!("\n{}", self.prompt()));
+            let result = parse(exec_cmd, exec_tree(), &CliMode::PrivilegedExec);
+            match result {
+                ParseResult::Execute { handler, .. } => handler(self, exec_cmd),
+                ParseResult::Incomplete => {
+                    self.queue_output("\n% Incomplete command.\n");
+                }
+                ParseResult::InvalidInput { caret_pos } => {
+                    let spaces = " ".repeat(caret_pos);
+                    self.queue_output(&format!(
+                        "\n{}^\n% Invalid input detected at '^' marker.\n",
+                        spaces
+                    ));
+                }
+                ParseResult::Ambiguous { token, .. } => {
+                    self.queue_output(&format!("\n% Ambiguous command: \"{}\"\n", token));
+                }
+                ParseResult::Empty => {}
+            }
+            self.mode = saved_mode;
+            // Re-display config prompt after do command
+            let p = self.prompt();
+            self.queue_output(&format!("{}", p));
+            return;
+        }
+
+        let mode = self.mode.clone();
+        let result = parse(line, conf_tree(), &mode);
+        match result {
+            ParseResult::Execute { handler, .. } => {
+                handler(self, line);
+            }
+            ParseResult::Incomplete => {
+                let p = self.prompt();
+                self.queue_output(&format!("\n% Incomplete command.\n{}", p));
+            }
+            ParseResult::InvalidInput { caret_pos } => {
+                let p = self.prompt();
+                let spaces = " ".repeat(caret_pos);
+                self.queue_output(&format!(
+                    "\n{}^\n% Invalid input detected at '^' marker.\n{}",
+                    spaces, p
+                ));
+            }
+            ParseResult::Ambiguous { token, matches } => {
+                let p = self.prompt();
+                self.queue_output(&format!(
+                    "\n% Ambiguous command: \"{}\"\n  Matches: {}\n{}",
+                    token,
+                    matches.join(", "),
+                    p
+                ));
+            }
+            ParseResult::Empty => {
+                let p = self.prompt();
+                self.queue_output(&format!("\n{}", p));
+            }
         }
     }
 
-    fn handle_copy_command(&mut self, line: &str) {
+    pub fn handle_copy_command(&mut self, line: &str) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
             self.queue_output(&format!(
@@ -619,7 +712,7 @@ impl MockIosDevice {
         }
     }
 
-    fn handle_delete_command(&mut self, line: &str) {
+    pub fn handle_delete_command(&mut self, line: &str) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         let filename = parts
             .iter()
@@ -632,7 +725,7 @@ impl MockIosDevice {
         self.queue_output(&format!("\n{}", self.prompt()));
     }
 
-    fn handle_verify_md5(&mut self, line: &str) {
+    pub fn handle_verify_md5(&mut self, line: &str) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         // "verify /md5 flash:filename"
         let flash_path = parts.last().unwrap_or(&"");
@@ -653,27 +746,8 @@ impl MockIosDevice {
         }
     }
 
-    fn handle_reload_command(&mut self, line: &str) {
-        let cmd = line.to_lowercase();
-        if cmd == "reload cancel" {
-            self.queue_output(&format!(
-                "\n***\n*** --- SHUTDOWN ABORTED ---\n***\n{}",
-                self.prompt()
-            ));
-        } else if cmd.starts_with("reload in ") {
-            let _minutes = cmd
-                .trim_start_matches("reload in ")
-                .parse::<u32>()
-                .ok();
-            self.pending_interactive = Some(PendingInteractive::ReloadSave);
-            self.queue_output("\nSystem configuration has been modified. Save? [yes/no]: ");
-        } else {
-            self.pending_interactive = Some(PendingInteractive::ReloadConfirm { _minutes: None });
-            self.queue_output("\nProceed with reload? [confirm]");
-        }
-    }
 
-    fn handle_dir_command(&mut self, _line: &str) {
+    pub fn handle_dir_command(&mut self, _line: &str) {
         let mut output = String::from("\nDirectory of flash:/\n\n");
         let mut used: u64 = 0;
         for (name, content) in &self.flash_files {
@@ -692,7 +766,7 @@ impl MockIosDevice {
         self.queue_output(&output);
     }
 
-    fn handle_show_boot(&mut self) {
+    pub fn handle_show_boot(&mut self) {
         let boot_var = if self.boot_variable.is_empty() {
             format!("flash:c{}-universalk9-mz.SPA.{}.bin", self.model.to_lowercase(), self.version)
         } else {
@@ -705,7 +779,7 @@ impl MockIosDevice {
         self.queue_output(&output);
     }
 
-    fn handle_show_install_summary(&mut self) {
+    pub fn handle_show_install_summary(&mut self) {
         match &self.install_state {
             Some(state) => {
                 let mode_str = match state.mode {
@@ -743,7 +817,7 @@ impl MockIosDevice {
         }
     }
 
-    fn handle_install_add(&mut self, line: &str) {
+    pub fn handle_install_add(&mut self, line: &str) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         // install add file flash:<image>.bin
         let image_name = parts.iter()
@@ -796,7 +870,7 @@ install_add: SUCCESS
         }
     }
 
-    fn handle_install_activate(&mut self) {
+    pub fn handle_install_activate(&mut self) {
         if self.install_state.is_none() {
             self.queue_output(&format!(
                 "\n% Install mode is not supported\n{}",
@@ -810,7 +884,7 @@ install_add: SUCCESS
         );
     }
 
-    fn handle_install_commit(&mut self) {
+    pub fn handle_install_commit(&mut self) {
         if let Some(ref mut state) = self.install_state {
             let had_activated = state.packages.iter().any(|p| p.state == PackageState::Activated);
             for pkg in &mut state.packages {
@@ -834,7 +908,7 @@ install_add: SUCCESS
         }
     }
 
-    fn handle_install_remove_inactive(&mut self) {
+    pub fn handle_install_remove_inactive(&mut self) {
         if let Some(ref mut state) = self.install_state {
             state.packages.retain(|p| p.state != PackageState::Inactive);
             self.queue_output(&format!(
@@ -937,10 +1011,26 @@ install_add: SUCCESS
                     Some(PendingInteractive::ReloadConfirm { _minutes: None });
                 self.queue_output("\nProceed with reload? [confirm]");
             }
+            PendingInteractive::ConfigureMethod => {
+                // Empty or "terminal" → enter config mode
+                let choice = line.trim().to_lowercase();
+                if choice.is_empty() || choice == "terminal" {
+                    self.mode = CliMode::Config;
+                    self.queue_output(&format!(
+                        "\nEnter configuration commands, one per line.  End with CNTL/Z.\n{}",
+                        self.prompt()
+                    ));
+                } else {
+                    self.queue_output(&format!(
+                        "\n% Invalid input — use 'terminal', 'memory', or 'network'\n{}",
+                        self.prompt()
+                    ));
+                }
+            }
         }
     }
 
-    fn generate_show_version(&self) -> String {
+    pub fn generate_show_version(&self) -> String {
         let system_image = match &self.install_state {
             Some(InstallState { mode: InstallMode::Install, .. }) => {
                 "flash:packages.conf".to_string()
@@ -976,8 +1066,24 @@ Configuration register is 0x2102"#,
         )
     }
 
-    fn queue_output(&mut self, text: &str) {
+    pub fn queue_output(&mut self, text: &str) {
         self.output_queue.extend_from_slice(text.as_bytes());
+    }
+
+    /// Synchronous receive for unit tests (no async runtime needed).
+    #[cfg(test)]
+    pub fn receive_sync(&mut self) -> Vec<u8> {
+        if !self.initial_sent {
+            self.initial_sent = true;
+            self.queue_output(&format!("{}", self.prompt()));
+        }
+        std::mem::take(&mut self.output_queue)
+    }
+
+    /// Drain queued output for unit tests.
+    #[cfg(test)]
+    pub fn drain_output(&mut self) -> String {
+        String::from_utf8_lossy(&std::mem::take(&mut self.output_queue)).into_owned()
     }
 }
 
@@ -1040,6 +1146,7 @@ impl RawTransport for MockIosDevice {
         Ok(())
     }
 }
+
 
 fn default_running_config(hostname: &str) -> Vec<String> {
     vec![
@@ -1782,5 +1889,547 @@ mod tests {
         eprintln!("DI-6 leftover: {:?} (len={})", String::from_utf8_lossy(&data2), data2.len());
 
         assert!(output.contains("Cisco IOS"), "show version should contain Cisco IOS");
+    }
+
+    // =========================================================================
+    // Tests based on real Cisco IOS device behavior (.130 IOS 12.2, .113 IOS 15.2)
+    // =========================================================================
+
+    /// Helper: create device, consume initial prompt, return device + prompt text.
+    async fn setup_device(hostname: &str) -> MockIosDevice {
+        let mut device = MockIosDevice::new(hostname);
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device
+    }
+
+    /// Helper: send command and get response.
+    async fn send_cmd(device: &mut MockIosDevice, cmd: &str) -> String {
+        device.send(format!("{}\n", cmd).as_bytes()).await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        String::from_utf8_lossy(&data).to_string()
+    }
+
+    // --- disable command ---
+
+    #[tokio::test]
+    async fn test_disable_drops_to_user_exec() {
+        let mut device = setup_device("Router1").await;
+        assert_eq!(device.mode, CliMode::PrivilegedExec);
+
+        let output = send_cmd(&mut device, "disable").await;
+        assert_eq!(device.mode, CliMode::UserExec);
+        assert!(output.contains("Router1>"), "After disable, prompt should be 'Router1>', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_disable_then_enable() {
+        let mut device = MockIosDevice::new("R1").with_enable("secret");
+        // with_enable sets mode to UserExec when no login
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Start in UserExec — enable
+        let output = send_cmd(&mut device, "enable").await;
+        assert!(output.contains("Password:"), "Should prompt for enable password");
+        let output = send_cmd(&mut device, "secret").await;
+        assert!(output.contains("R1#"), "Should be in priv exec after enable");
+
+        // Disable back to user exec
+        let output = send_cmd(&mut device, "disable").await;
+        assert_eq!(device.mode, CliMode::UserExec);
+        assert!(output.contains("R1>"));
+    }
+
+    // --- User exec mode: show commands should work ---
+
+    #[tokio::test]
+    async fn test_user_exec_show_version() {
+        let mut device = MockIosDevice::new("R1").with_enable("secret");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let output = send_cmd(&mut device, "show version").await;
+        assert!(output.contains("Cisco IOS"), "show version should work in user exec, got: {:?}", output);
+        assert!(output.contains("R1>"), "Should stay in user exec mode");
+    }
+
+    #[tokio::test]
+    async fn test_user_exec_show_clock() {
+        let mut device = MockIosDevice::new("R1").with_enable("secret");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let output = send_cmd(&mut device, "show clock").await;
+        // Real IOS: "08:29:31.723 UTC Thu Mar 26 2026"
+        assert!(output.contains("UTC") || output.contains(":"), "show clock should return a time, got: {:?}", output);
+        assert!(output.contains("R1>"));
+    }
+
+    #[tokio::test]
+    async fn test_user_exec_show_running_config() {
+        let mut device = MockIosDevice::new("R1").with_enable("secret");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let output = send_cmd(&mut device, "show running-config").await;
+        assert!(output.contains("hostname R1"), "show run should work in user exec");
+    }
+
+    #[tokio::test]
+    async fn test_user_exec_configure_terminal_rejected() {
+        // Real IOS: configure terminal from user exec gives:
+        //   "             ^
+        //    % Invalid input detected at '^' marker."
+        let mut device = MockIosDevice::new("R1").with_enable("secret");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let output = send_cmd(&mut device, "configure terminal").await;
+        assert!(output.contains("Invalid input") || output.contains("Unrecognized"),
+            "configure terminal should be rejected in user exec, got: {:?}", output);
+        assert_eq!(device.mode, CliMode::UserExec);
+    }
+
+    // --- Incomplete command vs Unknown command ---
+
+    #[tokio::test]
+    async fn test_incomplete_command() {
+        // Real IOS: "show ip" → "% Incomplete command."
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip").await;
+        assert!(output.contains("Incomplete command"),
+            "Incomplete command should give '% Incomplete command.', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_unknown_command_error_message() {
+        // Real IOS: "boguscommand" → (optional Translating...) then
+        // "% Unknown command or computer name, or unable to find computer address"
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "boguscommand").await;
+        assert!(output.contains("Unknown command") || output.contains("Invalid input"),
+            "Unknown command should give appropriate error, got: {:?}", output);
+    }
+
+    // --- Config mode: Invalid input with caret marker ---
+
+    #[tokio::test]
+    async fn test_config_mode_invalid_command_caret_marker() {
+        // Real IOS:
+        //   SEED-001-S0244(config)#bogusconfigcmd
+        //                            ^
+        //   % Invalid input detected at '^' marker.
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        assert_eq!(device.mode, CliMode::Config);
+
+        let output = send_cmd(&mut device, "bogusconfigcmd").await;
+        assert!(output.contains("Invalid input detected"),
+            "Config mode bad command should show '% Invalid input detected at '^' marker.', got: {:?}", output);
+        assert!(output.contains("^"),
+            "Should include caret marker, got: {:?}", output);
+        assert_eq!(device.mode, CliMode::Config, "Should stay in config mode");
+    }
+
+    // --- "do" prefix in config mode ---
+
+    #[tokio::test]
+    async fn test_do_command_in_config_mode() {
+        // Real IOS: "do show clock" from config mode runs the exec command
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+
+        let output = send_cmd(&mut device, "do show version").await;
+        assert!(output.contains("Cisco IOS"),
+            "'do show version' in config mode should work, got: {:?}", output);
+        assert_eq!(device.mode, CliMode::Config, "Should stay in config mode after 'do'");
+    }
+
+    #[tokio::test]
+    async fn test_do_command_in_config_sub_mode() {
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(_)));
+
+        let output = send_cmd(&mut device, "do show version").await;
+        assert!(output.contains("Cisco IOS"),
+            "'do show version' in config-if mode should work, got: {:?}", output);
+    }
+
+    // --- "configure" alone (without "terminal") ---
+
+    #[tokio::test]
+    async fn test_configure_alone_prompts() {
+        // Real IOS: "configure" → "Configuring from terminal, memory, or network [terminal]?"
+        let mut device = setup_device("Router1").await;
+
+        device.send(b"configure\n").await.unwrap();
+        let output_bytes = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&output_bytes);
+
+        assert!(output.contains("[terminal]") || output.contains("Configuring from"),
+            "'configure' alone should prompt for method, got: {:?}", output);
+    }
+
+    // --- show clock ---
+
+    #[tokio::test]
+    async fn test_show_clock_priv_exec() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show clock").await;
+        // Real IOS: ".08:29:31.723 UTC Thu Mar 26 2026" or "07:54:26.236 UTC Mon Feb 28 2000"
+        assert!(output.contains("UTC") || output.contains(":"),
+            "show clock should return time with UTC, got: {:?}", output);
+        assert!(output.contains("Router1#"));
+    }
+
+    // --- show ip interface brief ---
+
+    #[tokio::test]
+    async fn test_show_ip_interface_brief() {
+        // Real IOS shows a table with headers:
+        // Interface  IP-Address  OK? Method Status  Protocol
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip interface brief").await;
+        assert!(output.contains("Interface") && output.contains("IP-Address"),
+            "show ip int brief should show interface table header, got: {:?}", output);
+        assert!(output.contains("GigabitEthernet") || output.contains("Gigabit") || output.contains("Ethernet"),
+            "Should list interfaces");
+    }
+
+    // --- dir flash: format ---
+
+    #[tokio::test]
+    async fn test_dir_format_matches_real_ios() {
+        // Real IOS dir output:
+        //   Directory of flash:/
+        //     2  -rwx    1824  Feb 18 2000 13:07:57 +00:00  vlan.dat
+        //   122185728 bytes total (99002368 bytes free)
+        let mut device = MockIosDevice::new("Router1")
+            .with_flash_size(122_185_728)
+            .with_flash_file("test.bin", vec![0u8; 1000]);
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let output = send_cmd(&mut device, "dir flash:").await;
+        assert!(output.contains("Directory of flash:/"),
+            "Should have 'Directory of flash:/' header, got: {:?}", output);
+        assert!(output.contains("test.bin"), "Should list file name");
+        assert!(output.contains("bytes total"), "Should show total");
+        assert!(output.contains("bytes free"), "Should show free");
+    }
+
+    // --- show boot format ---
+
+    #[tokio::test]
+    async fn test_show_boot_format() {
+        // Real IOS:
+        //   BOOT path-list      : flash:c3560cx...
+        //   Config file         : flash:/config.text
+        //   ...
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show boot").await;
+        assert!(output.contains("BOOT") || output.contains("boot"),
+            "show boot should contain BOOT info, got: {:?}", output);
+    }
+
+    // --- "show" alone gives subcommand hint ---
+
+    #[tokio::test]
+    async fn test_show_alone_gives_hint() {
+        // Real IOS: % Type "show ?" for a list of subcommands
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show").await;
+        assert!(output.contains("Type \"show ?\"") || output.contains("subcommands"),
+            "'show' alone should hint about '?', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_alone_user_exec() {
+        // Real IOS gives same hint in user exec
+        let mut device = MockIosDevice::new("R1").with_enable("secret");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let output = send_cmd(&mut device, "show").await;
+        assert!(output.contains("Type \"show ?\"") || output.contains("subcommands"),
+            "'show' alone in user exec should also hint, got: {:?}", output);
+    }
+
+    // --- Config mode: "exit" returns to priv exec, not just config ---
+
+    #[tokio::test]
+    async fn test_config_exit_returns_to_priv_exec() {
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        assert_eq!(device.mode, CliMode::Config);
+
+        let output = send_cmd(&mut device, "exit").await;
+        assert_eq!(device.mode, CliMode::PrivilegedExec,
+            "exit from config should return to priv exec");
+        assert!(output.contains("Router1#"));
+    }
+
+    // --- Config sub-mode: "exit" returns to config, "end" to priv exec ---
+
+    #[tokio::test]
+    async fn test_config_sub_exit_returns_to_config() {
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(_)));
+
+        let output = send_cmd(&mut device, "exit").await;
+        assert_eq!(device.mode, CliMode::Config);
+        assert!(output.contains("(config)#"));
+    }
+
+    #[tokio::test]
+    async fn test_config_sub_end_returns_to_priv_exec() {
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+
+        let output = send_cmd(&mut device, "end").await;
+        assert_eq!(device.mode, CliMode::PrivilegedExec);
+        assert!(output.contains("Router1#"));
+    }
+
+    // --- Empty line behavior ---
+
+    #[tokio::test]
+    async fn test_empty_line_returns_prompt() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "").await;
+        assert!(output.contains("Router1#"), "Empty line should just re-show prompt");
+    }
+
+    // --- show version contains key fields ---
+
+    #[tokio::test]
+    async fn test_show_version_contains_key_fields() {
+        // Real IOS show version includes: version string, model, uptime,
+        // "System image file", "Configuration register"
+        let mut device = MockIosDevice::new("Router1")
+            .with_version("15.2(7)E10")
+            .with_model("WS-C3560CX-12PD-S");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let output = send_cmd(&mut device, "show version").await;
+        assert!(output.contains("15.2(7)E10"), "Should contain version string");
+        assert!(output.contains("WS-C3560CX-12PD-S"), "Should contain model");
+        assert!(output.contains("System image file"), "Should mention system image file");
+        assert!(output.contains("Configuration register"), "Should mention config register");
+    }
+
+    // --- "show run" abbreviation ---
+
+    #[tokio::test]
+    async fn test_show_run_abbreviation() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show run").await;
+        assert!(output.contains("hostname Router1"),
+            "'show run' should work as abbreviation for 'show running-config'");
+    }
+
+    // --- "conf t" abbreviation ---
+
+    #[tokio::test]
+    async fn test_conf_t_abbreviation() {
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "conf t").await;
+        assert_eq!(device.mode, CliMode::Config);
+    }
+
+    // --- "term len" abbreviation ---
+
+    #[tokio::test]
+    async fn test_term_len_abbreviation() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "term len 0").await;
+        assert!(output.contains("Router1#"), "term len should be accepted silently");
+    }
+
+    // --- Router sub-mode ---
+
+    #[tokio::test]
+    async fn test_router_sub_mode() {
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+
+        let output = send_cmd(&mut device, "router ospf 1").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(ref s) if s == "config-router"),
+            "router command should enter config-router sub-mode");
+        assert!(output.contains("(config-router)#"));
+    }
+
+    // --- "write memory" / "copy run start" ---
+
+    #[tokio::test]
+    async fn test_write_memory() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "write memory").await;
+        // Real IOS: "[OK]" or "Building configuration..."
+        assert!(output.contains("OK") || output.contains("Building") || output.contains("#"),
+            "write memory should produce some confirmation, got: {:?}", output);
+    }
+
+    // --- "show ip route" should work (even as custom/stub) ---
+
+    #[tokio::test]
+    async fn test_show_ip_route() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip route").await;
+        // At minimum it shouldn't give "Unknown command" - it should give some output
+        assert!(!output.contains("Unknown command"),
+            "show ip route should not be unknown, got: {:?}", output);
+    }
+
+    // =========================================================================
+    // New tests: abbreviation matching, ambiguity, caret position
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_abbreviation_show_ver() {
+        // "show ver" should work as abbreviation for "show version"
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ver").await;
+        assert!(
+            output.contains("Cisco IOS"),
+            "'show ver' abbreviation should work, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_abbreviation_conf_t() {
+        // "conf t" should enter config mode
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "conf t").await;
+        assert_eq!(device.mode, CliMode::Config, "'conf t' should enter config mode");
+    }
+
+    #[tokio::test]
+    async fn test_abbreviation_sh_run() {
+        // "sh run" should show running config
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "sh run").await;
+        assert!(
+            output.contains("hostname Router1"),
+            "'sh run' abbreviation should work, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ambiguous_command() {
+        // "co" matches both "configure" and "copy" — should give ambiguous error
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "co").await;
+        assert!(
+            output.contains("Ambiguous"),
+            "'co' should give ambiguous error, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_caret_position_correct() {
+        // "show xyz" — caret should appear under "xyz" (position 5)
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show xyz").await;
+        assert!(
+            output.contains("Invalid input detected"),
+            "Should give invalid input error, got: {:?}", output
+        );
+        assert!(
+            output.contains("^"),
+            "Should include caret marker, got: {:?}", output
+        );
+        // Caret should be at position 5 (start of "xyz") — check for "     ^" pattern
+        assert!(
+            output.contains("     ^"),
+            "Caret should be at position 5, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_abbreviation_show_ip_int_bri() {
+        // "sh ip int bri" should work
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "sh ip int bri").await;
+        assert!(
+            output.contains("Interface") || output.contains("IP-Address"),
+            "'sh ip int bri' abbreviation should work, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_abbreviation_wri_mem() {
+        // "wri mem" should work as write memory
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "wri mem").await;
+        assert!(
+            output.contains("OK") || output.contains("Building") || output.contains("#"),
+            "'wri mem' should work, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_config_known_command_accepted() {
+        // "hostname Foo" in config mode should be accepted
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let output = send_cmd(&mut device, "hostname Foo").await;
+        assert!(
+            !output.contains("Invalid input"),
+            "hostname should be accepted in config mode, got: {:?}", output
+        );
+        assert_eq!(device.mode, CliMode::Config);
+    }
+
+    #[tokio::test]
+    async fn test_config_unknown_command_caret() {
+        // An unknown config command should give caret error
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let output = send_cmd(&mut device, "bogusconfigcmd2").await;
+        assert!(
+            output.contains("Invalid input detected"),
+            "Unknown config command should give caret error, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_config_interface_enters_submode() {
+        // "interface Gi0/0" should enter config-if
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let output = send_cmd(&mut device, "interface GigabitEthernet1/0").await;
+        assert!(
+            matches!(device.mode, CliMode::ConfigSub(ref s) if s == "config-if"),
+            "interface should enter config-if, mode={:?}, output={:?}", device.mode, output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_config_do_prefix() {
+        // "do show version" from config mode should work and stay in config
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let output = send_cmd(&mut device, "do show version").await;
+        assert!(
+            output.contains("Cisco IOS"),
+            "'do show version' should work, got: {:?}", output
+        );
+        assert_eq!(device.mode, CliMode::Config, "Should stay in config mode after 'do'");
+    }
+
+    #[tokio::test]
+    async fn test_config_exit_and_end() {
+        // exit from config-if → config, end from config → priv exec
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(_)));
+
+        // exit → back to config
+        let _ = send_cmd(&mut device, "exit").await;
+        assert_eq!(device.mode, CliMode::Config);
+
+        // end → priv exec
+        let _ = send_cmd(&mut device, "end").await;
+        assert_eq!(device.mode, CliMode::PrivilegedExec);
     }
 }

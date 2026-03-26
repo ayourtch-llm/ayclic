@@ -374,6 +374,13 @@ impl MockIosDevice {
             ni.mtu = i.mtu;
             ni.switchport_mode = i.switchport_mode.clone();
             ni.vlan = i.vlan;
+            ni.mac_address = i.mac_address.clone();
+            ni.input_packets = i.input_packets;
+            ni.output_packets = i.output_packets;
+            ni.input_bytes = i.input_bytes;
+            ni.output_bytes = i.output_bytes;
+            ni.input_errors = i.input_errors;
+            ni.output_errors = i.output_errors;
             ni
         }).collect();
         derived_state.static_routes = self.state.static_routes.iter().map(|r| {
@@ -386,6 +393,14 @@ impl MockIosDevice {
             }
         }).collect();
         derived_state.unmodeled_config = self.state.unmodeled_config.clone();
+        derived_state.vlans = self.state.vlans.iter().map(|v| {
+            device_state::VlanState {
+                id: v.id,
+                name: v.name.clone(),
+                active: v.active,
+                ports: v.ports.clone(),
+            }
+        }).collect();
 
         Self {
             hostname: self.hostname.clone(),
@@ -3495,5 +3510,83 @@ mod tests {
         device.send(b"\n").await.unwrap();
         let _ = device.receive(Duration::from_secs(1)).await.unwrap();
         assert_eq!(device.cursor_pos, 0, "cursor_pos should reset to 0 after Enter");
+    }
+
+    // ─── Feature tests: show run header ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_show_run_has_building_header() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show running-config").await;
+        assert!(
+            output.contains("Building configuration"),
+            "show run should start with 'Building configuration...', got: {:?}",
+            &output[..output.len().min(200)]
+        );
+        assert!(
+            output.contains("Current configuration"),
+            "show run should show 'Current configuration : NNN bytes'"
+        );
+    }
+
+    // ─── Feature tests: show interfaces ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_show_interfaces_specific() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show interfaces GigabitEthernet0/0").await;
+        assert!(
+            output.contains("GigabitEthernet0/0 is up"),
+            "Should show interface status, got: {:?}",
+            &output[..output.len().min(200)]
+        );
+        assert!(output.contains("MTU"), "Should show MTU");
+        assert!(output.contains("packets input"), "Should show counters");
+    }
+
+    #[tokio::test]
+    async fn test_show_interfaces_shutdown() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show interfaces GigabitEthernet0/1").await;
+        assert!(
+            output.contains("administratively down"),
+            "Shutdown interface should show 'administratively down', got: {:?}",
+            &output[..output.len().min(200)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_interfaces_all() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show interfaces").await;
+        assert!(
+            output.contains("GigabitEthernet0/0") && output.contains("GigabitEthernet0/1"),
+            "show interfaces should list all interfaces"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_interfaces_nonexistent() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show interfaces GigabitEthernet99/99").await;
+        // Real IOS: "% Invalid input detected at '^' marker." or similar
+        assert!(
+            output.contains("Invalid") || output.contains("invalid") || output.contains("R1#"),
+            "Nonexistent interface should error or show empty"
+        );
+    }
+
+    // ─── Feature tests: show vlan brief ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_show_vlan_brief() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show vlan brief").await;
+        assert!(
+            output.contains("VLAN") && output.contains("Name") && output.contains("Status"),
+            "show vlan brief should have table header, got: {:?}",
+            output
+        );
+        assert!(output.contains("default"), "Should show default VLAN 1");
     }
 }

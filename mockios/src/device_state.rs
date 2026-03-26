@@ -24,6 +24,7 @@ pub struct DeviceState {
     pub banner_motd: String,
     pub install_state: Option<InstallState>,
     pub unmodeled_config: Vec<String>, // catch-all for unknown config lines
+    pub vlans: Vec<VlanState>,
 }
 
 pub struct InterfaceState {
@@ -37,6 +38,22 @@ pub struct InterfaceState {
     pub mtu: u16,
     pub switchport_mode: Option<String>,
     pub vlan: Option<u16>,
+    pub mac_address: String, // "xxxx.xxxx.xxxx" format
+    // Counters (simplified)
+    pub input_packets: u64,
+    pub output_packets: u64,
+    pub input_bytes: u64,
+    pub output_bytes: u64,
+    pub input_errors: u64,
+    pub output_errors: u64,
+}
+
+/// A VLAN entry as shown in `show vlan brief`.
+pub struct VlanState {
+    pub id: u16,
+    pub name: String,
+    pub active: bool,
+    pub ports: Vec<String>, // short interface names assigned to this vlan
 }
 
 pub struct StaticRoute {
@@ -49,6 +66,8 @@ pub struct StaticRoute {
 
 impl InterfaceState {
     pub fn new(name: &str) -> Self {
+        // Generate a deterministic MAC based on the interface name hash
+        let mac = Self::generate_mac(name);
         Self {
             name: name.to_string(),
             description: String::new(),
@@ -60,8 +79,117 @@ impl InterfaceState {
             mtu: 1500,
             switchport_mode: None,
             vlan: None,
+            mac_address: mac,
+            input_packets: 0,
+            output_packets: 0,
+            input_bytes: 0,
+            output_bytes: 0,
+            input_errors: 0,
+            output_errors: 0,
         }
     }
+
+    /// Generate a deterministic MAC address in IOS format (xxxx.xxxx.xxxx)
+    /// from an interface name using a simple hash.
+    fn generate_mac(name: &str) -> String {
+        // Simple deterministic hash — not cryptographic, just unique per name
+        let mut hash: u64 = 0x1234_5678_9abc;
+        for b in name.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(b as u64);
+        }
+        let b0 = ((hash >> 40) & 0xfe) as u8; // clear multicast bit
+        let b1 = ((hash >> 32) & 0xff) as u8;
+        let b2 = ((hash >> 24) & 0xff) as u8;
+        let b3 = ((hash >> 16) & 0xff) as u8;
+        let b4 = ((hash >> 8) & 0xff) as u8;
+        let b5 = (hash & 0xff) as u8;
+        format!(
+            "{:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}",
+            b0, b1, b2, b3, b4, b5
+        )
+    }
+
+    /// Generate detailed `show interfaces` output for this interface (IOS format).
+    pub fn generate_show_interface(&self) -> String {
+        let (status, protocol) = if !self.admin_up {
+            ("administratively down", "down")
+        } else if self.link_up {
+            ("up", "up")
+        } else {
+            ("down", "down (notconnect)")
+        };
+
+        let duplex_str = match self.duplex.as_str() {
+            "full" => "Full-duplex",
+            "half" => "Half-duplex",
+            _ => "Auto-duplex",
+        };
+        let speed_str = match self.speed.as_str() {
+            "10" => "10Mb/s",
+            "100" => "100Mb/s",
+            "1000" => "1Gb/s",
+            "10000" => "10Gb/s",
+            _ => "Auto-speed",
+        };
+        let bw_kbit = match self.speed.as_str() {
+            "10" => 10_000u32,
+            "100" => 100_000,
+            "1000" => 1_000_000,
+            "10000" => 10_000_000,
+            _ => 1_000_000, // default 1G for auto
+        };
+
+        let ip_line = if let Some((addr, mask)) = self.ip_address {
+            format!("  Internet address is {}/{}\n", addr, ipv4_mask_to_prefix_len(mask))
+        } else {
+            String::new()
+        };
+
+        format!(
+            "{name} is {status}, line protocol is {protocol}\n\
+  Hardware is Gigabit Ethernet, address is {mac} (bia {mac})\n\
+{ip_line}\
+  MTU {mtu} bytes, BW {bw} Kbit/sec, DLY 1000 usec,\n\
+     reliability 255/255, txload 1/255, rxload 1/255\n\
+  Encapsulation ARPA, loopback not set\n\
+  Keepalive set (10 sec)\n\
+  {duplex}, {speed}, media type is 10/100/1000BaseTX\n\
+  input flow-control is off, output flow-control is unsupported\n\
+  ARP type: ARPA, ARP Timeout 04:00:00\n\
+  Last input never, output never, output hang never\n\
+  Last clearing of \"show interface\" counters never\n\
+  Input queue: 0/75/0/0 (size/max/drops/flushes); Total output drops: 0\n\
+  5 minute input rate 0 bits/sec, 0 packets/sec\n\
+  5 minute output rate 0 bits/sec, 0 packets/sec\n\
+     {in_pkts} packets input, {in_bytes} bytes, 0 no buffer\n\
+     Received 0 broadcasts (0 IP multicasts)\n\
+     0 runts, 0 giants, 0 throttles\n\
+     {in_err} input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored\n\
+     0 watchdog, 0 multicast, 0 pause input\n\
+     {out_pkts} packets output, {out_bytes} bytes, 0 underruns\n\
+     {out_err} output errors, 0 collisions, 1 interface resets\n",
+            name = self.name,
+            status = status,
+            protocol = protocol,
+            mac = self.mac_address,
+            ip_line = ip_line,
+            mtu = self.mtu,
+            bw = bw_kbit,
+            duplex = duplex_str,
+            speed = speed_str,
+            in_pkts = self.input_packets,
+            in_bytes = self.input_bytes,
+            in_err = self.input_errors,
+            out_pkts = self.output_packets,
+            out_bytes = self.output_bytes,
+            out_err = self.output_errors,
+        )
+    }
+}
+
+/// Convert an IPv4 netmask to prefix length.
+fn ipv4_mask_to_prefix_len(mask: Ipv4Addr) -> u8 {
+    u32::from(mask).count_ones() as u8
 }
 
 impl DeviceState {
@@ -110,43 +238,66 @@ impl DeviceState {
                 "line vty 0 4".to_string(),
                 " transport input ssh".to_string(),
             ],
+            vlans: vec![VlanState {
+                id: 1,
+                name: "default".to_string(),
+                active: true,
+                ports: vec!["Gi0/0".to_string(), "Gi0/1".to_string()],
+            }],
         }
+    }
+
+    /// Generate the `show vlan brief` table output.
+    pub fn generate_show_vlan_brief(&self) -> String {
+        let header = "VLAN Name                             Status    Ports\n\
+---- -------------------------------- --------- -------------------------------";
+        let mut lines = vec![header.to_string()];
+        for vlan in &self.vlans {
+            let status = if vlan.active { "active" } else { "act/unsup" };
+            let ports_str = vlan.ports.join(", ");
+            lines.push(format!(
+                "{:<5}{:<33}{:<10}{}",
+                vlan.id, vlan.name, status, ports_str
+            ));
+        }
+        lines.join("\n")
     }
 
     /// Generate a running-config string from the structured state.
     pub fn generate_running_config(&self) -> String {
-        let mut lines: Vec<String> = Vec::new();
+        // Build config body first so we can compute its byte count for the header.
+        let mut body_lines: Vec<String> = Vec::new();
 
-        lines.push("!".to_string());
-        lines.push(format!("hostname {}", self.hostname));
-        lines.push("!".to_string());
+        body_lines.push("!".to_string());
+        body_lines.push(format!("hostname {}", self.hostname));
+        body_lines.push("!".to_string());
 
         // Interfaces
         for iface in &self.interfaces {
-            lines.push(format!("interface {}", iface.name));
+            body_lines.push(format!("interface {}", iface.name));
             if !iface.description.is_empty() {
-                lines.push(format!(" description {}", iface.description));
+                body_lines.push(format!(" description {}", iface.description));
             }
             if let Some((addr, mask)) = &iface.ip_address {
-                lines.push(format!(" ip address {} {}", addr, mask));
+                body_lines.push(format!(" ip address {} {}", addr, mask));
             }
             if !iface.admin_up {
-                lines.push(" shutdown".to_string());
+                body_lines.push(" shutdown".to_string());
             } else {
-                lines.push(" no shutdown".to_string());
+                body_lines.push(" no shutdown".to_string());
             }
-            lines.push("!".to_string());
+            body_lines.push("!".to_string());
         }
 
         // Static routes
         for route in &self.static_routes {
             if let Some(nh) = route.next_hop {
-                lines.push(format!(
+                body_lines.push(format!(
                     "ip route {} {} {}",
                     route.prefix, route.mask, nh
                 ));
             } else if let Some(iface) = &route.interface {
-                lines.push(format!(
+                body_lines.push(format!(
                     "ip route {} {} {}",
                     route.prefix, route.mask, iface
                 ));
@@ -154,21 +305,27 @@ impl DeviceState {
         }
 
         if !self.static_routes.is_empty() {
-            lines.push("!".to_string());
+            body_lines.push("!".to_string());
         }
 
         // Unmodeled config lines (VTY, etc.)
         for line in &self.unmodeled_config {
-            lines.push(line.clone());
+            body_lines.push(line.clone());
         }
 
         if !self.unmodeled_config.is_empty() {
-            lines.push("!".to_string());
+            body_lines.push("!".to_string());
         }
 
-        lines.push("end".to_string());
+        body_lines.push("end".to_string());
 
-        lines.join("\n")
+        let body = body_lines.join("\n");
+        let byte_count = body.len();
+
+        format!(
+            "Building configuration...\n\nCurrent configuration : {} bytes\n{}",
+            byte_count, body
+        )
     }
 
     /// Find an interface by name, returning a mutable reference.
@@ -230,6 +387,21 @@ mod tests {
         assert_eq!(route.prefix.to_string(), "0.0.0.0");
         assert_eq!(route.mask.to_string(), "0.0.0.0");
         assert_eq!(route.next_hop.unwrap().to_string(), "10.0.0.254");
+    }
+
+    #[test]
+    fn test_show_run_has_building_header() {
+        let state = DeviceState::new("R1");
+        let output = state.generate_running_config();
+        assert!(
+            output.contains("Building configuration"),
+            "show run should start with 'Building configuration...', got: {:?}",
+            &output[..output.len().min(200)]
+        );
+        assert!(
+            output.contains("Current configuration"),
+            "show run should show 'Current configuration : NNN bytes'"
+        );
     }
 
     #[test]

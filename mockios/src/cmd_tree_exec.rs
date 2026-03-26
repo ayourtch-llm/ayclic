@@ -47,10 +47,57 @@ pub fn handle_show_boot(d: &mut MockIosDevice, _input: &str) {
     d.handle_show_boot();
 }
 
-pub fn handle_show_interfaces(d: &mut MockIosDevice, _input: &str) {
-    // Stub: list interface names from running config
+pub fn handle_show_interfaces(d: &mut MockIosDevice, input: &str) {
+    // Extract optional interface name argument: "show interfaces [<name>]"
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    // tokens[0] = "show", tokens[1] = "interfaces", tokens[2..] = optional name
+    let iface_name: Option<String> = if tokens.len() > 2 {
+        // The rest of the line after "show interfaces " is the interface name.
+        // Handle abbreviated or full form — collect everything from index 2.
+        Some(tokens[2..].join(" "))
+    } else {
+        None
+    };
+
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+
+    match iface_name {
+        Some(name) => {
+            // Try exact match first, then prefix match for abbreviations
+            let output_text = if let Some(iface) = d.state.get_interface(&name) {
+                iface.generate_show_interface()
+            } else {
+                // Try prefix / case-insensitive match
+                let name_lower = name.to_lowercase();
+                let found = d.state.interfaces.iter().find(|i| {
+                    i.name.to_lowercase().starts_with(&name_lower)
+                });
+                if let Some(iface) = found {
+                    iface.generate_show_interface()
+                } else {
+                    format!(
+                        "% Invalid input detected at '^' marker.\n% No interface {} found\n",
+                        name
+                    )
+                }
+            };
+            d.queue_output(&format!("\n{}{}", output_text, p));
+        }
+        None => {
+            // Show all interfaces
+            let texts: Vec<String> = d.state.interfaces.iter()
+                .map(|i| i.generate_show_interface())
+                .collect();
+            let all = texts.join("\n");
+            d.queue_output(&format!("\n{}{}", all, p));
+        }
+    }
+}
+
+pub fn handle_show_vlan_brief(d: &mut MockIosDevice, _input: &str) {
+    let table = d.state.generate_show_vlan_brief();
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", table, p));
 }
 
 pub fn handle_show_flash(d: &mut MockIosDevice, _input: &str) {
@@ -275,8 +322,13 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("interfaces", "Interface status and configuration")
                     .handler(handle_show_interfaces)
                     .children(vec![
-                        param("<name>", ParamType::Word, "Interface name")
+                        param("<name>", ParamType::RestOfLine, "Interface name")
                             .handler(handle_show_interfaces),
+                    ]),
+                keyword("vlan", "VLAN information")
+                    .children(vec![
+                        keyword("brief", "VTP all VLAN status in brief")
+                            .handler(handle_show_vlan_brief),
                     ]),
                 keyword("install", "Install information")
                     .mode(priv_only())

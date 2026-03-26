@@ -93,6 +93,17 @@ pub enum CliMode {
     Reloading,
 }
 
+/// State machine for parsing ANSI escape sequences (arrow keys, etc.).
+#[derive(Debug, Clone, PartialEq)]
+enum EscState {
+    /// Normal input — no escape in progress.
+    Normal,
+    /// Received 0x1B (ESC), waiting for next byte.
+    GotEsc,
+    /// Received ESC `[`, waiting for final byte.
+    GotBracket,
+}
+
 /// A mock Cisco IOS device that implements `RawTransport`.
 ///
 /// Feed it commands via `send()`, read responses via `receive()`.
@@ -121,7 +132,15 @@ pub struct MockIosDevice {
     /// Pending interactive state.
     pending_interactive: Option<PendingInteractive>,
     /// Input buffer (accumulates send() data).
-    input_buffer: Vec<u8>,
+    pub input_buffer: Vec<u8>,
+    /// Cursor position within input_buffer.
+    pub cursor_pos: usize,
+    /// Command history (most recent at end).
+    command_history: Vec<String>,
+    /// Current position when recalling history (None = not recalling).
+    history_index: Option<usize>,
+    /// Escape sequence parser state.
+    esc_state: EscState,
     /// Whether the initial banner/prompt has been sent.
     pub initial_sent: bool,
     /// Queued reload transforms. Each reload pops the next one.
@@ -196,6 +215,10 @@ impl MockIosDevice {
             model: "C2951".to_string(),
             pending_interactive: None,
             input_buffer: Vec::new(),
+            cursor_pos: 0,
+            command_history: Vec::new(),
+            history_index: None,
+            esc_state: EscState::Normal,
             initial_sent: false,
             reload_transforms: Vec::new(),
             flash_total_size: 8_000_000_000,
@@ -378,6 +401,10 @@ impl MockIosDevice {
             model: self.model.clone(),
             pending_interactive: None,
             input_buffer: Vec::new(),
+            cursor_pos: 0,
+            command_history: Vec::new(),
+            history_index: None,
+            esc_state: EscState::Normal,
             initial_sent: false,
             reload_transforms: Vec::new(),
             flash_total_size: self.flash_total_size,
@@ -1322,6 +1349,36 @@ Configuration register is {}"#,
     pub fn drain_output(&mut self) -> String {
         String::from_utf8_lossy(&std::mem::take(&mut self.output_queue)).into_owned()
     }
+
+    /// Redraw the portion of the input line from cursor_pos to end.
+    /// Used after inserting, deleting, or replacing characters in the middle.
+    /// After calling this, the terminal cursor is back at cursor_pos.
+    fn redraw_from_cursor(&mut self) {
+        let tail = self.input_buffer[self.cursor_pos..].to_vec();
+        self.output_queue.extend_from_slice(&tail);
+        // Erase any leftover chars if the line got shorter
+        self.output_queue.extend_from_slice(b"\x1B[K");
+        // Move cursor back to cursor_pos
+        let move_back = tail.len();
+        for _ in 0..move_back {
+            self.output_queue.extend_from_slice(b"\x1B[D");
+        }
+    }
+
+    /// Redraw the entire input line (used for history recall).
+    /// Moves terminal cursor to start of input (using \r + prompt),
+    /// outputs the full buffer, erases any trailing old characters,
+    /// and sets cursor_pos to end of buffer.
+    fn redraw_line(&mut self) {
+        let prompt = self.prompt();
+        self.output_queue.push(b'\r');
+        self.output_queue.extend_from_slice(prompt.as_bytes());
+        let line = self.input_buffer.clone();
+        self.output_queue.extend_from_slice(&line);
+        // Erase anything remaining from a previous longer line
+        self.output_queue.extend_from_slice(b"\x1B[K");
+        self.cursor_pos = self.input_buffer.len();
+    }
 }
 
 #[async_trait]
@@ -1334,6 +1391,73 @@ impl RawTransport for MockIosDevice {
         // Always process character by character, echoing and handling `?` / backspace
         // immediately — this is how real Cisco IOS works.
         for &byte in data {
+            // --- Escape sequence state machine (top priority) ---
+            if self.esc_state == EscState::GotEsc {
+                if byte == b'[' {
+                    self.esc_state = EscState::GotBracket;
+                } else {
+                    self.esc_state = EscState::Normal;
+                    // ignore unknown escape sequence
+                }
+                continue;
+            }
+            if self.esc_state == EscState::GotBracket {
+                self.esc_state = EscState::Normal;
+                match byte {
+                    b'A' => {
+                        // Up arrow — history previous
+                        if self.command_history.is_empty() {
+                            continue;
+                        }
+                        let new_index = match self.history_index {
+                            None => self.command_history.len() - 1,
+                            Some(0) => 0, // already at oldest
+                            Some(i) => i - 1,
+                        };
+                        self.history_index = Some(new_index);
+                        let recalled = self.command_history[new_index].clone();
+                        self.input_buffer = recalled.into_bytes();
+                        self.redraw_line();
+                    }
+                    b'B' => {
+                        // Down arrow — history next
+                        match self.history_index {
+                            None => {} // not recalling
+                            Some(i) => {
+                                if i + 1 >= self.command_history.len() {
+                                    // Past end — clear
+                                    self.history_index = None;
+                                    self.input_buffer.clear();
+                                    self.redraw_line();
+                                } else {
+                                    let new_index = i + 1;
+                                    self.history_index = Some(new_index);
+                                    let recalled = self.command_history[new_index].clone();
+                                    self.input_buffer = recalled.into_bytes();
+                                    self.redraw_line();
+                                }
+                            }
+                        }
+                    }
+                    b'C' => {
+                        // Right arrow — move cursor right
+                        if self.cursor_pos < self.input_buffer.len() {
+                            self.cursor_pos += 1;
+                            self.output_queue.extend_from_slice(b"\x1B[C");
+                        }
+                    }
+                    b'D' => {
+                        // Left arrow — move cursor left
+                        if self.cursor_pos > 0 {
+                            self.cursor_pos -= 1;
+                            self.output_queue.extend_from_slice(b"\x1B[D");
+                        }
+                    }
+                    _ => {} // ignore unknown CSI sequences
+                }
+                continue;
+            }
+
             match byte {
                 b'\r' => {
                     // Carriage return — telnet sends \r\n or \r\0 for Enter.
@@ -1341,6 +1465,14 @@ impl RawTransport for MockIosDevice {
                     // silently consumed since the buffer will be empty.
                     let line_bytes = std::mem::take(&mut self.input_buffer);
                     let line = String::from_utf8_lossy(&line_bytes).to_string();
+                    // Save to history (non-empty, not duplicate of last)
+                    if !line.trim().is_empty() {
+                        if self.command_history.last().map(|s| s.as_str()) != Some(&line) {
+                            self.command_history.push(line.clone());
+                        }
+                    }
+                    self.cursor_pos = 0;
+                    self.history_index = None;
                     self.output_queue.extend_from_slice(b"\r\n");
                     self.handle_line(&line);
                 }
@@ -1353,11 +1485,23 @@ impl RawTransport for MockIosDevice {
                     }
                     let line_bytes = std::mem::take(&mut self.input_buffer);
                     let line = String::from_utf8_lossy(&line_bytes).to_string();
+                    // Save to history (non-empty, not duplicate of last)
+                    if !line.trim().is_empty() {
+                        if self.command_history.last().map(|s| s.as_str()) != Some(&line) {
+                            self.command_history.push(line.clone());
+                        }
+                    }
+                    self.cursor_pos = 0;
+                    self.history_index = None;
                     self.output_queue.extend_from_slice(b"\r\n");
                     self.handle_line(&line);
                 }
                 b'\0' => {
                     // NUL — telnet sends \r\0 for bare CR. Just ignore the NUL.
+                }
+                0x1B => {
+                    // ESC — start of escape sequence
+                    self.esc_state = EscState::GotEsc;
                 }
                 b'?' => {
                     // Echo the '?' like real IOS does
@@ -1402,19 +1546,24 @@ impl RawTransport for MockIosDevice {
                     self.output_queue.extend_from_slice(out.as_bytes());
                 }
                 b'\x7f' | b'\x08' => {
-                    // Backspace / DEL — remove last char from input buffer
-                    if self.input_buffer.pop().is_some() {
-                        self.output_queue.extend_from_slice(b"\x08 \x08");
+                    // Backspace / DEL — remove char before cursor
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                        self.input_buffer.remove(self.cursor_pos);
+                        // Send BS + redraw tail + erase + move back
+                        self.output_queue.extend_from_slice(b"\x08");
+                        self.redraw_from_cursor();
                     }
                 }
                 0x09 => {
-                    // Tab — attempt command completion
+                    // Tab — attempt command completion (appends at end)
                     let partial = String::from_utf8_lossy(&self.input_buffer).to_string();
                     let completion = self.try_tab_complete(&partial);
                     match completion {
                         Some(completed_suffix) => {
                             self.output_queue.extend_from_slice(completed_suffix.as_bytes());
                             self.input_buffer.extend_from_slice(completed_suffix.as_bytes());
+                            self.cursor_pos = self.input_buffer.len();
                         }
                         None => {
                             // No unique completion — beep
@@ -1422,11 +1571,109 @@ impl RawTransport for MockIosDevice {
                         }
                     }
                 }
+                0x01 => {
+                    // Ctrl+A — move cursor to beginning of line
+                    let steps = self.cursor_pos;
+                    for _ in 0..steps {
+                        self.output_queue.extend_from_slice(b"\x1B[D");
+                    }
+                    self.cursor_pos = 0;
+                }
+                0x02 => {
+                    // Ctrl+B — move cursor left (same as left arrow)
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                        self.output_queue.extend_from_slice(b"\x1B[D");
+                    }
+                }
+                0x04 => {
+                    // Ctrl+D — delete char under cursor, or disconnect if empty
+                    if self.input_buffer.is_empty() {
+                        // Empty line — treat as logout/disconnect
+                        self.mode = CliMode::Reloading;
+                    } else if self.cursor_pos < self.input_buffer.len() {
+                        // Delete char at cursor_pos (forward delete)
+                        self.input_buffer.remove(self.cursor_pos);
+                        self.redraw_from_cursor();
+                    }
+                }
+                0x05 => {
+                    // Ctrl+E — move cursor to end of line
+                    let steps = self.input_buffer.len() - self.cursor_pos;
+                    for _ in 0..steps {
+                        self.output_queue.extend_from_slice(b"\x1B[C");
+                    }
+                    self.cursor_pos = self.input_buffer.len();
+                }
+                0x06 => {
+                    // Ctrl+F — move cursor right (same as right arrow)
+                    if self.cursor_pos < self.input_buffer.len() {
+                        self.cursor_pos += 1;
+                        self.output_queue.extend_from_slice(b"\x1B[C");
+                    }
+                }
+                0x0B => {
+                    // Ctrl+K — erase from cursor to end of line
+                    self.input_buffer.truncate(self.cursor_pos);
+                    self.output_queue.extend_from_slice(b"\x1B[K");
+                }
                 0x03 => {
                     // Ctrl+C — cancel current input, show new prompt
                     self.input_buffer.clear();
+                    self.cursor_pos = 0;
+                    self.history_index = None;
                     let p = self.prompt();
                     self.queue_output(&format!("\n{}", p));
+                }
+                0x15 => {
+                    // Ctrl+U — erase from start to cursor
+                    if self.cursor_pos > 0 {
+                        // Count how many chars to erase
+                        let erase_count = self.cursor_pos;
+                        self.input_buffer.drain(0..self.cursor_pos);
+                        self.cursor_pos = 0;
+                        // Move terminal cursor back to start of input, then redraw
+                        // Send CR + prompt to reposition, then output remaining buffer + erase
+                        let prompt = self.prompt();
+                        self.output_queue.push(b'\r');
+                        self.output_queue.extend_from_slice(prompt.as_bytes());
+                        let remaining = self.input_buffer.clone();
+                        self.output_queue.extend_from_slice(&remaining);
+                        // Erase old trailing characters
+                        let old_len = remaining.len() + erase_count;
+                        let pad = old_len - remaining.len();
+                        for _ in 0..pad {
+                            self.output_queue.push(b' ');
+                        }
+                        // Move back to new cursor pos (end of remaining)
+                        let move_back = pad;
+                        for _ in 0..move_back {
+                            self.output_queue.extend_from_slice(b"\x1B[D");
+                        }
+                    }
+                }
+                0x17 => {
+                    // Ctrl+W — erase word before cursor
+                    // Skip spaces before cursor, then skip non-spaces (the word)
+                    let mut pos = self.cursor_pos;
+                    // Skip trailing spaces
+                    while pos > 0 && self.input_buffer[pos - 1] == b' ' {
+                        pos -= 1;
+                    }
+                    // Skip the word characters
+                    while pos > 0 && self.input_buffer[pos - 1] != b' ' {
+                        pos -= 1;
+                    }
+                    let erase_count = self.cursor_pos - pos;
+                    if erase_count > 0 {
+                        self.input_buffer.drain(pos..self.cursor_pos);
+                        self.cursor_pos = pos;
+                        // Redraw: move cursor back erase_count, redraw tail, erase end
+                        for _ in 0..erase_count {
+                            self.output_queue.extend_from_slice(b"\x1B[D");
+                        }
+                        self.redraw_from_cursor();
+                    }
                 }
                 0x1A => {
                     // Ctrl+Z — exit to privileged exec from any config mode
@@ -1434,6 +1681,8 @@ impl RawTransport for MockIosDevice {
                     match &self.mode {
                         CliMode::Config | CliMode::ConfigSub(_) => {
                             self.input_buffer.clear();
+                            self.cursor_pos = 0;
+                            self.history_index = None;
                             self.mode = CliMode::PrivilegedExec;
                             let p = self.prompt();
                             self.queue_output(&format!("^Z\n{}", p));
@@ -1441,17 +1690,33 @@ impl RawTransport for MockIosDevice {
                         _ => {
                             // In exec modes, treat as a no-op (or cancel input)
                             self.input_buffer.clear();
+                            self.cursor_pos = 0;
+                            self.history_index = None;
                             let p = self.prompt();
                             self.queue_output(&format!("\n{}", p));
                         }
                     }
                 }
                 _ => {
-                    // Regular printable character — echo unless in password mode
-                    if !self.is_password_mode() {
-                        self.output_queue.push(byte);
+                    // Regular printable character — echo unless in password mode,
+                    // insert at cursor_pos.
+                    if self.cursor_pos == self.input_buffer.len() {
+                        // Cursor at end — simple append
+                        if !self.is_password_mode() {
+                            self.output_queue.push(byte);
+                        }
+                        self.input_buffer.push(byte);
+                        self.cursor_pos += 1;
+                    } else {
+                        // Cursor in middle — insert and redraw tail
+                        self.input_buffer.insert(self.cursor_pos, byte);
+                        self.cursor_pos += 1;
+                        if !self.is_password_mode() {
+                            // Echo inserted char + redraw rest of line + move back
+                            self.output_queue.push(byte);
+                            self.redraw_from_cursor();
+                        }
                     }
-                    self.input_buffer.push(byte);
                 }
             }
         }
@@ -2852,7 +3117,9 @@ mod tests {
         // Backspace to erase 'x'
         device.send(b"\x7f").await.unwrap();
         let out = device.receive(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(out, b"\x08 \x08", "Backspace should send BS-space-BS");
+        // New behavior: BS + erase-to-end (cursor was at end so tail is empty)
+        assert!(out.starts_with(b"\x08"), "Backspace should start with BS");
+        assert!(out.contains(&0x1B), "Backspace should include erase sequence");
 
         // Now type 'w version\n' to complete "show version"
         device.send(b"w version\n").await.unwrap();
@@ -3009,5 +3276,224 @@ mod tests {
         assert!(output.contains("Incomplete command") || output.contains("Invalid input"),
             "Config 'in' should be incomplete or invalid, got: {:?}", output);
         assert_eq!(device.mode, CliMode::Config, "Should stay in config mode");
+    }
+
+    // =========================================================================
+    // CLI editing key tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_ctrl_a_moves_to_start() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"show").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Ctrl+A should move cursor to start
+        device.send(b"\x01").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Should contain left-arrow escape sequences
+        assert!(!data.is_empty(), "Ctrl+A should produce cursor movement");
+        assert_eq!(device.cursor_pos, 0);
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_e_moves_to_end() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"show").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"\x01").await.unwrap(); // go to start
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"\x05").await.unwrap(); // Ctrl+E to end
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 4); // "show" = 4 chars
+        // Ctrl+E when already at end produces no movement output
+        let _ = data;
+    }
+
+    #[tokio::test]
+    async fn test_arrow_keys_move_cursor() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"test").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 4);
+        // Left arrow = ESC [ D
+        device.send(b"\x1b[D").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 3);
+        // Right arrow = ESC [ C
+        device.send(b"\x1b[C").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 4);
+    }
+
+    #[tokio::test]
+    async fn test_command_history_up_down() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Execute two commands
+        device.send(b"show version\n").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"show clock\n").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Up arrow should recall "show clock"
+        device.send(b"\x1b[A").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("show clock"), "Up should recall last cmd, got: {:?}", output);
+        // Up again should recall "show version"
+        device.send(b"\x1b[A").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("show version"), "Up again should recall prev cmd, got: {:?}", output);
+        // Down should go back to "show clock"
+        device.send(b"\x1b[B").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("show clock"), "Down should go forward, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_d_delete_char() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"shox version").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Move left 9 times to position cursor on 'x' (at index 3)
+        for _ in 0..9 {
+            device.send(b"\x1b[D").await.unwrap();
+        }
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 3);
+        // Ctrl+D should delete 'x'
+        device.send(b"\x04").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let buf = String::from_utf8_lossy(&device.input_buffer);
+        assert_eq!(buf, "sho version");
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_d_empty_disconnects() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Ctrl+D on empty line should disconnect (sets mode to Reloading)
+        device.send(b"\x04").await.unwrap();
+        // receive() will return Err(NotConnected) since mode is Reloading and queue is empty
+        let _ = device.receive(Duration::from_secs(1)).await; // ignore error
+        assert!(device.is_reloading(), "Ctrl+D on empty should disconnect");
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_u_erase_to_start() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"show version").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Ctrl+U should erase entire line (cursor at end)
+        device.send(b"\x15").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(device.input_buffer.is_empty(), "Ctrl+U should clear buffer");
+        assert_eq!(device.cursor_pos, 0);
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_k_erase_to_end() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"show version").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Move to position 4 (after "show")
+        device.send(b"\x01").await.unwrap(); // Ctrl+A to start
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        for _ in 0..4 { device.send(b"\x06").await.unwrap(); } // Ctrl+F x4
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Ctrl+K should erase " version"
+        device.send(b"\x0b").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let buf = String::from_utf8_lossy(&device.input_buffer);
+        assert_eq!(buf, "show");
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_w_erase_word() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"show ip route").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Ctrl+W should erase "route"
+        device.send(b"\x17").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let buf = String::from_utf8_lossy(&device.input_buffer);
+        assert_eq!(buf, "show ip ");
+    }
+
+    #[tokio::test]
+    async fn test_insert_at_cursor() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"sho version").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Move left 8 to position after "sho" (cursor at 3)
+        for _ in 0..8 {
+            device.send(b"\x1b[D").await.unwrap();
+        }
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 3);
+        // Insert 'w' to make "show version"
+        device.send(b"w").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let buf = String::from_utf8_lossy(&device.input_buffer);
+        assert_eq!(buf, "show version");
+        assert_eq!(device.cursor_pos, 4);
+    }
+
+    #[tokio::test]
+    async fn test_backspace_at_cursor() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"showw version").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Move left 8 to position cursor after second 'w' (at index 5)
+        for _ in 0..8 {
+            device.send(b"\x1b[D").await.unwrap();
+        }
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 5);
+        // Backspace should remove 'w' at index 4
+        device.send(b"\x7f").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let buf = String::from_utf8_lossy(&device.input_buffer);
+        assert_eq!(buf, "show version");
+        assert_eq!(device.cursor_pos, 4);
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_b_ctrl_f_move_cursor() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"abc").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 3);
+        device.send(b"\x02").await.unwrap(); // Ctrl+B
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 2);
+        device.send(b"\x06").await.unwrap(); // Ctrl+F
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 3);
+    }
+
+    #[tokio::test]
+    async fn test_cursor_pos_reset_on_enter() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"show").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"\x01").await.unwrap(); // Ctrl+A — cursor to 0
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 0);
+        device.send(b"\n").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(device.cursor_pos, 0, "cursor_pos should reset to 0 after Enter");
     }
 }

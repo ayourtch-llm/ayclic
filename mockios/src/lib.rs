@@ -486,12 +486,11 @@ impl MockIosDevice {
                     spaces, p
                 ));
             }
-            ParseResult::Ambiguous { token, matches } => {
+            ParseResult::Ambiguous { token, .. } => {
                 let p = self.prompt();
                 self.queue_output(&format!(
-                    "\n% Ambiguous command: \"{}\"\n  Matches: {}\n{}",
+                    "\n% Ambiguous command:  \"{}\"\n{}",
                     token,
-                    matches.join(", "),
                     p
                 ));
             }
@@ -637,12 +636,11 @@ impl MockIosDevice {
                     spaces, p
                 ));
             }
-            ParseResult::Ambiguous { token, matches } => {
+            ParseResult::Ambiguous { token, .. } => {
                 let p = self.prompt();
                 self.queue_output(&format!(
-                    "\n% Ambiguous command: \"{}\"\n  Matches: {}\n{}",
+                    "\n% Ambiguous command:  \"{}\"\n{}",
                     token,
-                    matches.join(", "),
                     p
                 ));
             }
@@ -1255,6 +1253,24 @@ impl RawTransport for MockIosDevice {
                     self.input_buffer.clear();
                     let p = self.prompt();
                     self.queue_output(&format!("\n{}", p));
+                }
+                0x1A => {
+                    // Ctrl+Z — exit to privileged exec from any config mode
+                    // Real IOS echoes "^Z" then shows priv exec prompt
+                    match &self.mode {
+                        CliMode::Config | CliMode::ConfigSub(_) => {
+                            self.input_buffer.clear();
+                            self.mode = CliMode::PrivilegedExec;
+                            let p = self.prompt();
+                            self.queue_output(&format!("^Z\n{}", p));
+                        }
+                        _ => {
+                            // In exec modes, treat as a no-op (or cancel input)
+                            self.input_buffer.clear();
+                            let p = self.prompt();
+                            self.queue_output(&format!("\n{}", p));
+                        }
+                    }
                 }
                 _ => {
                     // Regular printable character — echo unless in password mode
@@ -2719,5 +2735,105 @@ mod tests {
         // Should beep (BEL = 0x07) or produce no completion
         assert!(data.contains(&0x07) || data.is_empty(),
             "Ambiguous tab should beep or be empty, got: {:?}", data);
+    }
+
+    // =========================================================================
+    // Tests based on real Cisco IOS device behavior — new batch
+    // =========================================================================
+
+    // --- Ctrl+Z exits config mode to priv exec ---
+
+    #[tokio::test]
+    async fn test_ctrl_z_exits_config_to_priv_exec() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        assert_eq!(device.mode, CliMode::Config);
+
+        // Send Ctrl+Z (0x1A)
+        device.send(b"\x1a").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert_eq!(device.mode, CliMode::PrivilegedExec);
+        assert!(output.contains("R1#"), "Should return to priv exec prompt, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_z_exits_config_if_to_priv_exec() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(_)));
+
+        // Ctrl+Z goes straight to priv exec (not config first)
+        device.send(b"\x1a").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert_eq!(device.mode, CliMode::PrivilegedExec,
+            "Ctrl+Z from config-if should go straight to priv exec, mode={:?}, output={:?}",
+            device.mode, output);
+    }
+
+    // --- Ambiguous command format matches real IOS ---
+
+    #[tokio::test]
+    async fn test_ambiguous_command_format() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "co").await;
+        assert!(output.contains("% Ambiguous command:  \"co\""),
+            "Ambiguous format should match real IOS (two spaces before quote), got: {:?}", output);
+        // Should NOT contain "Matches:" line
+        assert!(!output.contains("Matches:"), "Real IOS doesn't show Matches: line, got: {:?}", output);
+    }
+
+    // --- Hostname change updates prompt immediately ---
+
+    #[tokio::test]
+    async fn test_hostname_change_updates_prompt() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let output = send_cmd(&mut device, "hostname NewHost").await;
+        assert!(output.contains("NewHost(config)#"),
+            "Prompt should immediately reflect new hostname, got: {:?}", output);
+        // Change back
+        let _ = send_cmd(&mut device, "hostname R1").await;
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    // --- show flash: as alias for dir flash: ---
+
+    #[tokio::test]
+    async fn test_show_flash_alias() {
+        let mut device = MockIosDevice::new("R1")
+            .with_flash_file("test.bin", vec![0u8; 100]);
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = send_cmd(&mut device, "show flash:").await;
+        assert!(output.contains("Directory of flash:/") || output.contains("test.bin"),
+            "'show flash:' should work like 'dir flash:', got: {:?}", output);
+    }
+
+    // --- Ping output format ---
+
+    #[tokio::test]
+    async fn test_ping_output_format() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "ping 10.0.0.1").await;
+        assert!(output.contains("Type escape sequence") || output.contains("Sending"),
+            "Ping should show IOS-like output, got: {:?}", output);
+        assert!(output.contains("Success rate"),
+            "Ping should show success rate, got: {:?}", output);
+    }
+
+    // --- Config mode incomplete command ---
+
+    #[tokio::test]
+    async fn test_config_incomplete_command() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let output = send_cmd(&mut device, "in").await;
+        // "in" matches "interface" uniquely, but interface needs an argument
+        // Real IOS: "% Incomplete command."
+        assert!(output.contains("Incomplete command") || output.contains("Invalid input"),
+            "Config 'in' should be incomplete or invalid, got: {:?}", output);
+        assert_eq!(device.mode, CliMode::Config, "Should stay in config mode");
     }
 }

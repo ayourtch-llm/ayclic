@@ -4367,4 +4367,72 @@ mod tests {
         assert!(output.contains("Syslog logging"),
             "show logging should contain 'Syslog logging', got: {:?}", output);
     }
+
+    #[tokio::test]
+    async fn test_show_ip_ospf() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip ospf").await;
+        assert!(output.contains("No router process"),
+            "show ip ospf should say 'No router process', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_protocols() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip protocols").await;
+        assert!(output.contains("IP Routing"),
+            "show ip protocols should contain 'IP Routing', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_processes_cpu() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show processes cpu").await;
+        assert!(output.contains("CPU utilization"),
+            "show processes cpu should contain 'CPU utilization', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_arp() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show arp").await;
+        assert!(output.contains("Protocol"),
+            "show arp should contain 'Protocol', got: {:?}", output);
+        assert!(output.contains("Hardware Addr"),
+            "show arp should contain 'Hardware Addr', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_mac_address_table() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show mac address-table").await;
+        assert!(output.contains("Mac Address Table"),
+            "show mac address-table should contain 'Mac Address Table', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_spanning_tree() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show spanning-tree").await;
+        assert!(output.contains("Spanning tree enabled"),
+            "show spanning-tree should contain 'Spanning tree enabled', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_access_list_config_and_show() {
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "access-list 100 permit ip any any").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show access-lists").await;
+        assert!(
+            output.contains("Extended IP access list 100"),
+            "show access-lists should contain 'Extended IP access list 100', got: {:?}", output
+        );
+        assert!(
+            output.contains("permit ip any any"),
+            "show access-lists should contain 'permit ip any any', got: {:?}", output
+        );
+    }
 }

@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use std::sync::OnceLock;
 
 use crate::cmd_tree::{keyword, param, CliModeClass, CmdHandler, CommandNode, ModeFilter, ParamType};
-use crate::device_state::StaticRoute;
+use crate::device_state::{AccessList, AccessListEntry, StaticRoute};
 use crate::{CliMode, MockIosDevice};
 
 // ─── Mode helpers ─────────────────────────────────────────────────────────────
@@ -297,6 +297,46 @@ pub fn handle_config_end(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
+pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
+    // Parse: access-list <number> <permit|deny> <protocol> <source> <dest> [extra]
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.len() < 4 {
+        let p = d.prompt();
+        d.queue_output(&format!("\n% Incomplete command.\n{}", p));
+        return;
+    }
+    let list_num = parts[1];
+    let action = parts[2].to_string();
+    let protocol = parts.get(3).unwrap_or(&"ip").to_string();
+    let source = parts.get(4).map(|s| s.to_string()).unwrap_or_else(|| "any".to_string());
+    let destination = parts.get(5).map(|s| s.to_string()).unwrap_or_else(|| "any".to_string());
+    let extra = parts.get(6..).map(|s| s.join(" ")).unwrap_or_default();
+
+    let acl_type = if list_num.parse::<u32>().map(|n| n >= 100).unwrap_or(true) {
+        "Extended".to_string()
+    } else {
+        "Standard".to_string()
+    };
+
+    // Find or create the access list
+    let entry = AccessListEntry { action, protocol, source, destination, extra };
+    let list_num_owned = list_num.to_string();
+    let acl = d.state.access_lists.iter_mut().find(|a| a.name == list_num_owned);
+
+    if let Some(acl) = acl {
+        acl.entries.push(entry);
+    } else {
+        d.state.access_lists.push(AccessList {
+            name: list_num_owned,
+            acl_type,
+            entries: vec![entry],
+        });
+    }
+
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}", p));
+}
+
 /// Generic handler for config-router and config-line commands that stores
 /// the raw line as unmodeled config.
 pub fn handle_config_sub_rest(d: &mut MockIosDevice, input: &str) {
@@ -405,6 +445,14 @@ fn build_conf_tree() -> Vec<CommandNode> {
                         param("<as-number>", ParamType::Number, "AS number")
                             .handler(handle_router_eigrp),
                     ]),
+            ]),
+
+        // access-list <number|name> <permit|deny> ... [config only]
+        keyword("access-list", "Add an access list entry")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Access list parameters")
+                    .handler(handle_access_list),
             ]),
 
         // ip ...

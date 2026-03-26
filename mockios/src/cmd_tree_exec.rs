@@ -100,6 +100,30 @@ pub fn handle_show_interfaces(d: &mut MockIosDevice, input: &str) {
     }
 }
 
+pub fn handle_show_access_lists(d: &mut MockIosDevice, _input: &str) {
+    let mut output = String::from("\n");
+    for acl in &d.state.access_lists {
+        output.push_str(&format!("{} IP access list {}\n", acl.acl_type, acl.name));
+        for (i, entry) in acl.entries.iter().enumerate() {
+            let seq = (i + 1) * 10;
+            let mut line = format!("    {} {} {}", seq, entry.action, entry.protocol);
+            if !entry.source.is_empty() {
+                line.push_str(&format!(" {}", entry.source));
+            }
+            if !entry.destination.is_empty() {
+                line.push_str(&format!(" {}", entry.destination));
+            }
+            if !entry.extra.is_empty() {
+                line.push_str(&format!(" {}", entry.extra));
+            }
+            output.push_str(&format!("{}\n", line));
+        }
+    }
+    let p = d.prompt();
+    output.push_str(&p);
+    d.queue_output(&output);
+}
+
 pub fn handle_show_vlan_brief(d: &mut MockIosDevice, _input: &str) {
     let table = d.state.generate_show_vlan_brief();
     let p = d.prompt();
@@ -386,6 +410,37 @@ pub fn handle_show_users(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("\n{}{}", output, p));
 }
 
+pub fn handle_show_ip_ospf(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("\n%% OSPF: No router process is configured\n{}", p));
+}
+
+pub fn handle_show_ip_protocols(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+*** IP Routing is NSF aware ***
+
+Routing Protocol is \"application\"
+  Sending updates every 0 seconds
+  Invalid after 0 seconds, hold down 0, flushed after 0
+  Outgoing update filter list for all interfaces is not set
+  Incoming update filter list for all interfaces is not set
+  Maximum path: 32
+  Routing for Networks:
+  Routing Information Sources:
+    Gateway         Distance      Last Update
+  Distance: (default is 4)";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", output, p));
+}
+
+pub fn handle_show_processes_cpu(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+CPU utilization for five seconds: 5%/0%; one minute: 5%; five minutes: 5%
+ PID Runtime(ms)     Invoked      uSecs   5Sec   1Min   5Min TTY Process";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", output, p));
+}
+
 pub fn handle_show_logging(d: &mut MockIosDevice, _input: &str) {
     let output = "\
 Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,
@@ -404,6 +459,41 @@ Log Buffer (4096 bytes):
     d.queue_output(&format!("\n{}{}", output, p));
 }
 
+pub fn handle_show_arp(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!(
+        "\nProtocol  Address          Age (min)  Hardware Addr   Type   Interface\n{}",
+        p
+    ));
+}
+
+pub fn handle_show_mac_address_table(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+          Mac Address Table
+-------------------------------------------
+
+Vlan    Mac Address       Type        Ports
+----    -----------       --------    -----
+Total Mac Addresses for this criterion: 0
+";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}{}", output, p));
+}
+
+pub fn handle_show_spanning_tree(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+VLAN0001
+  Spanning tree enabled protocol rstp
+  Root ID    Priority    32769
+             Address     0000.0000.0000
+             This bridge is the root
+  Bridge ID  Priority    32769
+             Address     0000.0000.0000
+";
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}{}", output, p));
+}
+
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static EXEC_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -414,10 +504,6 @@ pub fn exec_tree() -> &'static Vec<CommandNode> {
 
 fn priv_only() -> ModeFilter {
     ModeFilter::Only(vec![CliModeClass::PrivExec])
-}
-
-fn user_only() -> ModeFilter {
-    ModeFilter::Only(vec![CliModeClass::UserExec])
 }
 
 fn build_exec_tree() -> Vec<CommandNode> {
@@ -447,6 +533,10 @@ fn build_exec_tree() -> Vec<CommandNode> {
                             ]),
                         keyword("route", "IP routing table")
                             .handler(handle_show_ip_route),
+                        keyword("ospf", "OSPF information")
+                            .handler(handle_show_ip_ospf),
+                        keyword("protocols", "IP routing protocol process parameters and statistics")
+                            .handler(handle_show_ip_protocols),
                     ]),
                 keyword("boot", "Boot and startup information")
                     .handler(handle_show_boot),
@@ -480,6 +570,22 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     .handler(handle_show_users),
                 keyword("logging", "Show the contents of logging buffers")
                     .handler(handle_show_logging),
+                keyword("arp", "ARP table")
+                    .handler(handle_show_arp),
+                keyword("mac", "MAC configuration")
+                    .children(vec![
+                        keyword("address-table", "MAC forwarding table")
+                            .handler(handle_show_mac_address_table),
+                    ]),
+                keyword("spanning-tree", "Spanning tree topology")
+                    .handler(handle_show_spanning_tree),
+                keyword("processes", "Active process statistics")
+                    .children(vec![
+                        keyword("cpu", "Show CPU use per process")
+                            .handler(handle_show_processes_cpu),
+                    ]),
+                keyword("access-lists", "List access lists")
+                    .handler(handle_show_access_lists),
             ]),
 
         // configure [priv only]

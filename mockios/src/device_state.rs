@@ -5,6 +5,20 @@ use std::net::Ipv4Addr;
 
 use crate::InstallState;
 
+pub struct AccessListEntry {
+    pub action: String,      // "permit" or "deny"
+    pub protocol: String,    // "ip", "tcp", "udp", "icmp"
+    pub source: String,      // "any", "host 10.0.0.1", "10.0.0.0 0.0.0.255"
+    pub destination: String, // same format as source
+    pub extra: String,       // "eq 80", "gt 1024", etc.
+}
+
+pub struct AccessList {
+    pub name: String,        // number or name like "100" or "BLOCK-MGMT"
+    pub acl_type: String,    // "Standard" or "Extended"
+    pub entries: Vec<AccessListEntry>,
+}
+
 /// Top-level device state model.
 pub struct DeviceState {
     pub hostname: String,
@@ -25,6 +39,7 @@ pub struct DeviceState {
     pub install_state: Option<InstallState>,
     pub unmodeled_config: Vec<String>, // catch-all for unknown config lines
     pub vlans: Vec<VlanState>,
+    pub access_lists: Vec<AccessList>,
 }
 
 pub struct InterfaceState {
@@ -244,6 +259,7 @@ impl DeviceState {
                 active: true,
                 ports: vec!["Gi0/0".to_string(), "Gi0/1".to_string()],
             }],
+            access_lists: Vec::new(),
         }
     }
 
@@ -318,6 +334,26 @@ impl DeviceState {
             body_lines.push("!".to_string());
         }
 
+        // Access lists
+        for acl in &self.access_lists {
+            for entry in &acl.entries {
+                let mut line = format!("access-list {} {} {}", acl.name, entry.action, entry.protocol);
+                if !entry.source.is_empty() {
+                    line.push_str(&format!(" {}", entry.source));
+                }
+                if !entry.destination.is_empty() {
+                    line.push_str(&format!(" {}", entry.destination));
+                }
+                if !entry.extra.is_empty() {
+                    line.push_str(&format!(" {}", entry.extra));
+                }
+                body_lines.push(line);
+            }
+        }
+        if !self.access_lists.is_empty() {
+            body_lines.push("!".to_string());
+        }
+
         // Unmodeled config lines (VTY, etc.)
         for line in &self.unmodeled_config {
             body_lines.push(line.clone());
@@ -387,6 +423,26 @@ impl DeviceState {
         }
 
         if !self.static_routes.is_empty() {
+            body_lines.push("!".to_string());
+        }
+
+        // Access lists
+        for acl in &self.access_lists {
+            for entry in &acl.entries {
+                let mut line = format!("access-list {} {} {}", acl.name, entry.action, entry.protocol);
+                if !entry.source.is_empty() {
+                    line.push_str(&format!(" {}", entry.source));
+                }
+                if !entry.destination.is_empty() {
+                    line.push_str(&format!(" {}", entry.destination));
+                }
+                if !entry.extra.is_empty() {
+                    line.push_str(&format!(" {}", entry.extra));
+                }
+                body_lines.push(line);
+            }
+        }
+        if !self.access_lists.is_empty() {
             body_lines.push("!".to_string());
         }
 

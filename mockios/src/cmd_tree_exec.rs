@@ -454,6 +454,7 @@ fn build_exec_tree() -> Vec<CommandNode> {
         // write [priv only]
         keyword("write", "Write running configuration to memory or network")
             .mode(priv_only())
+            .handler(handle_write_memory as CmdHandler)
             .children(vec![
                 keyword("memory", "Write to NV memory")
                     .handler(handle_write_memory),

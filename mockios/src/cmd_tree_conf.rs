@@ -3,7 +3,7 @@
 use std::net::Ipv4Addr;
 use std::sync::OnceLock;
 
-use crate::cmd_tree::{keyword, param, CliModeClass, CommandNode, ModeFilter, ParamType};
+use crate::cmd_tree::{keyword, param, CliModeClass, CmdHandler, CommandNode, ModeFilter, ParamType};
 use crate::device_state::StaticRoute;
 use crate::{CliMode, MockIosDevice};
 
@@ -15,6 +15,17 @@ fn config_only() -> ModeFilter {
 
 fn config_if_only() -> ModeFilter {
     ModeFilter::Only(vec![CliModeClass::ConfigSub])
+}
+
+/// Select the appropriate tree for a ConfigSub mode.
+/// Returns a reference to the sub-mode-specific tree.
+pub fn config_sub_tree(sub_mode: &str) -> &'static Vec<CommandNode> {
+    match sub_mode {
+        "config-if" => config_if_tree(),
+        "config-router" => config_router_tree(),
+        "config-line" => config_line_tree(),
+        _ => conf_tree(), // unknown sub-modes fall back to full conf tree
+    }
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -286,6 +297,14 @@ pub fn handle_config_end(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
+/// Generic handler for config-router and config-line commands that stores
+/// the raw line as unmodeled config.
+pub fn handle_config_sub_rest(d: &mut MockIosDevice, input: &str) {
+    d.state.unmodeled_config.push(format!(" {}", input.trim()));
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}", p));
+}
+
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static CONF_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -475,6 +494,233 @@ fn build_conf_tree() -> Vec<CommandNode> {
             .children(vec![
                 param("<rest>", ParamType::RestOfLine, "VLAN parameters")
                     .handler(handle_vlan),
+            ]),
+
+        // exit
+        keyword("exit", "Exit from current mode")
+            .handler(handle_config_exit),
+
+        // end
+        keyword("end", "Exit to privileged EXEC mode")
+            .handler(handle_config_end),
+    ]
+}
+
+// ─── Sub-mode trees ───────────────────────────────────────────────────────────
+
+static CONFIG_IF_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
+
+/// Command tree for config-if sub-mode (interface configuration).
+pub fn config_if_tree() -> &'static Vec<CommandNode> {
+    CONFIG_IF_TREE.get_or_init(build_config_if_tree)
+}
+
+fn build_config_if_tree() -> Vec<CommandNode> {
+    vec![
+        // ip address <ip> <mask>
+        keyword("ip", "IP configuration subcommands")
+            .children(vec![
+                keyword("address", "Set the IP address of an interface")
+                    .children(vec![
+                        param("<ip>", ParamType::Word, "IP address")
+                            .children(vec![
+                                param("<mask>", ParamType::Word, "Subnet mask")
+                                    .handler(handle_ip_address),
+                            ]),
+                    ]),
+            ]),
+
+        // shutdown
+        keyword("shutdown", "Shutdown the selected interface")
+            .handler(handle_shutdown),
+
+        // no <rest>
+        keyword("no", "Negate a command or set its defaults")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Command to negate")
+                    .handler(handle_no),
+            ]),
+
+        // description <rest>
+        keyword("description", "Interface specific description")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Description text")
+                    .handler(handle_description),
+            ]),
+
+        // switchport <rest>
+        keyword("switchport", "Set switching mode characteristics")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Switchport parameters")
+                    .handler(handle_switchport),
+            ]),
+
+        // spanning-tree <rest>
+        keyword("spanning-tree", "Spanning Tree Subsystem")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Spanning tree parameters")
+                    .handler(handle_spanning_tree),
+            ]),
+
+        // speed <rest>
+        keyword("speed", "Configure speed operation of the interface")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Speed value")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // duplex <rest>
+        keyword("duplex", "Configure duplex operation")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Duplex mode")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // exit
+        keyword("exit", "Exit from current mode")
+            .handler(handle_config_exit),
+
+        // end
+        keyword("end", "Exit to privileged EXEC mode")
+            .handler(handle_config_end),
+    ]
+}
+
+static CONFIG_ROUTER_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
+
+/// Command tree for config-router sub-mode (routing protocol configuration).
+pub fn config_router_tree() -> &'static Vec<CommandNode> {
+    CONFIG_ROUTER_TREE.get_or_init(build_config_router_tree)
+}
+
+fn build_config_router_tree() -> Vec<CommandNode> {
+    vec![
+        // network <rest>
+        keyword("network", "Enable routing on an IP network")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Network address and wildcard")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // router-id <ip>
+        keyword("router-id", "Router ID for this routing process")
+            .children(vec![
+                param("<ip>", ParamType::Word, "Router ID (IP address)")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // area <rest>
+        keyword("area", "OSPF area parameters")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Area parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // redistribute <rest>
+        keyword("redistribute", "Redistribute information from another routing protocol")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Redistribution parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // passive-interface <rest>
+        keyword("passive-interface", "Suppress routing updates on an interface")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Interface name")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // log-adjacency-changes
+        keyword("log-adjacency-changes", "Log changes in adjacency state")
+            .handler(handle_config_sub_rest as CmdHandler),
+
+        // neighbor <rest>
+        keyword("neighbor", "Specify a neighbor router")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Neighbor parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // no <rest>
+        keyword("no", "Negate a command or set its defaults")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Command to negate")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // exit
+        keyword("exit", "Exit from current mode")
+            .handler(handle_config_exit),
+
+        // end
+        keyword("end", "Exit to privileged EXEC mode")
+            .handler(handle_config_end),
+    ]
+}
+
+static CONFIG_LINE_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
+
+/// Command tree for config-line sub-mode (line configuration).
+pub fn config_line_tree() -> &'static Vec<CommandNode> {
+    CONFIG_LINE_TREE.get_or_init(build_config_line_tree)
+}
+
+fn build_config_line_tree() -> Vec<CommandNode> {
+    vec![
+        // transport <rest>
+        keyword("transport", "Define transport protocols for line")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Transport parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // exec-timeout <rest>
+        keyword("exec-timeout", "Set the EXEC timeout")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Timeout parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // login <rest>
+        keyword("login", "Enable password checking at login")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Login parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // privilege <rest>
+        keyword("privilege", "Change privilege level for line")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Privilege parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // logging <rest>
+        keyword("logging", "Modify message logging facilities")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Logging parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // length <rest>
+        keyword("length", "Set number of lines on a screen")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Number of lines")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // password <rest>
+        keyword("password", "Set a password")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Password")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // no <rest>
+        keyword("no", "Negate a command or set its defaults")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Command to negate")
+                    .handler(handle_config_sub_rest),
             ]),
 
         // exit

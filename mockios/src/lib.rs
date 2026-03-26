@@ -711,12 +711,20 @@ Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n\
         self.dispatch_config(line);
     }
 
+    /// Pick the right command tree for the current config/config-sub mode.
+    fn config_tree_for_mode(&self) -> &'static [crate::cmd_tree::CommandNode] {
+        use crate::cmd_tree_conf::{conf_tree, config_sub_tree};
+        match &self.mode {
+            CliMode::ConfigSub(sub) => config_sub_tree(sub),
+            _ => conf_tree(),
+        }
+    }
+
     /// Dispatch a config/config-sub command using the command tree.
     fn dispatch_config(&mut self, line: &str) {
         use crate::cmd_tree::parse;
         use crate::cmd_tree::ParseResult;
         use crate::cmd_tree_exec::exec_tree;
-        use crate::cmd_tree_conf::conf_tree;
 
         // "do <cmd>" — special case before tree parsing
         let cmd_lower = line.to_lowercase();
@@ -750,7 +758,8 @@ Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n\
         }
 
         let mode = self.mode.clone();
-        let result = parse(line, conf_tree(), &mode);
+        let tree = self.config_tree_for_mode();
+        let result = parse(line, tree, &mode);
         match result {
             ParseResult::Execute { handler, .. } => {
                 handler(self, line);
@@ -1333,7 +1342,8 @@ Configuration register is {}"#,
         use crate::cmd_tree::{tokenize_with_offsets, find_matches};
 
         let tree: &[crate::cmd_tree::CommandNode] = match &self.mode {
-            CliMode::Config | CliMode::ConfigSub(_) => crate::cmd_tree_conf::conf_tree(),
+            CliMode::Config => crate::cmd_tree_conf::conf_tree(),
+            CliMode::ConfigSub(sub) => crate::cmd_tree_conf::config_sub_tree(sub),
             _ => crate::cmd_tree_exec::exec_tree(),
         };
 
@@ -1561,7 +1571,10 @@ impl RawTransport for MockIosDevice {
                     let mode = self.mode.clone();
 
                     let tree: &[crate::cmd_tree::CommandNode] = match &mode {
-                        CliMode::Config | CliMode::ConfigSub(_) => conf_tree(),
+                        CliMode::Config => conf_tree(),
+                        CliMode::ConfigSub(sub) => {
+                            crate::cmd_tree_conf::config_sub_tree(sub)
+                        }
                         _ => exec_tree(),
                     };
 
@@ -3745,5 +3758,102 @@ mod tests {
 
         let output = send_cmd(&mut device, "show ip route").await;
         assert!(output.contains("192.168.1.0"), "Should show new static route");
+    }
+
+    // ─── Bug fixes ─────────────────────────────────────────────────────────────
+
+    // Bug 1: "wr" alone should work like "write memory"
+    #[tokio::test]
+    async fn test_wr_alone_works() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "wr").await;
+        assert!(output.contains("OK") || output.contains("Building"),
+            "'wr' alone should work like 'write memory', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_write_alone_works() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "write").await;
+        assert!(output.contains("OK") || output.contains("Building"),
+            "'write' alone should work like 'write memory', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_write_memory_still_works() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "write memory").await;
+        assert!(output.contains("OK") || output.contains("Building"),
+            "'write memory' should still work, got: {:?}", output);
+    }
+
+    // Bug 2: config-router ? should show router-specific commands, not interface commands
+    #[tokio::test]
+    async fn test_config_router_help_shows_router_commands() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "router ospf 1").await;
+        assert!(matches!(device.mode, CliMode::ConfigSub(ref s) if s == "config-router"),
+            "Should be in config-router mode, got: {:?}", device.mode);
+
+        // Send ? to check available commands
+        device.send(b"?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        // Should show router-specific commands
+        assert!(output.contains("network"), "config-router ? should show 'network', got: {:?}", output);
+        // Should NOT show interface-specific commands
+        assert!(!output.contains("switchport"), "config-router ? should NOT show 'switchport', got: {:?}", output);
+        assert!(!output.contains("shutdown"), "config-router ? should NOT show 'shutdown', got: {:?}", output);
+
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    #[tokio::test]
+    async fn test_config_if_help_shows_if_commands() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet0/0").await;
+
+        device.send(b"?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        // Should show interface-specific commands
+        assert!(output.contains("shutdown"), "config-if ? should show 'shutdown', got: {:?}", output);
+        assert!(output.contains("ip"), "config-if ? should show 'ip', got: {:?}", output);
+        // Should NOT show router-specific commands
+        assert!(!output.contains("network"), "config-if ? should NOT show 'network', got: {:?}", output);
+
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    #[tokio::test]
+    async fn test_config_router_network_command() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "router ospf 1").await;
+        let output = send_cmd(&mut device, "network 10.0.0.0 0.0.0.255 area 0").await;
+        // Should be accepted (not an error)
+        assert!(!output.contains("Invalid"), "network command should be accepted in config-router, got: {:?}", output);
+        assert!(output.contains("(config-router)#"), "Should stay in config-router mode, got: {:?}", output);
+        let _ = send_cmd(&mut device, "end").await;
+    }
+
+    // Bug 3: Tab completion with trailing space should beep when multiple matches exist
+    #[tokio::test]
+    async fn test_tab_after_space_multiple_matches_beeps() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Type "show " then Tab — multiple children, should beep
+        device.send(b"show ").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device.send(b"\t").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Should beep
+        assert!(data.contains(&0x07) || data.is_empty(),
+            "Tab with multiple options should beep, got: {:?}", data);
     }
 }

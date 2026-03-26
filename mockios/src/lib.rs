@@ -34,6 +34,40 @@ use tracing::debug;
 use ayclic::error::CiscoIosError;
 use ayclic::raw_transport::RawTransport;
 
+/// IOS-XE install mode vs bundle mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallMode {
+    /// Traditional bundle mode — single .bin image.
+    Bundle,
+    /// Install mode — packages.conf + individual .pkg files.
+    Install,
+}
+
+/// State of a package in the install system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageState {
+    /// Package added but not activated.
+    Inactive,
+    /// Package activated (in use) but not committed.
+    Activated,
+    /// Package committed (persists across reload).
+    Committed,
+}
+
+/// Info about an installed package.
+#[derive(Debug, Clone)]
+pub struct PackageInfo {
+    pub name: String,
+    pub state: PackageState,
+}
+
+/// Install system state for IOS-XE devices.
+#[derive(Debug, Clone)]
+pub struct InstallState {
+    pub mode: InstallMode,
+    pub packages: Vec<PackageInfo>,
+}
+
 /// The CLI mode the mock device is currently in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliMode {
@@ -92,6 +126,8 @@ pub struct MockIosDevice {
     boot_variable: String,
     /// Reload delay for server mode simulation.
     reload_delay: Duration,
+    /// IOS-XE install mode state (None = not IOS-XE / bundle mode only).
+    install_state: Option<InstallState>,
 }
 
 /// Pending interactive prompt state.
@@ -116,6 +152,8 @@ enum PendingInteractive {
     ReloadSave,
     /// Enable password prompt.
     EnablePassword,
+    /// Install activate confirmation.
+    InstallActivateConfirm,
 }
 
 impl std::fmt::Debug for MockIosDevice {
@@ -151,6 +189,7 @@ impl MockIosDevice {
             flash_total_size: 8_000_000_000,
             boot_variable: String::new(),
             reload_delay: Duration::from_secs(0),
+            install_state: None,
         };
         device.register_default_commands();
         device
@@ -229,6 +268,22 @@ impl MockIosDevice {
         self
     }
 
+    /// Set the IOS-XE install state.
+    ///
+    /// When set, `show install summary`, `show version`, and `show boot`
+    /// automatically reflect the install mode state.
+    pub fn with_install_state(mut self, state: InstallState) -> Self {
+        // Auto-set boot variable based on mode
+        if self.boot_variable.is_empty() {
+            self.boot_variable = match state.mode {
+                InstallMode::Install => "flash:packages.conf".to_string(),
+                InstallMode::Bundle => String::new(), // will use default
+            };
+        }
+        self.install_state = Some(state);
+        self
+    }
+
     /// Set the simulated reload delay (for server mode).
     pub fn with_reload_delay(mut self, delay: Duration) -> Self {
         self.reload_delay = delay;
@@ -263,6 +318,7 @@ impl MockIosDevice {
             flash_total_size: self.flash_total_size,
             boot_variable: self.boot_variable.clone(),
             reload_delay: self.reload_delay,
+            install_state: self.install_state.clone(),
         }
     }
 
@@ -424,8 +480,18 @@ impl MockIosDevice {
             self.handle_verify_md5(line);
         } else if cmd.starts_with("reload") {
             self.handle_reload_command(line);
+        } else if cmd.starts_with("show install summary") || cmd.starts_with("show install sum") {
+            self.handle_show_install_summary();
         } else if cmd.starts_with("show boot") || cmd == "show boot" {
             self.handle_show_boot();
+        } else if cmd.starts_with("install add ") {
+            self.handle_install_add(line);
+        } else if cmd.starts_with("install activate") {
+            self.handle_install_activate();
+        } else if cmd.starts_with("install commit") {
+            self.handle_install_commit();
+        } else if cmd.starts_with("install remove inactive") {
+            self.handle_install_remove_inactive();
         } else if cmd.starts_with("dir ") || cmd == "dir" {
             self.handle_dir_command(line);
         } else {
@@ -639,6 +705,147 @@ impl MockIosDevice {
         self.queue_output(&output);
     }
 
+    fn handle_show_install_summary(&mut self) {
+        match &self.install_state {
+            Some(state) => {
+                let mode_str = match state.mode {
+                    InstallMode::Install => "INSTALL",
+                    InstallMode::Bundle => "BUNDLE",
+                };
+                let mut output = format!(
+                    "\n[ {} ] Installed Package(s) Information:\n",
+                    mode_str
+                );
+                if state.packages.is_empty() {
+                    output.push_str("No packages installed.\n");
+                } else {
+                    for pkg in &state.packages {
+                        let state_flag = match pkg.state {
+                            PackageState::Committed => "C ",
+                            PackageState::Activated => "U ",
+                            PackageState::Inactive => "I ",
+                        };
+                        output.push_str(&format!(
+                            "  {} flash:{}\n",
+                            state_flag, pkg.name
+                        ));
+                    }
+                }
+                output.push_str(&self.prompt());
+                self.queue_output(&output);
+            }
+            None => {
+                self.queue_output(&format!(
+                    "\n% Install mode is not supported on this platform\n{}",
+                    self.prompt()
+                ));
+            }
+        }
+    }
+
+    fn handle_install_add(&mut self, line: &str) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // install add file flash:<image>.bin
+        let image_name = parts.iter()
+            .find(|p| p.starts_with("flash:"))
+            .map(|p| p.trim_start_matches("flash:"))
+            .unwrap_or("unknown.bin");
+
+        // Generate package names from the image name
+        let base = image_name
+            .trim_end_matches(".bin")
+            .trim_end_matches(".SPA");
+        // Use the image base name to derive package names
+        // e.g., cat9k_iosxe.17.09.04a → 17.09.04a
+        let parts: Vec<&str> = base.rsplit('.').take(3).collect();
+        let ver_suffix: String = parts.iter().rev().cloned().collect::<Vec<&str>>().join(".");
+
+        let pkg_names = vec![
+            format!("cat9k-rpbase.{}", ver_suffix),
+            format!("cat9k-rpboot.{}", ver_suffix),
+            format!("cat9k-sipspa.{}", ver_suffix),
+            format!("cat9k-sipbase.{}", ver_suffix),
+            format!("cat9k-webui.{}", ver_suffix),
+        ];
+
+        let output = format!(
+            r#"
+install_add: START
+install_add: Adding PACKAGE
+--- Starting initial file syncing ---
+[1]: Copying flash:{image} from switch 1 to switch 1
+[1]: Finished copying to switch 1
+--- Starting Add ---
+[1]: Adding file flash:{image} on switch 1
+[1]: Finished adding on switch 1
+install_add: SUCCESS
+{prompt}"#,
+            image = image_name,
+            prompt = self.prompt(),
+        );
+        self.queue_output(&output);
+
+        // Add packages as Inactive
+        if let Some(ref mut state) = self.install_state {
+            for name in pkg_names {
+                state.packages.push(PackageInfo {
+                    name,
+                    state: PackageState::Inactive,
+                });
+            }
+        }
+    }
+
+    fn handle_install_activate(&mut self) {
+        if self.install_state.is_none() {
+            self.queue_output(&format!(
+                "\n% Install mode is not supported\n{}",
+                self.prompt()
+            ));
+            return;
+        }
+        self.pending_interactive = Some(PendingInteractive::InstallActivateConfirm);
+        self.queue_output(
+            "\nThis operation may require a reload of the system.\nDo you want to proceed? [y/n]"
+        );
+    }
+
+    fn handle_install_commit(&mut self) {
+        if let Some(ref mut state) = self.install_state {
+            let had_activated = state.packages.iter().any(|p| p.state == PackageState::Activated);
+            for pkg in &mut state.packages {
+                if pkg.state == PackageState::Activated {
+                    pkg.state = PackageState::Committed;
+                }
+            }
+            if had_activated {
+                self.queue_output(&format!(
+                    "\ninstall_commit: START\ninstall_commit: SUCCESS\n{}",
+                    self.prompt()
+                ));
+            } else {
+                self.queue_output(&format!(
+                    "\nNo activate operation pending commit\n{}",
+                    self.prompt()
+                ));
+            }
+        } else {
+            self.queue_output(&format!("\n{}", self.prompt()));
+        }
+    }
+
+    fn handle_install_remove_inactive(&mut self) {
+        if let Some(ref mut state) = self.install_state {
+            state.packages.retain(|p| p.state != PackageState::Inactive);
+            self.queue_output(&format!(
+                "\ninstall_remove: START\ninstall_remove: SUCCESS\n{}",
+                self.prompt()
+            ));
+        } else {
+            self.queue_output(&format!("\n{}", self.prompt()));
+        }
+    }
+
     fn handle_interactive_response(&mut self, line: &str, pending: PendingInteractive) {
         match pending {
             PendingInteractive::CopyConfirm { source: _, dest: _ } => {
@@ -700,6 +907,25 @@ impl MockIosDevice {
                 }
                 self.queue_output(&format!("\n% Access denied\n{}", self.prompt()));
             }
+            PendingInteractive::InstallActivateConfirm => {
+                if line == "y" || line == "Y" || line == "yes" {
+                    // Activate packages
+                    if let Some(ref mut state) = self.install_state {
+                        for pkg in &mut state.packages {
+                            if pkg.state == PackageState::Inactive {
+                                pkg.state = PackageState::Activated;
+                            }
+                        }
+                    }
+                    self.queue_output("\ninstall_activate: Activating PACKAGE\ninstall_activate: SUCCESS\n\nSystem is reloading...\n");
+                    self.mode = CliMode::Reloading;
+                } else {
+                    self.queue_output(&format!(
+                        "\nInstall activate aborted\n{}",
+                        self.prompt()
+                    ));
+                }
+            }
             PendingInteractive::ReloadConfirm { .. } => {
                 // Enter reloading state — subsequent send/receive will error
                 self.queue_output("\n\nSystem is reloading...\n");
@@ -715,6 +941,16 @@ impl MockIosDevice {
     }
 
     fn generate_show_version(&self) -> String {
+        let system_image = match &self.install_state {
+            Some(InstallState { mode: InstallMode::Install, .. }) => {
+                "flash:packages.conf".to_string()
+            }
+            _ => {
+                format!("flash:c{}-universalk9-mz.SPA.{}.bin",
+                    self.model.to_lowercase(), self.version)
+            }
+        };
+
         format!(
             r#"Cisco IOS Software, {} Software ({}), Version {}, RELEASE SOFTWARE (fc1)
 Technical Support: http://www.cisco.com/techsupport
@@ -724,7 +960,7 @@ ROM: System Bootstrap, Version 15.0(1r)M16
 
 {} uptime is 42 days, 3 hours, 17 minutes
 System returned to ROM by reload
-System image file is "flash:c2951-universalk9-mz.SPA.{}.bin"
+System image file is "{}"
 
 Cisco {} ({}) processor with 524288K/262144K bytes of memory.
 Processor board ID FCZ123456789
@@ -734,7 +970,7 @@ Configuration register is 0x2102"#,
             self.model,
             self.version,
             self.hostname,
-            self.version,
+            system_image,
             self.model,
             self.model,
         )
@@ -1289,6 +1525,210 @@ mod tests {
         let output = String::from_utf8_lossy(&data);
         eprintln!("STEP 6 show version (first 100): {:?}", &output[..output.len().min(100)]);
         assert!(output.contains("Cisco IOS"), "show version should contain Cisco IOS");
+    }
+
+    // === Install mode tests ===
+
+    #[tokio::test]
+    async fn test_install_state_show_install_summary() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_install_state(InstallState {
+                mode: InstallMode::Install,
+                packages: vec![
+                    PackageInfo {
+                        name: "cat9k-rpbase.17.09.04a.SPA.pkg".to_string(),
+                        state: PackageState::Committed,
+                    },
+                    PackageInfo {
+                        name: "cat9k-rpboot.17.09.04a.SPA.pkg".to_string(),
+                        state: PackageState::Committed,
+                    },
+                    PackageInfo {
+                        name: "cat9k-sipspa.17.09.04a.SPA.pkg".to_string(),
+                        state: PackageState::Inactive,
+                    },
+                ],
+            });
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"show install summary\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        assert!(output.contains("cat9k-rpbase"), "Should list rpbase package");
+        assert!(output.contains("cat9k-rpboot"), "Should list rpboot package");
+        assert!(output.contains("Committed") || output.contains("C "), "Should show Committed state");
+        assert!(output.contains("Inactive") || output.contains("I "), "Should show Inactive state");
+    }
+
+    #[tokio::test]
+    async fn test_install_mode_show_version_has_packages_conf() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_install_state(InstallState {
+                mode: InstallMode::Install,
+                packages: vec![],
+            });
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"show version\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        assert!(
+            output.contains("packages.conf"),
+            "Install mode show version should reference packages.conf, got:\n{}",
+            &output[..output.len().min(300)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bundle_mode_show_version_has_bin() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_install_state(InstallState {
+                mode: InstallMode::Bundle,
+                packages: vec![],
+            });
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"show version\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        assert!(
+            output.contains(".bin"),
+            "Bundle mode show version should reference .bin image"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_mode_show_boot_has_packages_conf() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_install_state(InstallState {
+                mode: InstallMode::Install,
+                packages: vec![],
+            });
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"show boot\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        assert!(output.contains("packages.conf"));
+    }
+
+    #[tokio::test]
+    async fn test_install_add_command() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_install_state(InstallState {
+                mode: InstallMode::Install,
+                packages: vec![],
+            })
+            .with_flash_file("cat9k_iosxe.17.09.04a.SPA.bin", b"image data".to_vec());
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"install add file flash:cat9k_iosxe.17.09.04a.SPA.bin\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        assert!(output.contains("install_add") || output.contains("SUCCESS") || output.contains("Adding"),
+            "install add should show progress, got: {}", output);
+
+        // Packages should now be Inactive
+        if let Some(ref state) = device.install_state {
+            assert!(!state.packages.is_empty(), "Should have added packages");
+            assert!(state.packages.iter().any(|p| p.state == PackageState::Inactive),
+                "New packages should be Inactive");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_activate_prompts_and_reloads() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_install_state(InstallState {
+                mode: InstallMode::Install,
+                packages: vec![
+                    PackageInfo {
+                        name: "cat9k-rpbase.17.09.04a.SPA.pkg".to_string(),
+                        state: PackageState::Inactive,
+                    },
+                ],
+            });
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"install activate\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        assert!(output.contains("[y/n]") || output.contains("Proceed"),
+            "install activate should prompt, got: {}", output);
+
+        // Confirm
+        device.send(b"y\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        // Should trigger reload
+        assert!(device.is_reloading() || output.contains("reloading"),
+            "install activate should trigger reload");
+    }
+
+    #[tokio::test]
+    async fn test_install_commit() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_install_state(InstallState {
+                mode: InstallMode::Install,
+                packages: vec![
+                    PackageInfo {
+                        name: "cat9k-rpbase.17.09.04a.SPA.pkg".to_string(),
+                        state: PackageState::Activated,
+                    },
+                ],
+            });
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"install commit\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+
+        assert!(output.contains("SUCCESS") || output.contains("commit") || output.contains("#"),
+            "install commit should succeed, got: {}", output);
+
+        // Packages should now be Committed
+        if let Some(ref state) = device.install_state {
+            assert!(state.packages.iter().all(|p| p.state == PackageState::Committed),
+                "All packages should be Committed after commit");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_remove_inactive() {
+        let mut device = MockIosDevice::new("Switch1")
+            .with_install_state(InstallState {
+                mode: InstallMode::Install,
+                packages: vec![
+                    PackageInfo {
+                        name: "cat9k-old.17.06.05.SPA.pkg".to_string(),
+                        state: PackageState::Inactive,
+                    },
+                    PackageInfo {
+                        name: "cat9k-rpbase.17.09.04a.SPA.pkg".to_string(),
+                        state: PackageState::Committed,
+                    },
+                ],
+            });
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"install remove inactive\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&data);
+        assert!(output.contains("#"), "Should return to prompt");
+
+        // Only committed packages should remain
+        if let Some(ref state) = device.install_state {
+            assert!(state.packages.iter().all(|p| p.state != PackageState::Inactive),
+                "No inactive packages should remain");
+            assert!(!state.packages.is_empty(), "Committed packages should remain");
+        }
     }
 
     #[tokio::test]

@@ -219,19 +219,22 @@ fn ipv4_mask_to_prefix_len(mask: Ipv4Addr) -> u8 {
 }
 
 /// Abbreviate an interface name for use in `show ip interface brief` (max 23 chars).
-/// - `TenGigabitEthernet` → `Te`
-/// - `GigabitEthernet`    → `Gi`
-/// - `FastEthernet`       → `Fa`
-/// - `Loopback`           → `Lo`
-/// - `Vlan`               → `Vl` (only when name > 23 chars)
-/// If after abbreviation still > 23 chars, or no prefix matches and name > 23 chars,
-/// truncate to 23 chars.
+/// Real IOS only abbreviates when the full name exceeds the 23-char column width.
+/// - `TenGigabitEthernet1/0/1` (25 chars) → `Te1/0/1` (abbreviated)
+/// - `GigabitEthernet1/0/1` (22 chars) → kept as-is (fits)
+/// - `GigabitEthernet1/0/10` (23 chars) → kept as-is (fits)
 pub fn abbreviate_interface_name(name: &str) -> String {
+    // If it fits in 23-char column with at least 1 trailing space, no abbreviation needed
+    if name.len() < 23 {
+        return name.to_string();
+    }
+
     let prefixes: &[(&str, &str)] = &[
         ("TenGigabitEthernet", "Te"),
         ("GigabitEthernet",    "Gi"),
         ("FastEthernet",       "Fa"),
         ("Loopback",           "Lo"),
+        ("Vlan",               "Vl"),
     ];
 
     for (long, short) in prefixes {
@@ -244,20 +247,8 @@ pub fn abbreviate_interface_name(name: &str) -> String {
         }
     }
 
-    // Vlan: only abbreviate if length > 23
-    if name.len() > 23 {
-        if let Some(suffix) = name.strip_prefix("Vlan") {
-            let abbreviated = format!("Vl{}", suffix);
-            if abbreviated.len() > 23 {
-                return abbreviated[..23].to_string();
-            }
-            return abbreviated;
-        }
-        // No matching prefix — truncate to 23
-        return name[..23].to_string();
-    }
-
-    name.to_string()
+    // No matching prefix — truncate to 23
+    name[..23].to_string()
 }
 
 impl DeviceState {
@@ -892,16 +883,18 @@ mod tests {
 
     #[test]
     fn test_abbreviate_interface_name() {
-        // TenGigabitEthernet → Te
+        // TenGigabitEthernet1/0/1 = 25 chars > 23, must abbreviate to Te
         assert_eq!(abbreviate_interface_name("TenGigabitEthernet1/0/1"), "Te1/0/1");
-        // GigabitEthernet → Gi
-        assert_eq!(abbreviate_interface_name("GigabitEthernet1/0/1"), "Gi1/0/1");
-        // FastEthernet → Fa
-        assert_eq!(abbreviate_interface_name("FastEthernet0/1"), "Fa0/1");
-        // Loopback → Lo
-        assert_eq!(abbreviate_interface_name("Loopback0"), "Lo0");
-        // Vlan — only abbreviate when name > 23 chars
-        assert_eq!(abbreviate_interface_name("Vlan1"), "Vlan1"); // 5 chars, no abbreviation
+        // GigabitEthernet1/0/1 = 22 chars <= 23, keep as-is
+        assert_eq!(abbreviate_interface_name("GigabitEthernet1/0/1"), "GigabitEthernet1/0/1");
+        // GigabitEthernet1/0/10 = 21 chars < 23, keep as-is
+        assert_eq!(abbreviate_interface_name("GigabitEthernet1/0/10"), "GigabitEthernet1/0/10");
+        // FastEthernet0/1 = 16 chars <= 23, keep as-is
+        assert_eq!(abbreviate_interface_name("FastEthernet0/1"), "FastEthernet0/1");
+        // Loopback0 = 9 chars <= 23, keep as-is
+        assert_eq!(abbreviate_interface_name("Loopback0"), "Loopback0");
+        // Vlan1 = 5 chars <= 23, keep as-is
+        assert_eq!(abbreviate_interface_name("Vlan1"), "Vlan1");
         // Short names are returned as-is
         assert_eq!(abbreviate_interface_name("Gi1/0/1"), "Gi1/0/1");
     }

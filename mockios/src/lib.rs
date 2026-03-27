@@ -3063,8 +3063,8 @@ mod tests {
         let output = send_cmd(&mut device, "show ip interface brief").await;
         assert!(output.contains("Interface") && output.contains("IP-Address"),
             "show ip int brief should show interface table header, got: {:?}", output);
-        assert!(output.contains("Gi") || output.contains("Vlan") || output.contains("Te"),
-            "Should list interfaces (abbreviated names)");
+        assert!(output.contains("GigabitEthernet") || output.contains("Vlan") || output.contains("Te"),
+            "Should list interfaces");
         // Protocol column must be padded to 8 chars (for screen-scraping tools)
         // An "up" protocol entry should appear as "up      " (with trailing spaces)
         assert!(output.contains("up      ") || output.contains("down    "),
@@ -4169,7 +4169,7 @@ mod tests {
 
         let output = send_cmd(&mut device, "show ip interface brief").await;
         assert!(output.contains("10.127.0.1"), "Loopback0 should have IP 10.127.0.1, got: {:?}", output);
-        assert!(output.contains("Lo0"), "Should show Lo0 (abbreviated from Loopback0)");
+        assert!(output.contains("Loopback0"), "Should show Loopback0 (fits in 23-char column)");
     }
 
     #[tokio::test]
@@ -4844,9 +4844,9 @@ mod tests {
             .unwrap_or("");
         assert!(vlan1_line.contains("NVRAM"),
             "Vlan1 with IP should show NVRAM, got line: {:?}", vlan1_line);
-        // GigabitEthernet1/0/1 has no IP → Method should be unset (abbreviated to Gi1/0/1)
+        // GigabitEthernet1/0/1 has no IP → Method should be unset (name fits in 23 chars, no abbreviation)
         let gi_line = output.lines()
-            .find(|l| l.starts_with("Gi1/0/1"))
+            .find(|l| l.starts_with("GigabitEthernet1/0/1"))
             .unwrap_or("");
         assert!(gi_line.contains("unset"),
             "GigabitEthernet1/0/1 without IP should show unset, got line: {:?}", gi_line);
@@ -4861,9 +4861,9 @@ mod tests {
             .unwrap()
             .admin_up = false;
         let output = send_cmd(&mut device, "show ip interface brief").await;
-        // Find the Gi1/0/1 line (abbreviated)
+        // Find the GigabitEthernet1/0/1 line (full name fits in 23 chars)
         let gi_line = output.lines()
-            .find(|l| l.starts_with("Gi1/0/1"))
+            .find(|l| l.starts_with("GigabitEthernet1/0/1 "))
             .unwrap_or("");
         assert!(gi_line.contains("administratively down"),
             "Shutdown interface should show 'administratively down', got line: {:?}", gi_line);

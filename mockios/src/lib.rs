@@ -30,7 +30,7 @@ pub mod cmd_tree_exec;
 pub mod cmd_tree_conf;
 pub mod device_state;
 
-use device_state::DeviceState;
+use device_state::{DeviceState, abbreviate_interface_name};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -605,7 +605,7 @@ impl MockIosDevice {
 
     pub fn handle_show_ip_interface_brief(&mut self) {
         let header = "Interface              IP-Address      OK? Method Status                Protocol";
-        let mut lines = vec![String::new(), header.to_string()];
+        let mut lines = vec![header.to_string()];
 
         // Read from structured state
         for iface in &self.state.interfaces {
@@ -625,9 +625,11 @@ impl MockIosDevice {
             } else {
                 "up"
             };
+            let method = if iface.ip_address.is_some() { "NVRAM" } else { "unset" };
+            let display_name = abbreviate_interface_name(&iface.name);
             lines.push(format!(
                 "{:<23}{:<16}{:<4}{:<7}{:<22}{:<8}",
-                iface.name, ip, "YES", "NVRAM", status, protocol
+                display_name, ip, "YES", method, status, protocol
             ));
         }
 
@@ -1127,7 +1129,7 @@ Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n\
         // Use legacy fields as source of truth for backward compat
         let boot_var = if self.boot_variable.is_empty() {
             format!(
-                "flash:c{}-universalk9-mz.SPA.{}.bin",
+                "flash:c{}-universalk9-mz.{}.bin",
                 self.model.to_lowercase(),
                 self.version
             )
@@ -1440,7 +1442,7 @@ install_add: SUCCESS
             _ => {
                 let suffix = version_to_filename_suffix(eff_version);
                 let family = model_family(&self.state.model);
-                format!("flash:{}-universalk9-mz.SPA.{}.bin", family.to_lowercase(), suffix)
+                format!("flash:{}-universalk9-mz.{}.bin", family.to_lowercase(), suffix)
             }
         };
 
@@ -3061,8 +3063,8 @@ mod tests {
         let output = send_cmd(&mut device, "show ip interface brief").await;
         assert!(output.contains("Interface") && output.contains("IP-Address"),
             "show ip int brief should show interface table header, got: {:?}", output);
-        assert!(output.contains("GigabitEthernet") || output.contains("Gigabit") || output.contains("Ethernet"),
-            "Should list interfaces");
+        assert!(output.contains("Gi") || output.contains("Vlan") || output.contains("Te"),
+            "Should list interfaces (abbreviated names)");
         // Protocol column must be padded to 8 chars (for screen-scraping tools)
         // An "up" protocol entry should appear as "up      " (with trailing spaces)
         assert!(output.contains("up      ") || output.contains("down    "),
@@ -3190,6 +3192,15 @@ mod tests {
         assert!(output.contains("WS-C3560CX-12PD-S"), "Should contain model");
         assert!(output.contains("System image file"), "Should mention system image file");
         assert!(output.contains("Configuration register"), "Should mention config register");
+    }
+
+    #[tokio::test]
+    async fn test_show_version_no_spa_in_image() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show version").await;
+        assert!(!output.contains(".SPA."),
+            "System image should not contain '.SPA.': {:?}",
+            output.lines().find(|l| l.contains("System image")));
     }
 
     // --- "show run" abbreviation ---
@@ -4158,7 +4169,7 @@ mod tests {
 
         let output = send_cmd(&mut device, "show ip interface brief").await;
         assert!(output.contains("10.127.0.1"), "Loopback0 should have IP 10.127.0.1, got: {:?}", output);
-        assert!(output.contains("Loopback0"), "Should show Loopback0");
+        assert!(output.contains("Lo0"), "Should show Lo0 (abbreviated from Loopback0)");
     }
 
     #[tokio::test]
@@ -4807,5 +4818,70 @@ mod tests {
         assert!(output.contains("WAN uplink"),
             "show running-config should contain description text, got: {:?}",
             &output[..output.len().min(500)]);
+    }
+
+    // --- show ip interface brief tests ---
+
+    #[tokio::test]
+    async fn test_show_ip_interface_brief_te_abbreviation() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show ip interface brief").await;
+        assert!(output.contains("Te1/0/1"),
+            "TenGigabitEthernet should be abbreviated to Te, got: {:?}",
+            &output[..output.len().min(1000)]);
+        assert!(!output.contains("TenGigabitEthernet1/0/1"),
+            "Full TenGigabitEthernet name should NOT appear, got: {:?}",
+            &output[..output.len().min(1000)]);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_interface_brief_method_unset() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show ip interface brief").await;
+        // Vlan1 has IP → Method should be NVRAM
+        let vlan1_line = output.lines()
+            .find(|l| l.contains("Vlan1"))
+            .unwrap_or("");
+        assert!(vlan1_line.contains("NVRAM"),
+            "Vlan1 with IP should show NVRAM, got line: {:?}", vlan1_line);
+        // GigabitEthernet1/0/1 has no IP → Method should be unset (abbreviated to Gi1/0/1)
+        let gi_line = output.lines()
+            .find(|l| l.starts_with("Gi1/0/1"))
+            .unwrap_or("");
+        assert!(gi_line.contains("unset"),
+            "GigabitEthernet1/0/1 without IP should show unset, got line: {:?}", gi_line);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_interface_brief_admin_down() {
+        let mut device = setup_device("Switch1").await;
+        // Shut down GigabitEthernet1/0/1
+        device.state.interfaces.iter_mut()
+            .find(|i| i.name == "GigabitEthernet1/0/1")
+            .unwrap()
+            .admin_up = false;
+        let output = send_cmd(&mut device, "show ip interface brief").await;
+        // Find the Gi1/0/1 line (abbreviated)
+        let gi_line = output.lines()
+            .find(|l| l.starts_with("Gi1/0/1"))
+            .unwrap_or("");
+        assert!(gi_line.contains("administratively down"),
+            "Shutdown interface should show 'administratively down', got line: {:?}", gi_line);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_interface_brief_no_blank_line_after_header() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show ip interface brief").await;
+        let lines: Vec<&str> = output.lines().collect();
+        // Find the header line
+        let header_idx = lines.iter()
+            .position(|l| l.starts_with("Interface"))
+            .expect("Header line should exist");
+        // The line immediately after the header should NOT be blank
+        assert!(header_idx + 1 < lines.len(),
+            "There should be a line after the header");
+        assert!(!lines[header_idx + 1].trim().is_empty(),
+            "Line after header should not be blank, got: {:?}", lines[header_idx + 1]);
     }
 }

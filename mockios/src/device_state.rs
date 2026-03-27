@@ -218,6 +218,48 @@ fn ipv4_mask_to_prefix_len(mask: Ipv4Addr) -> u8 {
     u32::from(mask).count_ones() as u8
 }
 
+/// Abbreviate an interface name for use in `show ip interface brief` (max 23 chars).
+/// - `TenGigabitEthernet` → `Te`
+/// - `GigabitEthernet`    → `Gi`
+/// - `FastEthernet`       → `Fa`
+/// - `Loopback`           → `Lo`
+/// - `Vlan`               → `Vl` (only when name > 23 chars)
+/// If after abbreviation still > 23 chars, or no prefix matches and name > 23 chars,
+/// truncate to 23 chars.
+pub fn abbreviate_interface_name(name: &str) -> String {
+    let prefixes: &[(&str, &str)] = &[
+        ("TenGigabitEthernet", "Te"),
+        ("GigabitEthernet",    "Gi"),
+        ("FastEthernet",       "Fa"),
+        ("Loopback",           "Lo"),
+    ];
+
+    for (long, short) in prefixes {
+        if let Some(suffix) = name.strip_prefix(long) {
+            let abbreviated = format!("{}{}", short, suffix);
+            if abbreviated.len() > 23 {
+                return abbreviated[..23].to_string();
+            }
+            return abbreviated;
+        }
+    }
+
+    // Vlan: only abbreviate if length > 23
+    if name.len() > 23 {
+        if let Some(suffix) = name.strip_prefix("Vlan") {
+            let abbreviated = format!("Vl{}", suffix);
+            if abbreviated.len() > 23 {
+                return abbreviated[..23].to_string();
+            }
+            return abbreviated;
+        }
+        // No matching prefix — truncate to 23
+        return name[..23].to_string();
+    }
+
+    name.to_string()
+}
+
 impl DeviceState {
     /// Create a default state matching a WS-C3560CX-12PD-S switch.
     pub fn new(hostname: &str) -> Self {
@@ -356,11 +398,39 @@ impl DeviceState {
             } else {
                 "act/unsup"
             };
-            let ports_str = vlan.ports.join(", ");
+
+            // Wrap port list: Ports column starts at position 48, max ~52 chars wide
+            const PORTS_COL: usize = 48;
+            const MAX_PORTS_WIDTH: usize = 52;
+
+            let mut port_lines: Vec<String> = Vec::new();
+            let mut current_line = String::new();
+            for port in &vlan.ports {
+                if current_line.is_empty() {
+                    current_line.push_str(port);
+                } else {
+                    let candidate = format!("{}, {}", current_line, port);
+                    if candidate.len() <= MAX_PORTS_WIDTH {
+                        current_line = candidate;
+                    } else {
+                        port_lines.push(current_line);
+                        current_line = port.clone();
+                    }
+                }
+            }
+            if !current_line.is_empty() {
+                port_lines.push(current_line);
+            }
+
+            let first_ports = port_lines.first().map(|s| s.as_str()).unwrap_or("");
             lines.push(format!(
                 "{:<5}{:<33}{:<10}{}",
-                vlan.id, vlan.name, status, ports_str
+                vlan.id, vlan.name, status, first_ports
             ));
+            let indent = " ".repeat(PORTS_COL);
+            for continuation in port_lines.iter().skip(1) {
+                lines.push(format!("{}{}", indent, continuation));
+            }
         }
         lines.join("\n")
     }
@@ -798,5 +868,40 @@ mod tests {
         let output = state.generate_show_vlan_brief();
         assert!(output.contains("act/unsup"), "VLANs 1002-1005 should show act/unsup");
         assert!(output.contains("fddi-default"));
+    }
+
+    #[test]
+    fn test_show_vlan_brief_port_wrapping() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_vlan_brief();
+        // VLAN 1 has 18 ports - should wrap across multiple lines
+        let lines: Vec<&str> = output.lines().collect();
+        // Find lines for VLAN 1 (after header, before VLAN 1002)
+        let vlan1_start = lines.iter().position(|l| l.starts_with("1 ") || l.starts_with("1    ")).unwrap();
+        let vlan1002_start = lines.iter().position(|l| l.starts_with("1002")).unwrap();
+        let vlan1_lines = &lines[vlan1_start..vlan1002_start];
+        assert!(vlan1_lines.len() > 1,
+            "VLAN 1 with 18 ports should wrap, got {} lines: {:?}", vlan1_lines.len(), vlan1_lines);
+        // Continuation lines should be indented to column 48
+        for line in &vlan1_lines[1..] {
+            assert!(line.starts_with(&" ".repeat(48)),
+                "Continuation should be indented 48 spaces: {:?}", line);
+        }
+    }
+
+    #[test]
+    fn test_abbreviate_interface_name() {
+        // TenGigabitEthernet → Te
+        assert_eq!(abbreviate_interface_name("TenGigabitEthernet1/0/1"), "Te1/0/1");
+        // GigabitEthernet → Gi
+        assert_eq!(abbreviate_interface_name("GigabitEthernet1/0/1"), "Gi1/0/1");
+        // FastEthernet → Fa
+        assert_eq!(abbreviate_interface_name("FastEthernet0/1"), "Fa0/1");
+        // Loopback → Lo
+        assert_eq!(abbreviate_interface_name("Loopback0"), "Lo0");
+        // Vlan — only abbreviate when name > 23 chars
+        assert_eq!(abbreviate_interface_name("Vlan1"), "Vlan1"); // 5 chars, no abbreviation
+        // Short names are returned as-is
+        assert_eq!(abbreviate_interface_name("Gi1/0/1"), "Gi1/0/1");
     }
 }

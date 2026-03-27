@@ -54,11 +54,11 @@ struct Cli {
     ssh: Option<SocketAddr>,
 
     /// IOS version string
-    #[arg(long, default_value = "15.1(4)M")]
+    #[arg(long, default_value = "15.2(7)E13")]
     version: String,
 
     /// Device model
-    #[arg(long, default_value = "C2951")]
+    #[arg(long, default_value = "WS-C3560CX-12PD-S")]
     model: String,
 }
 

@@ -211,8 +211,8 @@ impl MockIosDevice {
             username: None,
             password: None,
             enable_password: None,
-            version: "15.1(4)M".to_string(),
-            model: "C2951".to_string(),
+            version: "15.2(7)E13".to_string(),
+            model: "WS-C3560CX-12PD-S".to_string(),
             pending_interactive: None,
             input_buffer: Vec::new(),
             cursor_pos: 0,
@@ -399,8 +399,18 @@ impl MockIosDevice {
                 name: v.name.clone(),
                 active: v.active,
                 ports: v.ports.clone(),
+                unsupported: v.unsupported,
             }
         }).collect();
+        derived_state.base_mac = self.state.base_mac.clone();
+        derived_state.sw_image = self.state.sw_image.clone();
+        derived_state.last_reload_reason = self.state.last_reload_reason.clone();
+        derived_state.service_password_encryption = self.state.service_password_encryption;
+        derived_state.aaa_new_model = self.state.aaa_new_model;
+        derived_state.ip_routing = self.state.ip_routing;
+        derived_state.spanning_tree_mode = self.state.spanning_tree_mode.clone();
+        derived_state.vtp_mode = self.state.vtp_mode.clone();
+        derived_state.vtp_domain = self.state.vtp_domain.clone();
 
         Self {
             hostname: self.hostname.clone(),
@@ -1420,41 +1430,128 @@ install_add: SUCCESS
         // Use the legacy fields (hostname, version, model) as the source of truth
         // because tests may set them directly. state.* mirrors them for structured access.
         let install_state = self.install_state.as_ref().or(self.state.install_state.as_ref());
+        // Use top-level `self.version` as authoritative — tests set it directly.
+        // `self.state.version` mirrors it but may lag if set via field access.
+        let eff_version = &self.version;
         let system_image = match install_state {
             Some(InstallState { mode: InstallMode::Install, .. }) => {
                 "flash:packages.conf".to_string()
             }
             _ => {
-                format!("flash:c{}-universalk9-mz.SPA.{}.bin",
-                    self.model.to_lowercase(), self.version)
+                let suffix = version_to_filename_suffix(eff_version);
+                let family = model_family(&self.state.model);
+                format!("flash:{}-universalk9-mz.SPA.{}.bin", family.to_lowercase(), suffix)
             }
         };
 
+        let model = &self.state.model;
+        let version = eff_version;
+        let hostname = &self.hostname;
+        let uptime = &self.state.uptime;
+        let serial = &self.state.serial_number;
+        let config_reg = &self.state.config_register;
+        let base_mac = &self.state.base_mac;
+        let sw_image = &self.state.sw_image;
+        let last_reload = &self.state.last_reload_reason;
+        let family = model_family(model);
+
+        // Count interfaces by type
+        let n_vlan = self.state.interfaces.iter().filter(|i| i.name.starts_with("Vlan")).count();
+        let n_gi = self.state.interfaces.iter().filter(|i| i.name.starts_with("GigabitEthernet")).count();
+        let n_te = self.state.interfaces.iter().filter(|i| i.name.starts_with("TenGigabitEthernet")).count();
+
+        // Derive motherboard serial (last 9 chars of serial, padded)
+        let mb_serial = if serial.len() >= 9 {
+            format!("FOC{}", &serial[serial.len()-9..])
+        } else {
+            format!("FOC{:0>9}", serial)
+        };
+
+        // Ports count for switch table
+        let total_ports = n_gi + n_te;
+
         format!(
-            r#"Cisco IOS Software, {} Software ({}), Version {}, RELEASE SOFTWARE (fc1)
+"Cisco IOS Software, {family} Software ({sw_image}), Version {version}, RELEASE SOFTWARE (fc3)
 Technical Support: http://www.cisco.com/techsupport
-Copyright (c) 1986-2024 by Cisco Systems, Inc.
+Copyright (c) 1986-2025 by Cisco Systems, Inc.
+Compiled Mon 15-Sep-25 13:05 by mcpre
 
-ROM: System Bootstrap, Version 15.0(1r)M16
+ROM: Bootstrap program is {family} boot loader
+BOOTLDR: {family} Boot Loader ({family}-HBOOT-M) Version 15.2(7r)E, RELEASE SOFTWARE (fc2)
 
-{} uptime is {}
-System returned to ROM by reload
-System image file is "{}"
+{hostname} uptime is {uptime}
+System returned to ROM by power-on
+System restarted at 14:09:41 UTC Mon Feb 28 2000
+System image file is \"{system_image}\"
+Last reload reason: {last_reload}
 
-Cisco {} ({}) processor with 524288K/262144K bytes of memory.
-Processor board ID {}
 
-Configuration register is {}"#,
-            self.model,
-            self.model,
-            self.version,
-            self.hostname,
-            self.state.uptime,
-            system_image,
-            self.model,
-            self.model,
-            self.state.serial_number,
-            self.state.config_register,
+This product contains cryptographic features and is subject to United
+States and local country laws governing import, export, transfer and
+use. Delivery of Cisco cryptographic products does not imply
+third-party authority to import, export, distribute or use encryption.
+Importers, exporters, distributors and users are responsible for
+compliance with U.S. and local country laws. By using this product you
+agree to comply with applicable laws and regulations. If you are unable
+to comply with U.S. and local laws, return this product immediately.
+
+A summary of U.S. laws governing Cisco cryptographic products may be found at:
+http://www.cisco.com/wwl/export/crypto/tool/stqrg.html
+
+If you require further assistance please contact us by sending email to
+export@cisco.com.
+
+License Level: ipservices
+License Type: Evaluation
+Next reload license Level: ipservices
+
+cisco {model} (APM86XXX) processor (revision D0) with 524288K bytes of memory.
+Processor board ID {serial}
+Last reset from power-on
+{n_vlan} Virtual Ethernet interfaces
+{n_gi} Gigabit Ethernet interfaces
+{n_te} Ten Gigabit Ethernet interfaces
+The password-recovery mechanism is disabled.
+
+512K bytes of flash-simulated non-volatile configuration memory.
+Base ethernet MAC Address       : {base_mac}
+Motherboard assembly number     : 73-16573-05
+Power supply part number        : 341-0675-02
+Motherboard serial number       : {mb_serial}
+Power supply serial number      : LIT19381A8A
+Model revision number           : D0
+Motherboard revision number     : A0
+Model number                    : {model}
+System serial number            : {serial}
+Top Assembly Part Number        : 68-5409-02
+Top Assembly Revision Number    : B0
+Version ID                      : V02
+CLEI Code Number                : CMM1Z00DRB
+Hardware Board Revision Number  : 0x02
+
+
+Switch Ports Model                     SW Version            SW Image
+------ ----- -----                     ----------            ----------
+*    1 {total_ports:<5} {model:<25} {version:<21} {sw_image:<24}
+
+
+Configuration register is {config_reg}",
+            family = family,
+            sw_image = sw_image,
+            version = version,
+            hostname = hostname,
+            uptime = uptime,
+            system_image = system_image,
+            last_reload = last_reload,
+            model = model,
+            serial = serial,
+            n_vlan = n_vlan,
+            n_gi = n_gi,
+            n_te = n_te,
+            base_mac = base_mac,
+            mb_serial = mb_serial,
+            total_ports = total_ports,
+            config_reg = config_reg,
         )
     }
 
@@ -1996,21 +2093,53 @@ fn default_running_config(hostname: &str) -> Vec<String> {
         "!".to_string(),
         format!("hostname {}", hostname),
         "!".to_string(),
-        "interface GigabitEthernet0/0".to_string(),
+        "interface Vlan1".to_string(),
         " ip address 10.0.0.1 255.255.255.0".to_string(),
-        " no shutdown".to_string(),
         "!".to_string(),
-        "interface GigabitEthernet0/1".to_string(),
-        " ip address 10.0.1.1 255.255.255.0".to_string(),
-        " shutdown".to_string(),
+        "interface GigabitEthernet1/0/1".to_string(),
+        " switchport mode access".to_string(),
         "!".to_string(),
         "ip route 0.0.0.0 0.0.0.0 10.0.0.254".to_string(),
         "!".to_string(),
         "line vty 0 4".to_string(),
+        " login local".to_string(),
+        " transport input ssh".to_string(),
+        "line vty 5 15".to_string(),
+        " login local".to_string(),
         " transport input ssh".to_string(),
         "!".to_string(),
         "end".to_string(),
     ]
+}
+
+/// Extract model family prefix, e.g. "WS-C3560CX-12PD-S" → "C3560CX".
+fn model_family(model: &str) -> String {
+    // Strip "WS-" prefix if present
+    let s = model.strip_prefix("WS-").unwrap_or(model);
+    // Take up to the second '-' (e.g. "C3560CX-12PD-S" → "C3560CX")
+    match s.find('-') {
+        Some(i) => s[..i].to_string(),
+        None => s.to_string(),
+    }
+}
+
+/// Convert an IOS version string to the filename suffix used in image names.
+/// e.g. "15.2(7)E13" → "152-7.E13"
+fn version_to_filename_suffix(version: &str) -> String {
+    // Format: "15.2(7)E13" → major=15, minor=2, sub=7, train=E13
+    // Output: "152-7.E13"
+    if let Some(paren_open) = version.find('(') {
+        if let Some(paren_close) = version.find(')') {
+            let major_minor = &version[..paren_open]; // "15.2"
+            let sub = &version[paren_open+1..paren_close]; // "7"
+            let train = &version[paren_close+1..]; // "E13"
+            // Remove the dot from major.minor for the prefix
+            let prefix = major_minor.replace('.', ""); // "152"
+            return format!("{}-{}.{}", prefix, sub, train);
+        }
+    }
+    // Fallback: return as-is
+    version.to_string()
 }
 
 fn compute_md5(data: &[u8]) -> String {
@@ -2087,7 +2216,7 @@ mod tests {
         let data = device.receive(Duration::from_secs(1)).await.unwrap();
         let output = String::from_utf8_lossy(&data);
         assert!(output.contains("hostname Switch1"));
-        assert!(output.contains("interface GigabitEthernet0/0"));
+        assert!(output.contains("interface Vlan1") || output.contains("interface GigabitEthernet1/0/1"));
     }
 
     #[tokio::test]
@@ -3758,9 +3887,9 @@ mod tests {
     #[tokio::test]
     async fn test_show_interfaces_specific() {
         let mut device = setup_device("R1").await;
-        let output = send_cmd(&mut device, "show interfaces GigabitEthernet0/0").await;
+        let output = send_cmd(&mut device, "show interfaces GigabitEthernet1/0/1").await;
         assert!(
-            output.contains("GigabitEthernet0/0 is up"),
+            output.contains("GigabitEthernet1/0/1 is up"),
             "Should show interface status, got: {:?}",
             &output[..output.len().min(200)]
         );
@@ -3770,8 +3899,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_show_interfaces_shutdown() {
+        // Manually shut down an interface for this test
         let mut device = setup_device("R1").await;
-        let output = send_cmd(&mut device, "show interfaces GigabitEthernet0/1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 1/0/5").await;
+        let _ = send_cmd(&mut device, "shutdown").await;
+        let _ = send_cmd(&mut device, "end").await;
+        let output = send_cmd(&mut device, "show interfaces GigabitEthernet1/0/5").await;
         assert!(
             output.contains("administratively down"),
             "Shutdown interface should show 'administratively down', got: {:?}",
@@ -3784,7 +3918,7 @@ mod tests {
         let mut device = setup_device("R1").await;
         let output = send_cmd(&mut device, "show interfaces").await;
         assert!(
-            output.contains("GigabitEthernet0/0") && output.contains("GigabitEthernet0/1"),
+            output.contains("GigabitEthernet1/0/1") && output.contains("GigabitEthernet1/0/2"),
             "show interfaces should list all interfaces"
         );
     }
@@ -3851,8 +3985,8 @@ mod tests {
         assert!(output.contains("Codes:"), "Should have Codes header");
         assert!(output.contains("Gateway of last resort"), "Should show gateway of last resort");
         assert!(output.contains("directly connected"), "Should show connected routes");
-        assert!(output.contains("GigabitEthernet0/0"), "Should reference interface name");
-        // Default state has GigabitEthernet0/0 at 10.0.0.1/24 — class A major is 10.0.0.0/8
+        assert!(output.contains("Vlan1"), "Should reference interface name");
+        // Default state has Vlan1 at 10.0.0.1/24 — class A major is 10.0.0.0/8
         assert!(
             output.contains("variably subnetted"),
             "Should show 'variably subnetted' grouping header, got: {:?}",
@@ -3885,7 +4019,7 @@ mod tests {
         let _ = send_cmd(&mut device, "no shutdown").await;
         let _ = send_cmd(&mut device, "exit").await;
 
-        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/1").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 1/0/2").await;
         let _ = send_cmd(&mut device, "ip address 192.168.0.113 255.255.255.0").await;
         let _ = send_cmd(&mut device, "no shutdown").await;
         let _ = send_cmd(&mut device, "exit").await;
@@ -4559,17 +4693,17 @@ mod tests {
     async fn test_no_shutdown_via_tree() {
         let mut device = setup_device("R1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 1/0/1").await;
 
         // shutdown — admin_up should become false
         let _ = send_cmd(&mut device, "shutdown").await;
-        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/1").unwrap();
         assert!(!iface.admin_up, "shutdown should set admin_up=false");
 
         // no shutdown — admin_up should become true
         let out = send_cmd(&mut device, "no shutdown").await;
         assert!(!out.contains("Invalid"), "no shutdown should be accepted, got: {:?}", out);
-        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/1").unwrap();
         assert!(iface.admin_up, "no shutdown should set admin_up=true");
 
         let _ = send_cmd(&mut device, "end").await;
@@ -4599,17 +4733,17 @@ mod tests {
     async fn test_no_description_clears() {
         let mut device = setup_device("R1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 1/0/1").await;
         let _ = send_cmd(&mut device, "description My uplink interface").await;
 
         // Verify description was set
-        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/1").unwrap();
         assert_eq!(iface.description, "My uplink interface", "description should have been set");
 
         // no description — clears it
         let out = send_cmd(&mut device, "no description").await;
         assert!(!out.contains("Invalid"), "no description should be accepted, got: {:?}", out);
-        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/1").unwrap();
         assert!(iface.description.is_empty(), "no description should clear description");
 
         let _ = send_cmd(&mut device, "end").await;
@@ -4641,7 +4775,7 @@ mod tests {
         let _ = device.receive(Duration::from_secs(1)).await.unwrap();
 
         // Enter config-if sub-mode (shutdown is only available there)
-        device.send(b"interface GigabitEthernet 0/0\r").await.unwrap();
+        device.send(b"interface GigabitEthernet 1/0/1\r").await.unwrap();
         let _ = device.receive(Duration::from_secs(1)).await.unwrap();
 
         // Type "no shut" then Tab — should complete to "no shutdown "
@@ -4659,12 +4793,12 @@ mod tests {
     async fn test_description_writes_to_state() {
         let mut device = setup_device("R1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
-        let _ = send_cmd(&mut device, "interface GigabitEthernet 0/0").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 1/0/1").await;
         let _ = send_cmd(&mut device, "description WAN uplink").await;
         let _ = send_cmd(&mut device, "end").await;
 
         // Verify state was updated
-        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet0/0").unwrap();
+        let iface = device.state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/1").unwrap();
         assert_eq!(iface.description, "WAN uplink",
             "description should be stored in device state, got: {:?}", iface.description);
 

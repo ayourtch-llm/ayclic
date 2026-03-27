@@ -515,6 +515,9 @@ fn build_conf_tree() -> Vec<CommandNode> {
                         param("<number>", ParamType::RestOfLine, "Interface number")
                             .handler(handle_interface),
                     ]),
+                // Fallback: accept concatenated type+number like "GigabitEthernet1/0/1"
+                param("<name>", ParamType::RestOfLine, "Interface name")
+                    .handler(handle_interface),
             ]),
 
         // router ospf/bgp/eigrp  [config only]

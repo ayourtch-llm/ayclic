@@ -638,16 +638,17 @@ impl MockIosDevice {
     }
 
     pub fn handle_show_ip_route(&mut self) {
-        let codes_header = "\
-Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n\
-       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area \n\
-       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2\n\
-       E1 - OSPF external type 1, E2 - OSPF external type 2\n\
-       i - IS-IS, su - IS-IS summary, L1 - IS-IS level-1, L2 - IS-IS level-2\n\
-       ia - IS-IS inter area, * - candidate default, U - per-user static route\n\
-       o - ODR, P - periodic downloaded static route, H - NHRP, l - LISP\n\
-       a - application route\n\
-       + - replicated route, % - next hop override, p - overrides from PfR\n";
+        let codes_header = concat!(
+            "Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n",
+            "       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area \n",
+            "       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2\n",
+            "       E1 - OSPF external type 1, E2 - OSPF external type 2\n",
+            "       i - IS-IS, su - IS-IS summary, L1 - IS-IS level-1, L2 - IS-IS level-2\n",
+            "       ia - IS-IS inter area, * - candidate default, U - per-user static route\n",
+            "       o - ODR, P - periodic downloaded static route, H - NHRP, l - LISP\n",
+            "       a - application route\n",
+            "       + - replicated route, % - next hop override, p - overrides from PfR\n",
+        );
 
         let mut output = format!("\n{}\n", codes_header);
 
@@ -4892,5 +4893,29 @@ mod tests {
         assert!(output.contains("Port"), "Should have header");
         assert!(output.contains("Gi1/0/1"), "Should show Gi interfaces");
         assert!(!output.contains("Invalid"), "Should not error");
+    }
+
+    // --- Bug 1: interface concatenated name ---
+
+    #[tokio::test]
+    async fn test_interface_concatenated_name() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        // Concatenated form (no space between type and number)
+        let output = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        assert!(!output.contains("Invalid"), "interface GigabitEthernet1/0/1 should be accepted: {:?}", output);
+        assert!(output.contains("(config-if)"), "Should enter config-if mode: {:?}", output);
+    }
+
+    // --- Bug 2: show ip route codes indentation ---
+
+    #[tokio::test]
+    async fn test_show_ip_route_codes_indentation() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show ip route").await;
+        // Second line of codes should be indented with 7 spaces
+        assert!(output.contains("\n       D - EIGRP"),
+            "Codes continuation lines should be indented 7 spaces: {:?}",
+            output.lines().take(10).collect::<Vec<_>>());
     }
 }

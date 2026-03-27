@@ -273,25 +273,26 @@ impl DeviceState {
         vlan1.link_up = true;
 
         // GigabitEthernet1/0/1 through 1/0/12
+        // Ports 1-4: admin up, link up (connected); ports 5-12: shutdown (unconnected)
         let mut gi_interfaces: Vec<InterfaceState> = (1..=12).map(|n| {
             let mut iface = InterfaceState::new(&format!("GigabitEthernet1/0/{}", n));
-            iface.admin_up = true;
-            iface.link_up = n <= 4; // first 4 ports are "connected"
+            iface.admin_up = n <= 4;
+            iface.link_up = n <= 4;
             iface
         }).collect();
 
-        // GigabitEthernet1/0/13 through 1/0/16 (uplink capable ports, but not connected)
+        // GigabitEthernet1/0/13 through 1/0/16 (uplink capable ports, shutdown — unconnected)
         let mut gi_uplink: Vec<InterfaceState> = (13..=16).map(|n| {
             let mut iface = InterfaceState::new(&format!("GigabitEthernet1/0/{}", n));
-            iface.admin_up = true;
+            iface.admin_up = false;
             iface.link_up = false;
             iface
         }).collect();
 
-        // TenGigabitEthernet1/0/1 and 1/0/2
+        // TenGigabitEthernet1/0/1 and 1/0/2: shutdown (unconnected)
         let te_interfaces: Vec<InterfaceState> = (1..=2).map(|n| {
             let mut iface = InterfaceState::new(&format!("TenGigabitEthernet1/0/{}", n));
-            iface.admin_up = true;
+            iface.admin_up = false;
             iface.link_up = false;
             iface
         }).collect();
@@ -357,7 +358,7 @@ impl DeviceState {
             hostname: hostname.to_string(),
             version: "15.2(7)E13".to_string(),
             model: "WS-C3560CX-12PD-S".to_string(),
-            serial_number: "FCW2144L08G".to_string(),
+            serial_number: "FOC2231X1YZ".to_string(),
             config_register: "0xF".to_string(),
             uptime: "42 days, 3 hours, 17 minutes".to_string(),
             interfaces,
@@ -373,7 +374,7 @@ impl DeviceState {
             unmodeled_config: Vec::new(),
             vlans,
             access_lists: Vec::new(),
-            base_mac: "f4:cf:e2:aa:bb:cc".to_string(),
+            base_mac: "00:A3:D1:4F:22:80".to_string(),
             sw_image: "C3560CX-UNIVERSALK9-M".to_string(),
             last_reload_reason: "power-on".to_string(),
             service_password_encryption: true,
@@ -754,7 +755,7 @@ mod tests {
         assert_eq!(state.interfaces[18].name, "TenGigabitEthernet1/0/2");
         // Vlan1 is up
         assert!(state.interfaces[0].admin_up);
-        // All Gi/Te are admin up
+        // Gi1/0/1 (first connected port) is admin up
         assert!(state.interfaces[1].admin_up);
     }
 
@@ -807,10 +808,10 @@ mod tests {
 
     #[test]
     fn test_generate_running_config_shutdown_interface() {
-        // No interfaces in the default config are shutdown; verify that works
-        let mut state = DeviceState::new("Switch1");
-        state.interfaces[1].admin_up = false; // shut down Gi1/0/1
+        // Verify that shutdown interfaces appear with a shutdown line in running-config.
+        let state = DeviceState::new("Switch1");
         let config = state.generate_running_config();
+        // Gi1/0/5 is shutdown by default, so running-config should contain " shutdown"
         assert!(config.contains(" shutdown"));
     }
 
@@ -903,5 +904,46 @@ mod tests {
         assert_eq!(abbreviate_interface_name("Vlan1"), "Vlan1"); // 5 chars, no abbreviation
         // Short names are returned as-is
         assert_eq!(abbreviate_interface_name("Gi1/0/1"), "Gi1/0/1");
+    }
+
+    #[test]
+    fn test_default_state_shutdown_interfaces() {
+        let state = DeviceState::new("Switch1");
+        // Gi1/0/1 through 1/0/4 should be admin up (connected ports)
+        let gi1 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/1").unwrap();
+        assert!(gi1.admin_up, "Gi1/0/1 should be admin up");
+        assert!(gi1.link_up, "Gi1/0/1 should be link up");
+        let gi4 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/4").unwrap();
+        assert!(gi4.admin_up, "Gi1/0/4 should be admin up");
+        assert!(gi4.link_up, "Gi1/0/4 should be link up");
+        // Gi1/0/5 through 1/0/12 should be shutdown
+        let gi5 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/5").unwrap();
+        assert!(!gi5.admin_up, "Gi1/0/5 should be admin down (shutdown)");
+        assert!(!gi5.link_up, "Gi1/0/5 should be link down");
+        let gi12 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/12").unwrap();
+        assert!(!gi12.admin_up, "Gi1/0/12 should be admin down (shutdown)");
+        // Gi1/0/13 through 1/0/16 should be shutdown
+        let gi13 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/13").unwrap();
+        assert!(!gi13.admin_up, "Gi1/0/13 should be admin down (shutdown)");
+        let gi16 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/16").unwrap();
+        assert!(!gi16.admin_up, "Gi1/0/16 should be admin down (shutdown)");
+        // Te1/0/1 and Te1/0/2 should be shutdown
+        let te1 = state.interfaces.iter().find(|i| i.name == "TenGigabitEthernet1/0/1").unwrap();
+        assert!(!te1.admin_up, "Te1/0/1 should be admin down (shutdown)");
+        let te2 = state.interfaces.iter().find(|i| i.name == "TenGigabitEthernet1/0/2").unwrap();
+        assert!(!te2.admin_up, "Te1/0/2 should be admin down (shutdown)");
+        // Vlan1 should be admin up
+        let vlan1 = state.interfaces.iter().find(|i| i.name == "Vlan1").unwrap();
+        assert!(vlan1.admin_up, "Vlan1 should be admin up");
+        assert!(vlan1.link_up, "Vlan1 should be link up");
+    }
+
+    #[test]
+    fn test_default_serial_and_mac() {
+        let state = DeviceState::new("Switch1");
+        assert_eq!(state.serial_number, "FOC2231X1YZ",
+            "serial_number should be FOC2231X1YZ, got: {:?}", state.serial_number);
+        assert_eq!(state.base_mac, "00:A3:D1:4F:22:80",
+            "base_mac should be 00:A3:D1:4F:22:80, got: {:?}", state.base_mac);
     }
 }

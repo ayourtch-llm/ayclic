@@ -4554,6 +4554,19 @@ mod tests {
             "show arp should contain 'Protocol', got: {:?}", output);
         assert!(output.contains("Hardware Addr"),
             "show arp should contain 'Hardware Addr', got: {:?}", output);
+        // Self-entries: Vlan1 has IP 10.0.0.1 in default state
+        assert!(output.contains("10.0.0.1"),
+            "show arp should contain Vlan1 self-entry IP '10.0.0.1', got: {:?}", output);
+        assert!(output.contains("ARPA"),
+            "show arp should contain 'ARPA' type, got: {:?}", output);
+        assert!(output.contains("Vlan1"),
+            "show arp should contain 'Vlan1' interface, got: {:?}", output);
+        // Self entries have '-' for age
+        let vlan1_line = output.lines().find(|l| l.contains("10.0.0.1")).unwrap();
+        assert!(
+            vlan1_line.contains("  -  ") || vlan1_line.contains("  -   "),
+            "Self entry should have '-' for age: {:?}", vlan1_line
+        );
     }
 
     #[tokio::test]

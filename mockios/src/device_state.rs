@@ -809,9 +809,29 @@ impl DeviceState {
             let itype = if is_te { "Not Present" } else { "10/100/1000BaseTX" };
 
             lines.push(format!(
-                "{:<10}{:<19}{:<13}{:>10} {:>6}  {:>5} {}",
+                "{:<10}{:<19}{:<13}{:<11}{:>6}  {:>5} {}",
                 port, name_field, status, vlan_field, duplex, speed, itype
             ));
+        }
+
+        lines.join("\n")
+    }
+
+    /// Generate `show arp` output with self-entries for each interface that has an IP address.
+    pub fn generate_show_arp(&self) -> String {
+        let header = "Protocol  Address          Age (min)  Hardware Addr   Type   Interface";
+        let mut lines = vec![header.to_string()];
+
+        for iface in &self.interfaces {
+            if let Some((addr, _mask)) = iface.ip_address {
+                let ip = addr.to_string();
+                let mac = &iface.mac_address;
+                let name = &iface.name;
+                lines.push(format!(
+                    "Internet  {:<16}{:>8}   {}  ARPA   {}",
+                    ip, "-", mac, name
+                ));
+            }
         }
 
         lines.join("\n")
@@ -1095,6 +1115,25 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_show_arp() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_arp();
+        assert!(output.contains("Protocol"), "Should have header");
+        // Vlan1 has IP 10.0.0.1, should appear as self-entry
+        assert!(output.contains("10.0.0.1"), "Should show Vlan1 IP");
+        assert!(output.contains("ARPA"), "Should show ARPA type");
+        assert!(output.contains("Vlan1"), "Should show interface name");
+        // Self entries use "-" for age
+        let vlan1_line = output.lines().find(|l| l.contains("10.0.0.1")).unwrap();
+        assert!(
+            vlan1_line.contains("  -  ") || vlan1_line.contains("  -   "),
+            "Self entry should have '-' for age: {:?}", vlan1_line
+        );
+        // The line should have "Internet" protocol
+        assert!(vlan1_line.starts_with("Internet"), "ARP entry should start with 'Internet': {:?}", vlan1_line);
+    }
+
+    #[test]
     fn test_generate_show_interfaces_status() {
         let state = DeviceState::new("Switch1");
         let output = state.generate_show_interfaces_status();
@@ -1109,5 +1148,41 @@ mod tests {
         assert!(gi5_line.contains("disabled"), "Gi1/0/5 should be disabled: {:?}", gi5_line);
         // Vlan1 should NOT appear
         assert!(!output.contains("Vl1"), "Vlan interfaces should not appear");
+    }
+
+    #[test]
+    fn test_show_interfaces_status_alignment() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_status();
+
+        // Header must match real IOS exactly
+        let header = output.lines().next().unwrap();
+        assert_eq!(
+            header,
+            "Port      Name               Status       Vlan       Duplex  Speed Type",
+            "Header alignment mismatch"
+        );
+
+        // Gi1/0/1 is connected, vlan 1 — check Vlan column is left-aligned in 11-char field
+        // Expected: "Gi1/0/1   " (10) + "                   " (19) + "connected    " (13) + "1          " (11) + ...
+        let gi1_line = output.lines().find(|l| l.starts_with("Gi1/0/1")).unwrap();
+        // Column offsets: Port(0-9), Name(10-28), Status(29-41), Vlan(42-52)
+        assert_eq!(&gi1_line[42..53], "1          ",
+            "Vlan '1' should be left-justified in 11-char field: {:?}", gi1_line);
+
+        // Gi1/0/5 is disabled, vlan 1 — same Vlan column check
+        let gi5_line = output.lines().find(|l| l.starts_with("Gi1/0/5")).unwrap();
+        assert_eq!(&gi5_line[42..53], "1          ",
+            "Vlan '1' on disabled port should be left-justified in 11-char field: {:?}", gi5_line);
+
+        // Duplex column at offset 53, right-aligned in 6-char field: "  auto"
+        assert_eq!(&gi5_line[53..59], "  auto",
+            "Duplex should be right-aligned in 6-char field: {:?}", gi5_line);
+
+        // Two literal spaces at 59..61, then Speed right-aligned in 5-char field at 61..66
+        assert_eq!(&gi5_line[59..61], "  ",
+            "Two spaces between Duplex and Speed: {:?}", gi5_line);
+        assert_eq!(&gi5_line[61..66], " auto",
+            "Speed should be right-aligned in 5-char field: {:?}", gi5_line);
     }
 }

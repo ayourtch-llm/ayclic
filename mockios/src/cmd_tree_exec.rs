@@ -466,11 +466,9 @@ Log Buffer (4096 bytes):
 }
 
 pub fn handle_show_arp(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_arp();
     let p = d.prompt();
-    d.queue_output(&format!(
-        "\nProtocol  Address          Age (min)  Hardware Addr   Type   Interface\n{}",
-        p
-    ));
+    d.queue_output(&format!("\n{}\n{}", output, p));
 }
 
 pub fn handle_show_mac_address_table(d: &mut MockIosDevice, _input: &str) {

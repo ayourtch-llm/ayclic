@@ -4884,4 +4884,13 @@ mod tests {
         assert!(!lines[header_idx + 1].trim().is_empty(),
             "Line after header should not be blank, got: {:?}", lines[header_idx + 1]);
     }
+
+    #[tokio::test]
+    async fn test_show_interfaces_status() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show interfaces status").await;
+        assert!(output.contains("Port"), "Should have header");
+        assert!(output.contains("Gi1/0/1"), "Should show Gi interfaces");
+        assert!(!output.contains("Invalid"), "Should not error");
+    }
 }

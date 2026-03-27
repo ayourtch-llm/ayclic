@@ -218,6 +218,40 @@ fn ipv4_mask_to_prefix_len(mask: Ipv4Addr) -> u8 {
     u32::from(mask).count_ones() as u8
 }
 
+/// Convert a colon-separated MAC address (e.g., "00:A3:D1:4F:22:80") to
+/// Cisco dotted format ("00a3.d14f.2280").
+pub fn mac_to_cisco_format(mac: &str) -> String {
+    let hex: String = mac.replace(':', "").to_lowercase();
+    format!("{}.{}.{}", &hex[0..4], &hex[4..8], &hex[8..12])
+}
+
+/// Extract the port number from an interface name like "GigabitEthernet1/0/13" → 13.
+/// Parses the last number after the final `/`.
+fn extract_port_number(name: &str) -> u16 {
+    name.rsplit('/')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Always-abbreviated short interface name for spanning-tree tables.
+/// GigabitEthernet→Gi, TenGigabitEthernet→Te, FastEthernet→Fa, etc.
+pub fn short_interface_name(name: &str) -> String {
+    let prefixes: &[(&str, &str)] = &[
+        ("TenGigabitEthernet", "Te"),
+        ("GigabitEthernet",    "Gi"),
+        ("FastEthernet",       "Fa"),
+        ("Loopback",           "Lo"),
+        ("Vlan",               "Vl"),
+    ];
+    for (long, short) in prefixes {
+        if let Some(suffix) = name.strip_prefix(long) {
+            return format!("{}{}", short, suffix);
+        }
+    }
+    name.to_string()
+}
+
 /// Abbreviate an interface name for use in `show ip interface brief` (max 23 chars).
 /// Real IOS only abbreviates when the full name exceeds the 23-char column width.
 /// - `TenGigabitEthernet1/0/1` (25 chars) → `Te1/0/1` (abbreviated)
@@ -427,85 +461,114 @@ impl DeviceState {
         lines.join("\n")
     }
 
-    /// Generate a running-config string from the structured state.
-    pub fn generate_running_config(&self) -> String {
-        // Build config body first so we can compute its byte count for the header.
-        let mut body_lines: Vec<String> = Vec::new();
+    /// Build the shared config body lines (used by both running-config and startup-config).
+    fn build_config_body(&self) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
 
-        body_lines.push("!".to_string());
+        lines.push("!".to_string());
 
         // Version line — extract major.minor from version string (e.g., "15.2" from "15.2(7)E13")
         let ver_short = self.version.find('(')
             .map(|i| &self.version[..i])
             .unwrap_or(&self.version);
-        body_lines.push(format!("version {}", ver_short));
-        body_lines.push("service timestamps debug datetime msec".to_string());
-        body_lines.push("service timestamps log datetime msec".to_string());
-        if self.service_password_encryption {
-            body_lines.push("service password-encryption".to_string());
-        }
-        body_lines.push("!".to_string());
+        lines.push(format!("version {}", ver_short));
 
-        body_lines.push(format!("hostname {}", self.hostname));
-        body_lines.push("!".to_string());
-        body_lines.push("boot-start-marker".to_string());
-        body_lines.push("boot-end-marker".to_string());
-        body_lines.push("!".to_string());
+        // 1. Before service timestamps
+        lines.push("no service pad".to_string());
+        lines.push("service unsupported-transceiver".to_string());
+
+        lines.push("service timestamps debug datetime msec".to_string());
+        lines.push("service timestamps log datetime msec".to_string());
+        if self.service_password_encryption {
+            lines.push("service password-encryption".to_string());
+        }
+        lines.push("!".to_string());
+
+        lines.push(format!("hostname {}", self.hostname));
+        lines.push("!".to_string());
+        lines.push("boot-start-marker".to_string());
+        lines.push("boot-end-marker".to_string());
+        lines.push("!".to_string());
+
+        // 2. enable secret after boot-end-marker block
+        if self.enable_secret.is_some() {
+            lines.push("enable secret 9 $9$d3ETqPBJcIJKIT$2FVhFPr0jwSkhfF7ShDEOF7Ns9YhPn6mFgOnTsGt5gQ".to_string());
+            lines.push("!".to_string());
+        }
 
         if self.aaa_new_model {
-            body_lines.push("aaa new-model".to_string());
-            body_lines.push("!".to_string());
+            lines.push("aaa new-model".to_string());
+            lines.push("!".to_string());
+
+            // 3. AAA method lists after aaa new-model section
+            lines.push("aaa authentication login default local".to_string());
+            lines.push("aaa authentication enable default enable".to_string());
+            lines.push("aaa authorization exec default local".to_string());
+            lines.push("!".to_string());
         }
 
+        // 4. After AAA block: switch provision and system mtu
+        lines.push(format!("switch 1 provision {}", self.model.to_lowercase()));
+        lines.push("system mtu routing 1500".to_string());
+        lines.push("!".to_string());
+
         if !self.banner_motd.is_empty() {
-            body_lines.push(format!("banner motd ^{}^", self.banner_motd));
-            body_lines.push("!".to_string());
+            lines.push(format!("banner motd ^{}^", self.banner_motd));
+            lines.push("!".to_string());
         }
 
         if self.ip_routing {
-            body_lines.push("ip routing".to_string());
-            body_lines.push("!".to_string());
+            lines.push("ip routing".to_string());
+            lines.push("!".to_string());
         }
 
-        body_lines.push(format!("spanning-tree mode {}", self.spanning_tree_mode));
-        body_lines.push("spanning-tree extend system-id".to_string());
-        body_lines.push("!".to_string());
+        // 5. Before spanning-tree: no ip source-route
+        lines.push("no ip source-route".to_string());
+        lines.push("!".to_string());
 
-        body_lines.push(format!("vtp mode {}", self.vtp_mode));
-        body_lines.push("!".to_string());
+        lines.push(format!("spanning-tree mode {}", self.spanning_tree_mode));
+        lines.push("spanning-tree extend system-id".to_string());
+        lines.push("!".to_string());
+
+        lines.push(format!("vtp mode {}", self.vtp_mode));
+        lines.push("!".to_string());
+
+        // 6. After VTP config, before interfaces: lldp run
+        lines.push("lldp run".to_string());
+        lines.push("!".to_string());
 
         // Interfaces
         for iface in &self.interfaces {
-            body_lines.push(format!("interface {}", iface.name));
+            lines.push(format!("interface {}", iface.name));
             if !iface.description.is_empty() {
-                body_lines.push(format!(" description {}", iface.description));
+                lines.push(format!(" description {}", iface.description));
             }
             // Add switchport mode access for Gi/Te interfaces with no IP
             let is_switchport = (iface.name.starts_with("GigabitEthernet") || iface.name.starts_with("TenGigabitEthernet"))
                 && iface.ip_address.is_none();
             if is_switchport {
                 let mode = iface.switchport_mode.as_deref().unwrap_or("access");
-                body_lines.push(format!(" switchport mode {}", mode));
+                lines.push(format!(" switchport mode {}", mode));
             }
             if let Some((addr, mask)) = &iface.ip_address {
-                body_lines.push(format!(" ip address {} {}", addr, mask));
+                lines.push(format!(" ip address {} {}", addr, mask));
             }
             if !iface.admin_up {
-                body_lines.push(" shutdown".to_string());
+                lines.push(" shutdown".to_string());
             }
             // Real IOS does NOT show "no shutdown" for admin-up interfaces
-            body_lines.push("!".to_string());
+            lines.push("!".to_string());
         }
 
         // Static routes
         for route in &self.static_routes {
             if let Some(nh) = route.next_hop {
-                body_lines.push(format!(
+                lines.push(format!(
                     "ip route {} {} {}",
                     route.prefix, route.mask, nh
                 ));
             } else if let Some(iface) = &route.interface {
-                body_lines.push(format!(
+                lines.push(format!(
                     "ip route {} {} {}",
                     route.prefix, route.mask, iface
                 ));
@@ -513,7 +576,7 @@ impl DeviceState {
         }
 
         if !self.static_routes.is_empty() {
-            body_lines.push("!".to_string());
+            lines.push("!".to_string());
         }
 
         // Access lists
@@ -529,36 +592,48 @@ impl DeviceState {
                 if !entry.extra.is_empty() {
                     line.push_str(&format!(" {}", entry.extra));
                 }
-                body_lines.push(line);
+                lines.push(line);
             }
         }
         if !self.access_lists.is_empty() {
-            body_lines.push("!".to_string());
+            lines.push("!".to_string());
         }
 
         // Unmodeled config lines
         for line in &self.unmodeled_config {
-            body_lines.push(line.clone());
+            lines.push(line.clone());
         }
 
         if !self.unmodeled_config.is_empty() {
-            body_lines.push("!".to_string());
+            lines.push("!".to_string());
         }
 
+        // 7. After ip route section, before line con
+        lines.push("ip http server".to_string());
+        lines.push("ip http secure-server".to_string());
+        lines.push("ip ssh version 2".to_string());
+        lines.push("!".to_string());
+
         // Line configuration (real IOS style)
-        body_lines.push("!".to_string());
-        body_lines.push("line con 0".to_string());
-        body_lines.push(" stopbits 1".to_string());
-        body_lines.push("line vty 0 4".to_string());
-        body_lines.push(" login local".to_string());
-        body_lines.push(" transport input ssh".to_string());
-        body_lines.push("line vty 5 15".to_string());
-        body_lines.push(" login local".to_string());
-        body_lines.push(" transport input ssh".to_string());
-        body_lines.push("!".to_string());
+        lines.push("!".to_string());
+        lines.push("line con 0".to_string());
+        lines.push(" stopbits 1".to_string());
+        lines.push("line vty 0 4".to_string());
+        lines.push(" login local".to_string());
+        lines.push(" transport input ssh".to_string());
+        lines.push("line vty 5 15".to_string());
+        lines.push(" login local".to_string());
+        lines.push(" transport input ssh".to_string());
+        lines.push("!".to_string());
 
-        body_lines.push("end".to_string());
+        lines.push("end".to_string());
 
+        lines
+    }
+
+    /// Generate a running-config string from the structured state.
+    pub fn generate_running_config(&self) -> String {
+        let body_lines = self.build_config_body();
         let body = body_lines.join("\n");
         let byte_count = body.len();
 
@@ -570,124 +645,7 @@ impl DeviceState {
 
     /// Generate a startup-config string (same content as running config, different header).
     pub fn generate_startup_config(&self) -> String {
-        // Build the config body (same as running config body)
-        let mut body_lines: Vec<String> = Vec::new();
-
-        body_lines.push("!".to_string());
-
-        let ver_short = self.version.find('(')
-            .map(|i| &self.version[..i])
-            .unwrap_or(&self.version);
-        body_lines.push(format!("version {}", ver_short));
-        body_lines.push("service timestamps debug datetime msec".to_string());
-        body_lines.push("service timestamps log datetime msec".to_string());
-        if self.service_password_encryption {
-            body_lines.push("service password-encryption".to_string());
-        }
-        body_lines.push("!".to_string());
-
-        body_lines.push(format!("hostname {}", self.hostname));
-        body_lines.push("!".to_string());
-        body_lines.push("boot-start-marker".to_string());
-        body_lines.push("boot-end-marker".to_string());
-        body_lines.push("!".to_string());
-
-        if self.aaa_new_model {
-            body_lines.push("aaa new-model".to_string());
-            body_lines.push("!".to_string());
-        }
-
-        if self.ip_routing {
-            body_lines.push("ip routing".to_string());
-            body_lines.push("!".to_string());
-        }
-
-        body_lines.push(format!("spanning-tree mode {}", self.spanning_tree_mode));
-        body_lines.push("spanning-tree extend system-id".to_string());
-        body_lines.push("!".to_string());
-
-        body_lines.push(format!("vtp mode {}", self.vtp_mode));
-        body_lines.push("!".to_string());
-
-        for iface in &self.interfaces {
-            body_lines.push(format!("interface {}", iface.name));
-            if !iface.description.is_empty() {
-                body_lines.push(format!(" description {}", iface.description));
-            }
-            let is_switchport = (iface.name.starts_with("GigabitEthernet") || iface.name.starts_with("TenGigabitEthernet"))
-                && iface.ip_address.is_none();
-            if is_switchport {
-                let mode = iface.switchport_mode.as_deref().unwrap_or("access");
-                body_lines.push(format!(" switchport mode {}", mode));
-            }
-            if let Some((addr, mask)) = &iface.ip_address {
-                body_lines.push(format!(" ip address {} {}", addr, mask));
-            }
-            if !iface.admin_up {
-                body_lines.push(" shutdown".to_string());
-            }
-            body_lines.push("!".to_string());
-        }
-
-        for route in &self.static_routes {
-            if let Some(nh) = route.next_hop {
-                body_lines.push(format!(
-                    "ip route {} {} {}",
-                    route.prefix, route.mask, nh
-                ));
-            } else if let Some(iface) = &route.interface {
-                body_lines.push(format!(
-                    "ip route {} {} {}",
-                    route.prefix, route.mask, iface
-                ));
-            }
-        }
-
-        if !self.static_routes.is_empty() {
-            body_lines.push("!".to_string());
-        }
-
-        // Access lists
-        for acl in &self.access_lists {
-            for entry in &acl.entries {
-                let mut line = format!("access-list {} {} {}", acl.name, entry.action, entry.protocol);
-                if !entry.source.is_empty() {
-                    line.push_str(&format!(" {}", entry.source));
-                }
-                if !entry.destination.is_empty() {
-                    line.push_str(&format!(" {}", entry.destination));
-                }
-                if !entry.extra.is_empty() {
-                    line.push_str(&format!(" {}", entry.extra));
-                }
-                body_lines.push(line);
-            }
-        }
-        if !self.access_lists.is_empty() {
-            body_lines.push("!".to_string());
-        }
-
-        for line in &self.unmodeled_config {
-            body_lines.push(line.clone());
-        }
-
-        if !self.unmodeled_config.is_empty() {
-            body_lines.push("!".to_string());
-        }
-
-        body_lines.push("!".to_string());
-        body_lines.push("line con 0".to_string());
-        body_lines.push(" stopbits 1".to_string());
-        body_lines.push("line vty 0 4".to_string());
-        body_lines.push(" login local".to_string());
-        body_lines.push(" transport input ssh".to_string());
-        body_lines.push("line vty 5 15".to_string());
-        body_lines.push(" login local".to_string());
-        body_lines.push(" transport input ssh".to_string());
-        body_lines.push("!".to_string());
-
-        body_lines.push("end".to_string());
-
+        let body_lines = self.build_config_body();
         let body = body_lines.join("\n");
         let byte_count = body.len();
 
@@ -712,6 +670,151 @@ impl DeviceState {
             self.interfaces.push(InterfaceState::new(name));
             self.interfaces.last_mut().unwrap()
         }
+    }
+
+    /// Generate `show spanning-tree` output matching real IOS format.
+    pub fn generate_show_spanning_tree(&self) -> String {
+        let protocol = match self.spanning_tree_mode.as_str() {
+            "rapid-pvst" => "rstp",
+            "pvst"       => "ieee",
+            other        => other,
+        };
+
+        let bridge_mac = mac_to_cisco_format(&self.base_mac);
+
+        let mut blocks: Vec<String> = Vec::new();
+
+        for vlan in &self.vlans {
+            if !vlan.active || vlan.unsupported {
+                continue;
+            }
+
+            let priority = 32768u32 + vlan.id as u32;
+
+            // Collect interfaces that are: physical (not Vlan*), admin_up, link_up,
+            // and assigned to this VLAN.
+            let mut iface_lines: Vec<String> = Vec::new();
+            for iface in &self.interfaces {
+                if iface.name.starts_with("Vlan") {
+                    continue;
+                }
+                if !iface.admin_up || !iface.link_up {
+                    continue;
+                }
+                // Check membership: the VLAN's ports list uses short names
+                let short = short_interface_name(&iface.name);
+                if !vlan.ports.contains(&short) {
+                    continue;
+                }
+
+                let port_num = extract_port_number(&iface.name);
+                let cost = if iface.name.starts_with("TenGigabitEthernet") {
+                    2u32
+                } else {
+                    4u32
+                };
+                let prio_nbr = format!("128.{}", port_num);
+
+                iface_lines.push(format!(
+                    "{:<20} {:<4} {:<3} {:<9} {:<8} {}",
+                    short, "Desg", "FWD", cost, prio_nbr, "P2p"
+                ));
+            }
+
+            let iface_section = if iface_lines.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\nInterface           Role Sts Cost      Prio.Nbr Type\n\
+                     ------------------- ---- --- --------- -------- --------------------------------\n\
+                     {}",
+                    iface_lines.join("\n")
+                )
+            };
+
+            blocks.push(format!(
+                "VLAN{vlan_id:04}\n\
+                 \x20 Spanning tree enabled protocol {protocol}\n\
+                 \x20 Root ID    Priority    {priority}\n\
+                 \x20            Address     {mac}\n\
+                 \x20            This bridge is the root\n\
+                 \x20            Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec\n\
+                 \n\
+                 \x20 Bridge ID  Priority    {priority}  (priority 32768 sys-id-ext {vlan_id})\n\
+                 \x20            Address     {mac}\n\
+                 \x20            Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec\n\
+                 \x20            Aging Time  300 sec\
+                 {iface_section}",
+                vlan_id       = vlan.id,
+                protocol      = protocol,
+                priority      = priority,
+                mac           = bridge_mac,
+                iface_section = iface_section,
+            ));
+        }
+
+        blocks.join("\n\n")
+    }
+
+    /// Generate `show interfaces status` output matching real IOS format.
+    pub fn generate_show_interfaces_status(&self) -> String {
+        let header = "Port      Name               Status       Vlan       Duplex  Speed Type";
+        let mut lines = vec![header.to_string()];
+
+        for iface in &self.interfaces {
+            // Skip Vlan (SVI) interfaces — they don't appear in this output
+            if iface.name.starts_with("Vlan") {
+                continue;
+            }
+            // Only physical interfaces (Gi / Te / Fa)
+            if !iface.name.starts_with("GigabitEthernet")
+                && !iface.name.starts_with("TenGigabitEthernet")
+                && !iface.name.starts_with("FastEthernet")
+            {
+                continue;
+            }
+
+            let port = short_interface_name(&iface.name);
+
+            let name_field: String = if iface.description.is_empty() {
+                String::new()
+            } else {
+                iface.description.chars().take(18).collect()
+            };
+
+            let status = if !iface.admin_up {
+                "disabled"
+            } else if iface.link_up {
+                "connected"
+            } else {
+                "notconnect"
+            };
+
+            let is_trunk = iface.switchport_mode.as_deref() == Some("trunk");
+            let vlan_field: String = if is_trunk {
+                "trunk".to_string()
+            } else {
+                iface.vlan.unwrap_or(1).to_string()
+            };
+
+            let is_connected = iface.admin_up && iface.link_up;
+            let is_te = iface.name.starts_with("TenGigabitEthernet");
+
+            let duplex = if is_connected { "a-full" } else { "auto" };
+            let speed = if is_connected {
+                if is_te { "10G" } else { "a-1000" }
+            } else {
+                "auto"
+            };
+            let itype = if is_te { "Not Present" } else { "10/100/1000BaseTX" };
+
+            lines.push(format!(
+                "{:<10}{:<19}{:<13}{:>10} {:>6}  {:>5} {}",
+                port, name_field, status, vlan_field, duplex, speed, itype
+            ));
+        }
+
+        lines.join("\n")
     }
 }
 
@@ -938,5 +1041,73 @@ mod tests {
             "serial_number should be FOC2231X1YZ, got: {:?}", state.serial_number);
         assert_eq!(state.base_mac, "00:A3:D1:4F:22:80",
             "base_mac should be 00:A3:D1:4F:22:80, got: {:?}", state.base_mac);
+    }
+
+    #[test]
+    fn test_running_config_enriched() {
+        let state = DeviceState::new("Switch1");
+        let config = state.generate_running_config();
+        assert!(config.contains("no service pad"));
+        assert!(config.contains("service unsupported-transceiver"));
+        assert!(config.contains("aaa authentication login default local"));
+        assert!(config.contains("switch 1 provision ws-c3560cx-12pd-s"));
+        assert!(config.contains("system mtu routing 1500"));
+        assert!(config.contains("no ip source-route"));
+        assert!(config.contains("lldp run"));
+        assert!(config.contains("ip http server"));
+        assert!(config.contains("ip ssh version 2"));
+    }
+
+    #[test]
+    fn test_running_config_enable_secret() {
+        let mut state = DeviceState::new("Switch1");
+        state.enable_secret = Some("cisco123".to_string());
+        let config = state.generate_running_config();
+        assert!(config.contains("enable secret 9"), "Should show enable secret hash");
+    }
+
+    #[test]
+    fn test_mac_to_cisco_format() {
+        assert_eq!(mac_to_cisco_format("00:A3:D1:4F:22:80"), "00a3.d14f.2280");
+        assert_eq!(mac_to_cisco_format("18:8B:45:17:F7:80"), "188b.4517.f780");
+    }
+
+    #[test]
+    fn test_generate_show_spanning_tree() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_spanning_tree();
+        assert!(output.contains("VLAN0001"), "Should show VLAN 1");
+        assert!(output.contains("protocol rstp"), "Should show rstp protocol");
+        assert!(output.contains("32769"), "Priority should be 32768 + 1 = 32769");
+        assert!(output.contains("00a3.d14f.2280"), "Should show bridge MAC in Cisco format");
+        assert!(output.contains("This bridge is the root"));
+        assert!(output.contains("Gi1/0/1"), "Should show connected interfaces");
+        assert!(!output.contains("Gi1/0/5"), "Should not show shutdown interfaces");
+        assert!(!output.contains("VLAN1002"), "Should not show unsupported VLANs");
+    }
+
+    #[test]
+    fn test_short_interface_name() {
+        assert_eq!(short_interface_name("GigabitEthernet1/0/1"), "Gi1/0/1");
+        assert_eq!(short_interface_name("TenGigabitEthernet1/0/1"), "Te1/0/1");
+        assert_eq!(short_interface_name("Vlan1"), "Vl1");
+        assert_eq!(short_interface_name("Loopback0"), "Lo0");
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_status() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_status();
+        // Should have header
+        assert!(output.contains("Port"), "Output should contain 'Port' header: {:?}", &output[..output.len().min(200)]);
+        assert!(output.contains("Status"), "Output should contain 'Status' header");
+        // Gi1/0/1 is admin_up + link_up → "connected"
+        let gi1_line = output.lines().find(|l| l.starts_with("Gi1/0/1")).unwrap();
+        assert!(gi1_line.contains("connected"), "Gi1/0/1 should be connected: {:?}", gi1_line);
+        // Gi1/0/5 is admin_up=false → "disabled"
+        let gi5_line = output.lines().find(|l| l.starts_with("Gi1/0/5")).unwrap();
+        assert!(gi5_line.contains("disabled"), "Gi1/0/5 should be disabled: {:?}", gi5_line);
+        // Vlan1 should NOT appear
+        assert!(!output.contains("Vl1"), "Vlan interfaces should not appear");
     }
 }

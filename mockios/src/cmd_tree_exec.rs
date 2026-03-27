@@ -130,6 +130,12 @@ pub fn handle_show_vlan_brief(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("\n{}\n{}", table, p));
 }
 
+pub fn handle_show_interfaces_status(d: &mut MockIosDevice, _input: &str) {
+    let table = d.state.generate_show_interfaces_status();
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}\n{}", table, p));
+}
+
 pub fn handle_show_flash(d: &mut MockIosDevice, _input: &str) {
     d.handle_dir_command("");
 }
@@ -517,17 +523,9 @@ Red Threshold    : 68 Degree Celsius\n\
 }
 
 pub fn handle_show_spanning_tree(d: &mut MockIosDevice, _input: &str) {
-    let output = "\
-VLAN0001
-  Spanning tree enabled protocol rstp
-  Root ID    Priority    32769
-             Address     0000.0000.0000
-             This bridge is the root
-  Bridge ID  Priority    32769
-             Address     0000.0000.0000
-";
+    let output = d.state.generate_show_spanning_tree();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}{}", output, p));
+    d.queue_output(&format!("\n{}\n{}", output, p));
 }
 
 pub fn handle_show_ntp_status(d: &mut MockIosDevice, _input: &str) {
@@ -638,6 +636,8 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("interfaces", "Interface status and configuration")
                     .handler(handle_show_interfaces)
                     .children(vec![
+                        keyword("status", "Show interface status")
+                            .handler(handle_show_interfaces_status),
                         param("<name>", ParamType::RestOfLine, "Interface name")
                             .handler(handle_show_interfaces),
                     ]),

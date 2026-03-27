@@ -74,6 +74,46 @@ MockIOS lists 25 commands
 - Update version, model defaults
 - Add assertions for new show version content
 
+## Additional Findings (from live comparison session)
+
+### Bug: `interface GigabitEthernet0/0` rejected in config mode
+MockIOS shows `interface GigabitEthernet ?` → `<number>  Interface number` but then
+`interface GigabitEthernet0/0` fails with `% Invalid input detected at '^' marker`.
+The interface command expects a space-separated number argument, but IOS syntax concatenates
+the type and number (e.g., `GigabitEthernet1/0/1`). The handler needs to accept the full
+interface name as a single token.
+
+### Real device config-if has ~60 commands
+Real IOS `(config-if)#?` shows: switchport, spanning-tree, speed, duplex, channel-group,
+storm-control, power, port-security, dot1x, keepalive, etc.
+MockIOS config-if has far fewer commands.
+
+### Real device config mode has ~180 commands
+From `aaa` to `xdr`. MockIOS config mode has far fewer.
+
+### show arp format reference
+```
+Protocol  Address          Age (min)  Hardware Addr   Type   Interface
+Internet  10.1.0.1                2   30c5.993f.94a3  ARPA   Vlan1
+Internet  10.1.0.254              -   188b.4517.f7c0  ARPA   Vlan1
+```
+Note: self entries show `-` for age. MAC format is `xxxx.xxxx.xxxx` (Cisco style).
+
+### show mac address-table format reference
+```
+          Mac Address Table
+-------------------------------------------
+
+Vlan    Mac Address       Type        Ports
+----    -----------       --------    -----
+   1    0027.9044.11b8    DYNAMIC     Gi1/0/13
+Total Mac Addresses for this criterion: 72
+```
+
+### Submode isolation concern
+User flagged: verify that config submode commands (config-if, config-line, etc.)
+don't leak into other modes. Need to verify after implementation changes.
+
 ## Execution Order
 1. DeviceState struct changes + new defaults
 2. Show version overhaul

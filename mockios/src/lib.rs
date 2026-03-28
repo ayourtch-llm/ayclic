@@ -4991,4 +4991,32 @@ mod tests {
             "Keyword padding should be ~17-19 chars, description starts at {}: {:?}",
             desc_start, version_line);
     }
+
+    // --- switchport tests ---
+
+    #[tokio::test]
+    async fn test_switchport_mode_trunk() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let _ = send_cmd(&mut device, "switchport mode trunk").await;
+        let _ = send_cmd(&mut device, "end").await;
+        // Verify in show interfaces status
+        let output = send_cmd(&mut device, "show interfaces status").await;
+        let gi1_line = output.lines().find(|l| l.starts_with("Gi1/0/1")).unwrap();
+        assert!(gi1_line.contains("trunk"), "Gi1/0/1 should show trunk after switchport mode trunk: {:?}", gi1_line);
+    }
+
+    #[tokio::test]
+    async fn test_switchport_access_vlan() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let _ = send_cmd(&mut device, "switchport access vlan 100").await;
+        let _ = send_cmd(&mut device, "end").await;
+        // Verify in show running-config
+        let output = send_cmd(&mut device, "show running-config").await;
+        assert!(output.contains("switchport access vlan 100"),
+            "Running config should show switchport access vlan 100");
+    }
 }

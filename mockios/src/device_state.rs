@@ -549,6 +549,9 @@ impl DeviceState {
             if is_switchport {
                 let mode = iface.switchport_mode.as_deref().unwrap_or("access");
                 lines.push(format!(" switchport mode {}", mode));
+                if let Some(vlan_id) = iface.vlan {
+                    lines.push(format!(" switchport access vlan {}", vlan_id));
+                }
             }
             if let Some((addr, mask)) = &iface.ip_address {
                 lines.push(format!(" ip address {} {}", addr, mask));

@@ -311,8 +311,45 @@ pub fn handle_description(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
-pub fn handle_switchport(d: &mut MockIosDevice, input: &str) {
-    d.running_config.push(format!(" {}", input.trim()));
+pub fn handle_switchport_mode(d: &mut MockIosDevice, input: &str) {
+    let negated = input.trim().starts_with("no");
+    if let Some(ref iface_name) = d.current_interface.clone() {
+        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+            if negated {
+                iface.switchport_mode = None;
+            } else {
+                // Parse "switchport mode <mode>"
+                let parts: Vec<&str> = input.split_whitespace().collect();
+                // parts: ["switchport", "mode", "<access|trunk|...>"]
+                if let Some(&mode) = parts.get(2) {
+                    iface.switchport_mode = Some(mode.to_string());
+                }
+            }
+        }
+    }
+    let p = d.prompt();
+    d.queue_output(&format!("\n{}", p));
+}
+
+pub fn handle_switchport_access_vlan(d: &mut MockIosDevice, input: &str) {
+    let negated = input.trim().starts_with("no");
+    if let Some(ref iface_name) = d.current_interface.clone() {
+        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+            if negated {
+                // "no switchport access vlan" resets to default (VLAN 1)
+                iface.vlan = None;
+            } else {
+                // Parse "switchport access vlan <N>"
+                let parts: Vec<&str> = input.split_whitespace().collect();
+                // parts: ["switchport", "access", "vlan", "<N>"]
+                if let Some(vlan_str) = parts.get(3) {
+                    if let Ok(vlan_id) = vlan_str.parse::<u16>() {
+                        iface.vlan = Some(vlan_id);
+                    }
+                }
+            }
+        }
+    }
     let p = d.prompt();
     d.queue_output(&format!("\n{}", p));
 }
@@ -663,12 +700,27 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     .handler(handle_description),
             ]),
 
-        // switchport <rest>  [config-if only]
+        // switchport mode <access|trunk|...> / switchport access vlan <N>  [config-if only]
         keyword("switchport", "Set switching mode characteristics")
             .mode(config_if_only())
             .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Switchport parameters")
-                    .handler(handle_switchport),
+                keyword("mode", "Set trunking mode of the interface")
+                    .children(vec![
+                        keyword("access", "Set trunking mode to ACCESS unconditionally")
+                            .handler(handle_switchport_mode),
+                        keyword("trunk", "Set trunking mode to TRUNK unconditionally")
+                            .handler(handle_switchport_mode),
+                        param("<mode>", ParamType::Word, "Switchport mode")
+                            .handler(handle_switchport_mode),
+                    ]),
+                keyword("access", "Set access mode characteristics of the interface")
+                    .children(vec![
+                        keyword("vlan", "Set VLAN when interface is in access mode")
+                            .children(vec![
+                                param("<vlanid>", ParamType::Word, "VLAN ID of the VLAN when this port is in access mode")
+                                    .handler(handle_switchport_access_vlan),
+                            ]),
+                    ]),
             ]),
 
         // spanning-tree <rest>
@@ -754,11 +806,26 @@ fn build_config_if_tree() -> Vec<CommandNode> {
                     .handler(handle_description),
             ]),
 
-        // switchport <rest>
+        // switchport mode <access|trunk|...> / switchport access vlan <N>
         keyword("switchport", "Set switching mode characteristics")
             .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Switchport parameters")
-                    .handler(handle_switchport),
+                keyword("mode", "Set trunking mode of the interface")
+                    .children(vec![
+                        keyword("access", "Set trunking mode to ACCESS unconditionally")
+                            .handler(handle_switchport_mode),
+                        keyword("trunk", "Set trunking mode to TRUNK unconditionally")
+                            .handler(handle_switchport_mode),
+                        param("<mode>", ParamType::Word, "Switchport mode")
+                            .handler(handle_switchport_mode),
+                    ]),
+                keyword("access", "Set access mode characteristics of the interface")
+                    .children(vec![
+                        keyword("vlan", "Set VLAN when interface is in access mode")
+                            .children(vec![
+                                param("<vlanid>", ParamType::Word, "VLAN ID of the VLAN when this port is in access mode")
+                                    .handler(handle_switchport_access_vlan),
+                            ]),
+                    ]),
             ]),
 
         // spanning-tree <rest>

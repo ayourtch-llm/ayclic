@@ -37,9 +37,9 @@ fn format_clock_utc() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const DAYS_PER_400Y: u64 = 146097;
-    const DAYS_PER_100Y: u64 = 36524;
-    const DAYS_PER_4Y: u64 = 1461;
-    const DAYS_PER_Y: u64 = 365;
+    const _DAYS_PER_100Y: u64 = 36524;
+    const _DAYS_PER_4Y: u64 = 1461;
+    const _DAYS_PER_Y: u64 = 365;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -62,7 +62,7 @@ fn format_clock_utc() -> String {
 
     // Calculate year/month/day from days since Unix epoch (1970-01-01)
     // Using the 400-year cycle algorithm
-    let mut z = days_since_epoch + 719468; // shift to Mar 1, 0000 epoch
+    let z = days_since_epoch + 719468; // shift to Mar 1, 0000 epoch
     let era = z / DAYS_PER_400Y;
     let doe = z % DAYS_PER_400Y;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;

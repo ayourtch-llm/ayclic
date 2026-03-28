@@ -29,7 +29,56 @@ pub fn handle_show_startup_config(d: &mut MockIosDevice, _input: &str) {
 
 pub fn handle_show_clock(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\n*08:00:00.000 UTC Mon Jan 1 2024\n{}", p));
+    let clock_str = format_clock_utc();
+    d.queue_output(&format!("\n*{}\n{}", clock_str, p));
+}
+
+fn format_clock_utc() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const DAYS_PER_400Y: u64 = 146097;
+    const DAYS_PER_100Y: u64 = 36524;
+    const DAYS_PER_4Y: u64 = 1461;
+    const DAYS_PER_Y: u64 = 365;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+
+    let total_secs = now.as_secs();
+    let millis = now.subsec_millis();
+
+    let secs_in_day = total_secs % 86400;
+    let days_since_epoch = total_secs / 86400;
+
+    let hh = secs_in_day / 3600;
+    let mm = (secs_in_day % 3600) / 60;
+    let ss = secs_in_day % 60;
+
+    // Day of week: Unix epoch (Jan 1 1970) was a Thursday = 4
+    let dow = (days_since_epoch + 4) % 7;
+    let day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let day_name = day_names[dow as usize];
+
+    // Calculate year/month/day from days since Unix epoch (1970-01-01)
+    // Using the 400-year cycle algorithm
+    let mut z = days_since_epoch + 719468; // shift to Mar 1, 0000 epoch
+    let era = z / DAYS_PER_400Y;
+    let doe = z % DAYS_PER_400Y;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d_of_m = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    let month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month_name = month_names[month as usize];
+
+    format!("{:02}:{:02}:{:02}.{:03} UTC {} {} {} {}",
+        hh, mm, ss, millis, day_name, month_name, d_of_m, year)
 }
 
 pub fn handle_show_ip_interface_brief(d: &mut MockIosDevice, _input: &str) {
@@ -585,6 +634,139 @@ pub fn handle_show_privilege(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("\nCurrent privilege level is {}\n{}", level, p));
 }
 
+// ─── Stub handlers ────────────────────────────────────────────────────────────
+
+/// Generic stub handler that outputs a static string and the prompt.
+fn show_stub(d: &mut MockIosDevice, text: &str) {
+    let p = d.prompt();
+    if text.is_empty() {
+        d.queue_output(&format!("\n{}", p));
+    } else {
+        d.queue_output(&format!("\n{}\n{}", text, p));
+    }
+}
+
+pub fn handle_show_aaa(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "No AAA configuration");
+}
+
+pub fn handle_show_authentication(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_cable_diagnostics(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "No cable diagnostics results");
+}
+
+pub fn handle_show_controllers(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_crypto(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_debugging(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "No debugging is on");
+}
+
+pub fn handle_show_dhcp(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_dot1x(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_errdisable(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "ErrDisable Reason\nTimeout\n---------\n---------");
+}
+
+pub fn handle_show_etherchannel(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_hosts(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "Default domain is not set\nName/address lookup uses domain service\nName servers are 255.255.255.255",
+    );
+}
+
+pub fn handle_show_license(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "License Level: ipservices\nLicense Type: Evaluation\nNext reload license Level: ipservices",
+    );
+}
+
+pub fn handle_show_lldp(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "Global LLDP Information:\n    Status: ACTIVE\n    LLDP advertisements are sent every 30 seconds\n    LLDP hold time advertised is 120 seconds\n    LLDP interface reinitialisation delay is 2 seconds",
+    );
+}
+
+pub fn handle_show_module(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_platform(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_policy_map(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_port_security(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_power(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_protocols(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "Routing Protocol is \"application\"\n  Sending updates every 0 seconds\nRouting Protocol is \"connected\"\n  Sending updates every 0 seconds",
+    );
+}
+
+pub fn handle_show_sessions(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "% No connections open");
+}
+
+pub fn handle_show_ssh(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "Connection   Version  Mode  Encryption  Hmac         State           Username\n0            2.0      IN    aes256-ctr  hmac-sha2-25 Session started  admin",
+    );
+}
+
+pub fn handle_show_standby(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_storm_control(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_switch(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "Switch/Stack Mac Address : 00a3.d14f.2280 - Local Mac Address\nMac persistance wait time: Indefinite\n                                   H/W   Current\nSwitch#   Role    Mac Address     Priority Version  State \n------------------------------------------------------------\n*1       Active   00a3.d14f.2280     15     0102    Ready",
+    );
+}
+
+pub fn handle_show_vtp(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "VTP Version capable             : 1 to 3\nVTP version running             : 1\nVTP Domain Name                 :\nVTP Pruning Mode                : Disabled\nVTP Traps Generation            : Disabled\nDevice ID                       : 00a3.d14f.2280",
+    );
+}
+
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static EXEC_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -696,6 +878,58 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     .handler(handle_show_inventory),
                 keyword("environment", "Show environmental conditions")
                     .handler(handle_show_environment),
+                keyword("aaa", "Show AAA values")
+                    .handler(handle_show_aaa),
+                keyword("authentication", "Auth Manager information")
+                    .handler(handle_show_authentication),
+                keyword("cable-diagnostics", "Show Cable Diagnostics")
+                    .handler(handle_show_cable_diagnostics),
+                keyword("configuration", "Contents of Non-Volatile memory")
+                    .handler(handle_show_running_config),
+                keyword("controllers", "Interface controller status")
+                    .handler(handle_show_controllers),
+                keyword("crypto", "Encryption module")
+                    .handler(handle_show_crypto),
+                keyword("debugging", "State of each debugging option")
+                    .handler(handle_show_debugging),
+                keyword("dhcp", "DHCP status")
+                    .handler(handle_show_dhcp),
+                keyword("dot1x", "Dot1x information")
+                    .handler(handle_show_dot1x),
+                keyword("errdisable", "Error disable")
+                    .handler(handle_show_errdisable),
+                keyword("etherchannel", "EtherChannel information")
+                    .handler(handle_show_etherchannel),
+                keyword("hosts", "IP domain-name, lookup style")
+                    .handler(handle_show_hosts),
+                keyword("license", "Show license information")
+                    .handler(handle_show_license),
+                keyword("lldp", "LLDP information")
+                    .handler(handle_show_lldp),
+                keyword("module", "Module information")
+                    .handler(handle_show_module),
+                keyword("platform", "Platform specific commands")
+                    .handler(handle_show_platform),
+                keyword("policy-map", "Show Policy Map")
+                    .handler(handle_show_policy_map),
+                keyword("port-security", "Show secure port information")
+                    .handler(handle_show_port_security),
+                keyword("power", "Switch Power")
+                    .handler(handle_show_power),
+                keyword("protocols", "Active network routing protocols")
+                    .handler(handle_show_protocols),
+                keyword("sessions", "Telnet connections")
+                    .handler(handle_show_sessions),
+                keyword("ssh", "SSH server connections")
+                    .handler(handle_show_ssh),
+                keyword("standby", "HSRP information")
+                    .handler(handle_show_standby),
+                keyword("storm-control", "Storm control configuration")
+                    .handler(handle_show_storm_control),
+                keyword("switch", "Stack ring information")
+                    .handler(handle_show_switch),
+                keyword("vtp", "VTP information")
+                    .handler(handle_show_vtp),
             ]),
 
         // configure [priv only]
@@ -1110,5 +1344,31 @@ mod tests {
         let mut device = make_device();
         handle_disable(&mut device, "disable");
         assert_eq!(device.mode, CliMode::UserExec);
+    }
+
+    #[tokio::test]
+    async fn test_show_help_lists_many_commands() {
+        use ayclic::raw_transport::RawTransport;
+        use std::time::Duration;
+        let mut device = MockIosDevice::new("Switch1");
+        // Consume initial prompt
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Type "show " then "?" to trigger help listing
+        device.send(b"show ").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // echo
+
+        device.send(b"?").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+
+        // Help lines start with two spaces (e.g. "  version          System hardware...")
+        let command_count = output.lines().filter(|l| l.starts_with("  ")).count();
+        assert!(
+            command_count >= 40,
+            "show ? should list at least 40 commands, got {}: {:?}",
+            command_count,
+            output
+        );
     }
 }

@@ -3054,6 +3054,23 @@ mod tests {
         assert!(output.contains("Router1#"));
     }
 
+    #[tokio::test]
+    async fn test_show_clock_uses_real_time() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show clock").await;
+        // Should start with * (not NTP synced)
+        assert!(output.contains("*"), "Clock should have * prefix (not synced), got: {:?}", output);
+        // Should contain UTC
+        assert!(output.contains("UTC"), "Should show UTC timezone, got: {:?}", output);
+        // Should contain the current year
+        let current_year = "2026";
+        assert!(output.contains(current_year),
+            "Clock should show current year {}, got: {:?}", current_year, output);
+        // Should NOT contain the old hardcoded date
+        assert!(!output.contains("Jan 1 2024"),
+            "Clock should not show hardcoded date, got: {:?}", output);
+    }
+
     // --- show ip interface brief ---
 
     #[tokio::test]

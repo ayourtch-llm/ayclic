@@ -414,7 +414,7 @@ fn resolve_path_with_node<'a>(
 }
 
 fn visible_children_help(nodes: &[CommandNode], mode: &CliMode) -> Vec<(String, String)> {
-    nodes
+    let mut result: Vec<(String, String)> = nodes
         .iter()
         .filter(|n| n.mode_filter.matches(mode))
         .map(|n| {
@@ -424,7 +424,9 @@ fn visible_children_help(nodes: &[CommandNode], mode: &CliMode) -> Vec<(String, 
             };
             (name, n.help.clone())
         })
-        .collect()
+        .collect();
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

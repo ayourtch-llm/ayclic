@@ -4948,4 +4948,47 @@ mod tests {
             "Codes continuation lines should be indented 7 spaces: {:?}",
             output.lines().take(10).collect::<Vec<_>>());
     }
+
+    // --- Help output formatting (Issue 1: sort, Issue 2: padding) ---
+
+    /// Helper: send "show ?" and return the raw help output string.
+    async fn send_show_help(device: &mut MockIosDevice) -> String {
+        // Type "show " into the input buffer
+        device.send(b"show ").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        // Send "?" to trigger help
+        device.send(b"?").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        String::from_utf8_lossy(&data).to_string()
+    }
+
+    #[tokio::test]
+    async fn test_show_help_alphabetical_order() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_show_help(&mut device).await;
+        // Collect keywords, excluding "<cr>" (which always appears last on real IOS)
+        let keywords: Vec<&str> = output.lines()
+            .filter(|l| l.starts_with("  ") && l.len() > 3)
+            .filter_map(|l| l.trim().split_whitespace().next())
+            .filter(|k| *k != "<cr>")
+            .collect();
+        assert!(!keywords.is_empty(), "show ? should list keywords, got: {:?}", output);
+        let mut sorted = keywords.clone();
+        sorted.sort();
+        assert_eq!(keywords, sorted, "show ? keywords should be alphabetically sorted");
+    }
+
+    #[tokio::test]
+    async fn test_help_keyword_padding() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_show_help(&mut device).await;
+        // Find a line with "version" keyword
+        let version_line = output.lines().find(|l| l.contains("version")).unwrap();
+        // "  version" = 2 + 7 = 9 chars, padded to ~17, then 2 spaces, then description
+        // Total before description: 2 + 17 + 2 = 21 chars max
+        let desc_start = version_line.find("System").unwrap_or(99);
+        assert!(desc_start <= 21,
+            "Keyword padding should be ~17-19 chars, description starts at {}: {:?}",
+            desc_start, version_line);
+    }
 }

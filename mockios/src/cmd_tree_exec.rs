@@ -12,25 +12,25 @@ use crate::{CliMode, MockIosDevice, PendingInteractive};
 pub fn handle_show_version(d: &mut MockIosDevice, _input: &str) {
     let v = d.generate_show_version();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", v, p));
+    d.queue_output(&format!("{}\n{}", v, p));
 }
 
 pub fn handle_show_running_config(d: &mut MockIosDevice, _input: &str) {
     let config = d.state.generate_running_config();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", config, p));
+    d.queue_output(&format!("{}\n{}", config, p));
 }
 
 pub fn handle_show_startup_config(d: &mut MockIosDevice, _input: &str) {
     let config = d.state.generate_startup_config();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", config, p));
+    d.queue_output(&format!("{}\n{}", config, p));
 }
 
 pub fn handle_show_clock(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     let clock_str = format_clock_utc();
-    d.queue_output(&format!("\n*{}\n{}", clock_str, p));
+    d.queue_output(&format!("*{}\n{}", clock_str, p));
 }
 
 fn format_clock_utc() -> String {
@@ -91,7 +91,7 @@ pub fn handle_show_ip_route(d: &mut MockIosDevice, _input: &str) {
 
 pub fn handle_show_ip_incomplete(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\n% Incomplete command.\n{}", p));
+    d.queue_output(&format!("% Incomplete command.\n{}", p));
 }
 
 pub fn handle_show_install_summary(d: &mut MockIosDevice, _input: &str) {
@@ -137,7 +137,7 @@ pub fn handle_show_interfaces(d: &mut MockIosDevice, input: &str) {
                     )
                 }
             };
-            d.queue_output(&format!("\n{}{}", output_text, p));
+            d.queue_output(&format!("{}{}", output_text, p));
         }
         None => {
             // Show all interfaces
@@ -145,7 +145,7 @@ pub fn handle_show_interfaces(d: &mut MockIosDevice, input: &str) {
                 .map(|i| i.generate_show_interface())
                 .collect();
             let all = texts.join("\n");
-            d.queue_output(&format!("\n{}{}", all, p));
+            d.queue_output(&format!("{}{}", all, p));
         }
     }
 }
@@ -177,13 +177,13 @@ pub fn handle_show_access_lists(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_vlan_brief(d: &mut MockIosDevice, _input: &str) {
     let table = d.state.generate_show_vlan_brief();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", table, p));
+    d.queue_output(&format!("{}\n{}", table, p));
 }
 
 pub fn handle_show_interfaces_status(d: &mut MockIosDevice, _input: &str) {
     let table = d.state.generate_show_interfaces_status();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", table, p));
+    d.queue_output(&format!("{}\n{}", table, p));
 }
 
 pub fn handle_show_flash(d: &mut MockIosDevice, _input: &str) {
@@ -228,38 +228,38 @@ pub fn handle_configure_terminal(d: &mut MockIosDevice, _input: &str) {
 
 pub fn handle_configure_alone(d: &mut MockIosDevice, _input: &str) {
     d.pending_interactive = Some(PendingInteractive::ConfigureMethod);
-    d.queue_output("\nConfiguring from terminal, memory, or network [terminal]? ");
+    d.queue_output("Configuring from terminal, memory, or network [terminal]? ");
 }
 
 pub fn handle_enable(d: &mut MockIosDevice, _input: &str) {
     if matches!(d.mode, CliMode::PrivilegedExec) {
         // Already in priv exec — no-op (real IOS behavior)
         let p = d.prompt();
-        d.queue_output(&format!("\n{}", p));
+        d.queue_output(&format!("{}", p));
     } else if d.enable_password.is_some() {
         d.pending_interactive = Some(PendingInteractive::EnablePassword);
-        d.queue_output("\nPassword: ");
+        d.queue_output("Password: ");
     } else {
         d.mode = CliMode::PrivilegedExec;
         let p = d.prompt();
-        d.queue_output(&format!("\n{}", p));
+        d.queue_output(&format!("{}", p));
     }
 }
 
 pub fn handle_disable(d: &mut MockIosDevice, _input: &str) {
     d.mode = CliMode::UserExec;
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_terminal_length(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_terminal_width(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_copy(d: &mut MockIosDevice, input: &str) {
@@ -280,7 +280,7 @@ pub fn handle_dir(d: &mut MockIosDevice, input: &str) {
 
 pub fn handle_reload_alone(d: &mut MockIosDevice, _input: &str) {
     d.pending_interactive = Some(PendingInteractive::ReloadConfirm { _minutes: None });
-    d.queue_output("\nProceed with reload? [confirm]");
+    d.queue_output("Proceed with reload? [confirm]");
 }
 
 pub fn handle_reload_cancel(d: &mut MockIosDevice, _input: &str) {
@@ -293,12 +293,12 @@ pub fn handle_reload_cancel(d: &mut MockIosDevice, _input: &str) {
 
 pub fn handle_reload_in(d: &mut MockIosDevice, _input: &str) {
     d.pending_interactive = Some(PendingInteractive::ReloadSave);
-    d.queue_output("\nSystem configuration has been modified. Save? [yes/no]: ");
+    d.queue_output("System configuration has been modified. Save? [yes/no]: ");
 }
 
 pub fn handle_write_memory(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\nBuilding configuration...\n[OK]\n{}", p));
+    d.queue_output(&format!("Building configuration...\n[OK]\n{}", p));
 }
 
 pub fn handle_install_add(d: &mut MockIosDevice, input: &str) {
@@ -374,19 +374,19 @@ pub fn handle_ping(d: &mut MockIosDevice, input: &str) {
 
 pub fn handle_traceroute(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\nTracing route\n 1 1 msec\n{}", p));
+    d.queue_output(&format!("Tracing route\n 1 1 msec\n{}", p));
 }
 
 pub fn handle_exit(d: &mut MockIosDevice, _input: &str) {
     // In exec mode, exit closes the session
-    d.queue_output("\n");
+    d.queue_output("");
     d.mode = CliMode::Reloading; // signals connection close
 }
 
 pub fn handle_end_noop(d: &mut MockIosDevice, _input: &str) {
     // In exec mode, "end" is a no-op (real IOS ignores it silently).
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_help_command(d: &mut MockIosDevice, _input: &str) {
@@ -404,45 +404,45 @@ Two styles of help are provided:
    (e.g. 'show pr?'.)
 ";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", text, p));
+    d.queue_output(&format!("{}\n{}", text, p));
 }
 
 pub fn handle_clock_set(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_debug(d: &mut MockIosDevice, input: &str) {
     let feature = input.trim().strip_prefix("debug").map(|s| s.trim()).unwrap_or("unknown");
     let p = d.prompt();
-    d.queue_output(&format!("\n{} debugging is on\n{}", feature, p));
+    d.queue_output(&format!("{} debugging is on\n{}", feature, p));
 }
 
 pub fn handle_undebug_all(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\nAll possible debugging has been turned off\n{}", p));
+    d.queue_output(&format!("All possible debugging has been turned off\n{}", p));
 }
 
 pub fn handle_undebug(d: &mut MockIosDevice, input: &str) {
     let feature = input.trim().strip_prefix("undebug").map(|s| s.trim()).unwrap_or("unknown");
     let p = d.prompt();
-    d.queue_output(&format!("\n{} debugging is off\n{}", feature, p));
+    d.queue_output(&format!("{} debugging is off\n{}", feature, p));
 }
 
 pub fn handle_clear(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_ssh(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\n% Connection refused by remote host\n{}", p));
+    d.queue_output(&format!("% Connection refused by remote host\n{}", p));
 }
 
 pub fn handle_telnet(d: &mut MockIosDevice, input: &str) {
     let host = input.split_whitespace().nth(1).unwrap_or("unknown");
     let p = d.prompt();
-    d.queue_output(&format!("\nTrying {} ... \n% Connection refused by remote host\n{}", host, p));
+    d.queue_output(&format!("Trying {} ... \n% Connection refused by remote host\n{}", host, p));
 }
 
 pub fn handle_show_cdp_neighbors(d: &mut MockIosDevice, _input: &str) {
@@ -454,7 +454,7 @@ Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge
 Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID
 ";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_users(d: &mut MockIosDevice, _input: &str) {
@@ -463,12 +463,12 @@ pub fn handle_show_users(d: &mut MockIosDevice, _input: &str) {
 *  0 con 0                idle                 00:00:00
 ";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}{}", output, p));
+    d.queue_output(&format!("{}{}", output, p));
 }
 
 pub fn handle_show_ip_ospf(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("\n%% OSPF: No router process is configured\n{}", p));
+    d.queue_output(&format!("%% OSPF: No router process is configured\n{}", p));
 }
 
 pub fn handle_show_ip_protocols(d: &mut MockIosDevice, _input: &str) {
@@ -486,7 +486,7 @@ Routing Protocol is \"application\"
     Gateway         Distance      Last Update
   Distance: (default is 4)";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_processes_cpu(d: &mut MockIosDevice, _input: &str) {
@@ -494,7 +494,7 @@ pub fn handle_show_processes_cpu(d: &mut MockIosDevice, _input: &str) {
 CPU utilization for five seconds: 5%/0%; one minute: 5%; five minutes: 5%
  PID Runtime(ms)     Invoked      uSecs   5Sec   1Min   5Min TTY Process";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_logging(d: &mut MockIosDevice, _input: &str) {
@@ -512,19 +512,19 @@ Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,
 Log Buffer (4096 bytes):
 ";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}{}", output, p));
+    d.queue_output(&format!("{}{}", output, p));
 }
 
 pub fn handle_show_arp(d: &mut MockIosDevice, _input: &str) {
     let output = d.state.generate_show_arp();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_mac_address_table(d: &mut MockIosDevice, _input: &str) {
     let output = d.state.generate_show_mac_address_table();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_line(d: &mut MockIosDevice, _input: &str) {
@@ -566,7 +566,7 @@ Red Threshold    : 68 Degree Celsius\n\
 pub fn handle_show_spanning_tree(d: &mut MockIosDevice, _input: &str) {
     let output = d.state.generate_show_spanning_tree();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_ntp_status(d: &mut MockIosDevice, _input: &str) {
@@ -580,7 +580,7 @@ root dispersion is 0.00 msec, peer dispersion is 0.00 msec
 loopfilter state is 'FSET' (Drift set from file), drift is 0.000000000 s/s
 system poll interval is 8, never updated.";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_ntp_associations(d: &mut MockIosDevice, _input: &str) {
@@ -589,7 +589,7 @@ pub fn handle_show_ntp_associations(d: &mut MockIosDevice, _input: &str) {
 *~127.127.1.1     .LOCL.           0      -     16   377  0.000   0.000  0.000
  * sys.peer, # selected, + candidate, - outlyer, x falseticker, ~ configured";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_snmp(d: &mut MockIosDevice, _input: &str) {
@@ -615,7 +615,7 @@ Chassis: FCZ123456789
     0 Trap PDUs
 SNMP global trap: disabled";
     let p = d.prompt();
-    d.queue_output(&format!("\n{}\n{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_privilege(d: &mut MockIosDevice, _input: &str) {
@@ -625,7 +625,7 @@ pub fn handle_show_privilege(d: &mut MockIosDevice, _input: &str) {
         1
     };
     let p = d.prompt();
-    d.queue_output(&format!("\nCurrent privilege level is {}\n{}", level, p));
+    d.queue_output(&format!("Current privilege level is {}\n{}", level, p));
 }
 
 // ─── Stub handlers ────────────────────────────────────────────────────────────
@@ -634,9 +634,9 @@ pub fn handle_show_privilege(d: &mut MockIosDevice, _input: &str) {
 fn show_stub(d: &mut MockIosDevice, text: &str) {
     let p = d.prompt();
     if text.is_empty() {
-        d.queue_output(&format!("\n{}", p));
+        d.queue_output(&format!("{}", p));
     } else {
-        d.queue_output(&format!("\n{}\n{}", text, p));
+        d.queue_output(&format!("{}\n{}", text, p));
     }
 }
 

@@ -491,7 +491,7 @@ impl MockIosDevice {
         }
 
         if line.is_empty() {
-            self.queue_output(&format!("\n{}", self.prompt()));
+            self.queue_output(&format!("{}", self.prompt()));
             return;
         }
 
@@ -515,11 +515,11 @@ impl MockIosDevice {
                 if let Some(ref expected_user) = self.username {
                     if line == expected_user {
                         self.mode = CliMode::LoginPassword;
-                        self.queue_output("\nPassword: ");
+                        self.queue_output("Password: ");
                         return;
                     }
                 }
-                self.queue_output("\n% Login invalid\n\nUsername: ");
+                self.queue_output("% Login invalid\n\nUsername: ");
             }
             CliMode::LoginPassword => {
                 // Waiting for password
@@ -530,11 +530,11 @@ impl MockIosDevice {
                         } else {
                             self.mode = CliMode::PrivilegedExec;
                         }
-                        self.queue_output(&format!("\n{}", self.prompt()));
+                        self.queue_output(&format!("{}", self.prompt()));
                         return;
                     }
                 }
-                self.queue_output("\n% Login invalid\n\nUsername: ");
+                self.queue_output("% Login invalid\n\nUsername: ");
                 self.mode = CliMode::Login;
             }
             _ => unreachable!(),
@@ -550,14 +550,14 @@ impl MockIosDevice {
 
         // Check custom commands first (exact match or prefix)
         if let Some(response) = self.commands.get(&cmd).cloned() {
-            self.queue_output(&format!("\n{}\n{}", response, self.prompt()));
+            self.queue_output(&format!("{}\n{}", response, self.prompt()));
             return;
         }
         let custom_response = self.commands.iter()
             .find(|(k, _)| cmd.starts_with(k.as_str()))
             .map(|(_, v)| v.clone());
         if let Some(response) = custom_response {
-            self.queue_output(&format!("\n{}\n{}", response, self.prompt()));
+            self.queue_output(&format!("{}\n{}", response, self.prompt()));
             return;
         }
 
@@ -578,27 +578,27 @@ impl MockIosDevice {
             }
             ParseResult::Incomplete => {
                 let p = self.prompt();
-                self.queue_output(&format!("\n% Incomplete command.\n{}", p));
+                self.queue_output(&format!("% Incomplete command.\n{}", p));
             }
             ParseResult::InvalidInput { caret_pos } => {
                 let p = self.prompt();
                 let spaces = " ".repeat(caret_pos);
                 self.queue_output(&format!(
-                    "\n{}^\n% Invalid input detected at '^' marker.\n{}",
+                    "{}^\n% Invalid input detected at '^' marker.\n{}",
                     spaces, p
                 ));
             }
             ParseResult::Ambiguous { token, .. } => {
                 let p = self.prompt();
                 self.queue_output(&format!(
-                    "\n% Ambiguous command:  \"{}\"\n{}",
+                    "% Ambiguous command:  \"{}\"\n{}",
                     token,
                     p
                 ));
             }
             ParseResult::Empty => {
                 let p = self.prompt();
-                self.queue_output(&format!("\n{}", p));
+                self.queue_output(&format!("{}", p));
             }
         }
     }
@@ -650,7 +650,7 @@ impl MockIosDevice {
             "       + - replicated route, % - next hop override, p - overrides from PfR\n",
         );
 
-        let mut output = format!("\n{}\n", codes_header);
+        let mut output = format!("{}\n", codes_header);
 
         // Find default route for "Gateway of last resort"
         let default_route = self.state.static_routes.iter().find(|r| {
@@ -876,17 +876,17 @@ impl MockIosDevice {
             match result {
                 ParseResult::Execute { handler, .. } => handler(self, exec_cmd),
                 ParseResult::Incomplete => {
-                    self.queue_output("\n% Incomplete command.\n");
+                    self.queue_output("% Incomplete command.\n");
                 }
                 ParseResult::InvalidInput { caret_pos } => {
                     let spaces = " ".repeat(caret_pos);
                     self.queue_output(&format!(
-                        "\n{}^\n% Invalid input detected at '^' marker.\n",
+                        "{}^\n% Invalid input detected at '^' marker.\n",
                         spaces
                     ));
                 }
                 ParseResult::Ambiguous { token, .. } => {
-                    self.queue_output(&format!("\n% Ambiguous command: \"{}\"\n", token));
+                    self.queue_output(&format!("% Ambiguous command: \"{}\"\n", token));
                 }
                 ParseResult::Empty => {}
             }
@@ -906,27 +906,27 @@ impl MockIosDevice {
             }
             ParseResult::Incomplete => {
                 let p = self.prompt();
-                self.queue_output(&format!("\n% Incomplete command.\n{}", p));
+                self.queue_output(&format!("% Incomplete command.\n{}", p));
             }
             ParseResult::InvalidInput { caret_pos } => {
                 let p = self.prompt();
                 let spaces = " ".repeat(caret_pos);
                 self.queue_output(&format!(
-                    "\n{}^\n% Invalid input detected at '^' marker.\n{}",
+                    "{}^\n% Invalid input detected at '^' marker.\n{}",
                     spaces, p
                 ));
             }
             ParseResult::Ambiguous { token, .. } => {
                 let p = self.prompt();
                 self.queue_output(&format!(
-                    "\n% Ambiguous command:  \"{}\"\n{}",
+                    "% Ambiguous command:  \"{}\"\n{}",
                     token,
                     p
                 ));
             }
             ParseResult::Empty => {
                 let p = self.prompt();
-                self.queue_output(&format!("\n{}", p));
+                self.queue_output(&format!("{}", p));
             }
         }
     }
@@ -1005,7 +1005,7 @@ impl MockIosDevice {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
             self.queue_output(&format!(
-                "\n% Incomplete command.\n{}",
+                "% Incomplete command.\n{}",
                 self.prompt()
             ));
             return;
@@ -1016,7 +1016,7 @@ impl MockIosDevice {
 
         if dest == "null:" {
             // copy X null: — used for /done endpoint, discard silently
-            self.queue_output(&format!("\n{}", self.prompt()));
+            self.queue_output(&format!("{}", self.prompt()));
             return;
         }
 
@@ -1035,7 +1035,7 @@ impl MockIosDevice {
                 default_filename: default_dest,
             });
             self.queue_output(&format!(
-                "\nDestination filename [{}]?",
+                "Destination filename [{}]?",
                 filename
             ));
         } else if source.contains("running-config") || dest.contains("running-config") {
@@ -1057,10 +1057,10 @@ impl MockIosDevice {
                     dest,
                     default_filename: "running-config".to_string(),
                 });
-                self.queue_output("\nDestination filename [running-config]?");
+                self.queue_output("Destination filename [running-config]?");
             } else {
                 self.queue_output(&format!(
-                    "\n[OK]\n{}", self.prompt()
+                    "[OK]\n{}", self.prompt()
                 ));
             }
         } else {
@@ -1068,7 +1068,7 @@ impl MockIosDevice {
                 source,
                 dest,
             });
-            self.queue_output("\n[confirm]");
+            self.queue_output("[confirm]");
         }
     }
 
@@ -1082,7 +1082,7 @@ impl MockIosDevice {
             .unwrap_or(&"");
         let filename = filename.trim_start_matches("flash:");
         self.flash_files.remove(filename);
-        self.queue_output(&format!("\n{}", self.prompt()));
+        self.queue_output(&format!("{}", self.prompt()));
     }
 
     pub fn handle_verify_md5(&mut self, line: &str) {
@@ -1094,12 +1094,12 @@ impl MockIosDevice {
         if let Some(content) = self.flash_files.get(filename) {
             let md5 = compute_md5(content);
             self.queue_output(&format!(
-                "\nverify /md5 ({}) = {}\n{}",
+                "verify /md5 ({}) = {}\n{}",
                 flash_path, md5, self.prompt()
             ));
         } else {
             self.queue_output(&format!(
-                "\n%Error verifying flash:{}\n{}",
+                "%Error verifying flash:{}\n{}",
                 filename,
                 self.prompt()
             ));
@@ -1108,7 +1108,7 @@ impl MockIosDevice {
 
 
     pub fn handle_dir_command(&mut self, _line: &str) {
-        let mut output = String::from("\nDirectory of flash:/\n\n");
+        let mut output = String::from("Directory of flash:/\n\n");
         let mut used: u64 = 0;
         for (name, content) in &self.flash_files {
             output.push_str(&format!(
@@ -1138,7 +1138,7 @@ impl MockIosDevice {
             self.boot_variable.clone()
         };
         let output = format!(
-            "\nBOOT variable = {}\nConfig file = \nPrivate Config file = \nEnable Break = no\nManual Boot = no\n{}",
+            "BOOT variable = {}\nConfig file = \nPrivate Config file = \nEnable Break = no\nManual Boot = no\n{}",
             boot_var, self.prompt()
         );
         self.queue_output(&output);
@@ -1154,7 +1154,7 @@ impl MockIosDevice {
                     InstallMode::Bundle => "BUNDLE",
                 };
                 let mut output = format!(
-                    "\n[ {} ] Installed Package(s) Information:\n",
+                    "[ {} ] Installed Package(s) Information:\n",
                     mode_str
                 );
                 if state.packages.is_empty() {
@@ -1177,7 +1177,7 @@ impl MockIosDevice {
             }
             None => {
                 self.queue_output(&format!(
-                    "\n% Install mode is not supported on this platform\n{}",
+                    "% Install mode is not supported on this platform\n{}",
                     self.prompt()
                 ));
             }
@@ -1210,8 +1210,7 @@ impl MockIosDevice {
         ];
 
         let output = format!(
-            r#"
-install_add: START
+            r#"install_add: START
 install_add: Adding PACKAGE
 --- Starting initial file syncing ---
 [1]: Copying flash:{image} from switch 1 to switch 1
@@ -1248,14 +1247,14 @@ install_add: SUCCESS
     pub fn handle_install_activate(&mut self) {
         if self.state.install_state.is_none() {
             self.queue_output(&format!(
-                "\n% Install mode is not supported\n{}",
+                "% Install mode is not supported\n{}",
                 self.prompt()
             ));
             return;
         }
         self.pending_interactive = Some(PendingInteractive::InstallActivateConfirm);
         self.queue_output(
-            "\nThis operation may require a reload of the system.\nDo you want to proceed? [y/n]"
+            "This operation may require a reload of the system.\nDo you want to proceed? [y/n]"
         );
     }
 
@@ -1281,17 +1280,17 @@ install_add: SUCCESS
             }
             if had_activated {
                 self.queue_output(&format!(
-                    "\ninstall_commit: START\ninstall_commit: SUCCESS\n{}",
+                    "install_commit: START\ninstall_commit: SUCCESS\n{}",
                     self.prompt()
                 ));
             } else {
                 self.queue_output(&format!(
-                    "\nNo activate operation pending commit\n{}",
+                    "No activate operation pending commit\n{}",
                     self.prompt()
                 ));
             }
         } else {
-            self.queue_output(&format!("\n{}", self.prompt()));
+            self.queue_output(&format!("{}", self.prompt()));
         }
     }
 
@@ -1304,11 +1303,11 @@ install_add: SUCCESS
                 state.packages.retain(|p| p.state != PackageState::Inactive);
             }
             self.queue_output(&format!(
-                "\ninstall_remove: START\ninstall_remove: SUCCESS\n{}",
+                "install_remove: START\ninstall_remove: SUCCESS\n{}",
                 self.prompt()
             ));
         } else {
-            self.queue_output(&format!("\n{}", self.prompt()));
+            self.queue_output(&format!("{}", self.prompt()));
         }
     }
 
@@ -1317,7 +1316,7 @@ install_add: SUCCESS
             PendingInteractive::CopyConfirm { source: _, dest: _ } => {
                 // Any response confirms
                 self.queue_output(&format!(
-                    "\n[OK - 0 bytes]\n\n{}", self.prompt()
+                    "[OK - 0 bytes]\n\n{}", self.prompt()
                 ));
             }
             PendingInteractive::CopyFilename {
@@ -1351,14 +1350,14 @@ install_add: SUCCESS
                     }
 
                     self.queue_output(&format!(
-                        "\nAccessing {}...\n[OK - 100 bytes]\n\n{}",
+                        "Accessing {}...\n[OK - 100 bytes]\n\n{}",
                         source,
                         self.prompt()
                     ));
                 } else {
                     // copy flash: running-config
                     self.queue_output(&format!(
-                        "\n[OK]\n\n{}",
+                        "[OK]\n\n{}",
                         self.prompt()
                     ));
                 }
@@ -1367,11 +1366,11 @@ install_add: SUCCESS
                 if let Some(ref expected) = self.enable_password {
                     if line == expected {
                         self.mode = CliMode::PrivilegedExec;
-                        self.queue_output(&format!("\n{}", self.prompt()));
+                        self.queue_output(&format!("{}", self.prompt()));
                         return;
                     }
                 }
-                self.queue_output(&format!("\n% Access denied\n{}", self.prompt()));
+                self.queue_output(&format!("% Access denied\n{}", self.prompt()));
             }
             PendingInteractive::InstallActivateConfirm => {
                 if line == "y" || line == "Y" || line == "yes" {
@@ -1390,25 +1389,25 @@ install_add: SUCCESS
                             }
                         }
                     }
-                    self.queue_output("\ninstall_activate: Activating PACKAGE\ninstall_activate: SUCCESS\n\nSystem is reloading...\n");
+                    self.queue_output("install_activate: Activating PACKAGE\ninstall_activate: SUCCESS\n\nSystem is reloading...\n");
                     self.mode = CliMode::Reloading;
                 } else {
                     self.queue_output(&format!(
-                        "\nInstall activate aborted\n{}",
+                        "Install activate aborted\n{}",
                         self.prompt()
                     ));
                 }
             }
             PendingInteractive::ReloadConfirm { .. } => {
                 // Enter reloading state — subsequent send/receive will error
-                self.queue_output("\n\nSystem is reloading...\n");
+                self.queue_output("System is reloading...\n");
                 self.mode = CliMode::Reloading;
             }
             PendingInteractive::ReloadSave => {
                 // yes/no to save before reload
                 self.pending_interactive =
                     Some(PendingInteractive::ReloadConfirm { _minutes: None });
-                self.queue_output("\nProceed with reload? [confirm]");
+                self.queue_output("Proceed with reload? [confirm]");
             }
             PendingInteractive::ConfigureMethod => {
                 // Empty or "terminal" → enter config mode
@@ -1416,12 +1415,12 @@ install_add: SUCCESS
                 if choice.is_empty() || choice == "terminal" {
                     self.mode = CliMode::Config;
                     self.queue_output(&format!(
-                        "\nEnter configuration commands, one per line.  End with CNTL/Z.\n{}",
+                        "Enter configuration commands, one per line.  End with CNTL/Z.\n{}",
                         self.prompt()
                     ));
                 } else {
                     self.queue_output(&format!(
-                        "\n% Invalid input — use 'terminal', 'memory', or 'network'\n{}",
+                        "% Invalid input — use 'terminal', 'memory', or 'network'\n{}",
                         self.prompt()
                     ));
                 }
@@ -1628,7 +1627,7 @@ Configuration register is {config_reg}",
             self.initial_sent = true;
             if !self.state.banner_motd.is_empty() {
                 let banner = self.state.banner_motd.clone();
-                self.queue_output(&format!("\n{}\n", banner));
+                self.queue_output(&format!("{}\n", banner));
             }
             self.queue_output(&format!("{}", self.prompt()));
         }
@@ -1954,7 +1953,7 @@ impl RawTransport for MockIosDevice {
                     self.cursor_pos = 0;
                     self.history_index = None;
                     let p = self.prompt();
-                    self.queue_output(&format!("\n{}", p));
+                    self.queue_output(&format!("{}", p));
                 }
                 0x15 => {
                     // Ctrl+U — erase from start to cursor
@@ -2024,7 +2023,7 @@ impl RawTransport for MockIosDevice {
                             self.cursor_pos = 0;
                             self.history_index = None;
                             let p = self.prompt();
-                            self.queue_output(&format!("\n{}", p));
+                            self.queue_output(&format!("{}", p));
                         }
                     }
                 }
@@ -2061,7 +2060,7 @@ impl RawTransport for MockIosDevice {
             self.initial_sent = true;
             if !self.state.banner_motd.is_empty() {
                 let banner = self.state.banner_motd.clone();
-                self.queue_output(&format!("\n{}\n", banner));
+                self.queue_output(&format!("{}\n", banner));
             }
             match &self.mode {
                 CliMode::Login => {

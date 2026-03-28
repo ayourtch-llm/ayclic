@@ -45,7 +45,7 @@ pub fn handle_hostname(d: &mut MockIosDevice, input: &str) {
     }
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 /// Normalize IOS interface names, e.g. "loopback 0" -> "Loopback0",
@@ -114,28 +114,28 @@ pub fn handle_interface(d: &mut MockIosDevice, input: &str) {
     d.current_interface = Some(iface_name.clone());
     d.running_config.push(format!("interface {}", iface_name));
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_router_ospf(d: &mut MockIosDevice, input: &str) {
     d.mode = CliMode::ConfigSub("config-router".to_string());
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_router_bgp(d: &mut MockIosDevice, input: &str) {
     d.mode = CliMode::ConfigSub("config-router".to_string());
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_router_eigrp(d: &mut MockIosDevice, input: &str) {
     d.mode = CliMode::ConfigSub("config-router".to_string());
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_ip_route(d: &mut MockIosDevice, input: &str) {
@@ -174,7 +174,7 @@ pub fn handle_ip_route(d: &mut MockIosDevice, input: &str) {
     }
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_ip_address(d: &mut MockIosDevice, input: &str) {
@@ -205,19 +205,19 @@ pub fn handle_ip_address(d: &mut MockIosDevice, input: &str) {
     // Store as indented sub-config line
     d.running_config.push(format!(" {}", input.trim()));
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_ip_domain_name(d: &mut MockIosDevice, input: &str) {
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_ip_name_server(d: &mut MockIosDevice, input: &str) {
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 
@@ -225,14 +225,14 @@ pub fn handle_line_vty(d: &mut MockIosDevice, input: &str) {
     d.mode = CliMode::ConfigSub("config-line".to_string());
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_line_console(d: &mut MockIosDevice, input: &str) {
     d.mode = CliMode::ConfigSub("config-line".to_string());
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_enable_secret(d: &mut MockIosDevice, input: &str) {
@@ -243,7 +243,7 @@ pub fn handle_enable_secret(d: &mut MockIosDevice, input: &str) {
     }
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_enable_password(d: &mut MockIosDevice, input: &str) {
@@ -253,20 +253,20 @@ pub fn handle_enable_password(d: &mut MockIosDevice, input: &str) {
     }
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_rest_of_line(d: &mut MockIosDevice, input: &str) {
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_banner_motd(d: &mut MockIosDevice, input: &str) {
     if input.trim().starts_with("no") {
         d.state.banner_motd = String::new();
         let p = d.prompt();
-        d.queue_output(&format!("\n{}", p));
+        d.queue_output(&format!("{}", p));
         return;
     }
     // Parse: "banner motd <delim><text><delim>"
@@ -286,7 +286,7 @@ pub fn handle_banner_motd(d: &mut MockIosDevice, input: &str) {
     }
 
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_shutdown(d: &mut MockIosDevice, input: &str) {
@@ -297,7 +297,7 @@ pub fn handle_shutdown(d: &mut MockIosDevice, input: &str) {
         }
     }
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_description(d: &mut MockIosDevice, input: &str) {
@@ -315,7 +315,7 @@ pub fn handle_description(d: &mut MockIosDevice, input: &str) {
         }
     }
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_switchport_mode(d: &mut MockIosDevice, input: &str) {
@@ -335,7 +335,7 @@ pub fn handle_switchport_mode(d: &mut MockIosDevice, input: &str) {
         }
     }
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_switchport_access_vlan(d: &mut MockIosDevice, input: &str) {
@@ -358,19 +358,19 @@ pub fn handle_switchport_access_vlan(d: &mut MockIosDevice, input: &str) {
         }
     }
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_spanning_tree(d: &mut MockIosDevice, input: &str) {
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_vlan(d: &mut MockIosDevice, input: &str) {
     d.running_config.push(input.to_string());
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_config_exit(d: &mut MockIosDevice, _input: &str) {
@@ -380,13 +380,13 @@ pub fn handle_config_exit(d: &mut MockIosDevice, _input: &str) {
         _ => {}
     }
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_config_end(d: &mut MockIosDevice, _input: &str) {
     d.mode = CliMode::PrivilegedExec;
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
@@ -399,7 +399,7 @@ pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
 
     if parts.len() <= list_num_idx {
         let p = d.prompt();
-        d.queue_output(&format!("\n% Incomplete command.\n{}", p));
+        d.queue_output(&format!("% Incomplete command.\n{}", p));
         return;
     }
 
@@ -410,13 +410,13 @@ pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
         // Remove the entire ACL by this number
         d.state.access_lists.retain(|a| a.name != list_num_owned);
         let p = d.prompt();
-        d.queue_output(&format!("\n{}", p));
+        d.queue_output(&format!("{}", p));
         return;
     }
 
     if parts.len() < action_idx + 1 {
         let p = d.prompt();
-        d.queue_output(&format!("\n% Incomplete command.\n{}", p));
+        d.queue_output(&format!("% Incomplete command.\n{}", p));
         return;
     }
 
@@ -447,7 +447,7 @@ pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
     }
 
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 /// Generic handler for config-router and config-line commands that stores
@@ -455,7 +455,7 @@ pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
 pub fn handle_config_sub_rest(d: &mut MockIosDevice, input: &str) {
     d.state.unmodeled_config.push(format!(" {}", input.trim()));
     let p = d.prompt();
-    d.queue_output(&format!("\n{}", p));
+    d.queue_output(&format!("{}", p));
 }
 
 // ─── Tree helpers ─────────────────────────────────────────────────────────────

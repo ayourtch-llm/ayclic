@@ -826,13 +826,52 @@ fn build_config_if_tree() -> Vec<CommandNode> {
                                     .handler(handle_switchport_access_vlan),
                             ]),
                     ]),
+                keyword("nonegotiate", "Device will not engage in negotiation protocol on this interface")
+                    .handler(handle_config_sub_rest as CmdHandler),
+                keyword("port-security", "Security related command")
+                    .handler(handle_config_sub_rest as CmdHandler)
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "Port security parameters")
+                            .handler(handle_config_sub_rest),
+                    ]),
+                keyword("trunk", "Set trunking characteristics of the interface")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "Trunk parameters")
+                            .handler(handle_config_sub_rest),
+                    ]),
             ]),
 
-        // spanning-tree <rest>
+        // spanning-tree portfast|bpduguard|bpdufilter|link-type|guard|<rest>
         keyword("spanning-tree", "Spanning Tree Subsystem")
             .children(vec![
+                keyword("portfast", "Enable portfast on this interface")
+                    .handler(handle_config_sub_rest as CmdHandler)
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "portfast options")
+                            .handler(handle_config_sub_rest),
+                    ]),
+                keyword("bpduguard", "Don't accept BPDUs on this interface")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "bpduguard options")
+                            .handler(handle_config_sub_rest),
+                    ]),
+                keyword("bpdufilter", "Don't send or receive BPDUs on this interface")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "bpdufilter options")
+                            .handler(handle_config_sub_rest),
+                    ]),
+                keyword("link-type", "Specify a link type for spanning tree")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "link type options")
+                            .handler(handle_config_sub_rest),
+                    ]),
+                keyword("guard", "Change an interface's spanning tree guard mode")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "guard options")
+                            .handler(handle_config_sub_rest),
+                    ]),
                 param("<rest>", ParamType::RestOfLine, "Spanning tree parameters")
-                    .handler(handle_spanning_tree),
+                    .handler(handle_config_sub_rest),
             ]),
 
         // speed <rest>
@@ -846,6 +885,127 @@ fn build_config_if_tree() -> Vec<CommandNode> {
         keyword("duplex", "Configure duplex operation")
             .children(vec![
                 param("<rest>", ParamType::RestOfLine, "Duplex mode")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // storm-control <rest>
+        keyword("storm-control", "storm configuration")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Storm control parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // channel-group <rest>
+        keyword("channel-group", "EtherChannel configuration")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "EtherChannel parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // power <rest>
+        keyword("power", "Power configuration")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Power parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // port-security <rest>
+        keyword("port-security", "Port security")
+            .handler(handle_config_sub_rest as CmdHandler)
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Port security parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // keepalive (no args needed)
+        keyword("keepalive", "Enable keepalive")
+            .handler(handle_config_sub_rest as CmdHandler)
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Keepalive options")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // load-interval <rest>
+        keyword("load-interval", "Specify interval for load calculation")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Load interval value")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // udld <rest>
+        keyword("udld", "UDLD configuration")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "UDLD parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // logging <rest>
+        keyword("logging", "Configure logging for interface")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Logging parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // snmp <rest>
+        keyword("snmp", "Modify SNMP interface parameters")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "SNMP parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // lldp <rest>
+        keyword("lldp", "LLDP interface subcommands")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "LLDP parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // dot1x <rest>
+        keyword("dot1x", "Dot1x configuration")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Dot1x parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // mtu <rest>
+        keyword("mtu", "Set the interface Maximum Transmission Unit")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "MTU value")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // service-policy <rest>
+        keyword("service-policy", "Configure CPL Service Policy")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Service policy parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // carrier-delay <rest>
+        keyword("carrier-delay", "Specify delay for interface transitions")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Carrier delay value")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // flowcontrol <rest>
+        keyword("flowcontrol", "IEEE 802.3x Flow Control")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Flow control parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // mdix <rest>
+        keyword("mdix", "Set MDIX mode")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "MDIX parameters")
+                    .handler(handle_config_sub_rest),
+            ]),
+
+        // negotiation <rest>
+        keyword("negotiation", "Select autonegotiation mode")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Negotiation parameters")
                     .handler(handle_config_sub_rest),
             ]),
     ];

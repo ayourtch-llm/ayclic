@@ -521,16 +521,9 @@ pub fn handle_show_arp(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_mac_address_table(d: &mut MockIosDevice, _input: &str) {
-    let output = "\
-          Mac Address Table
--------------------------------------------
-
-Vlan    Mac Address       Type        Ports
-----    -----------       --------    -----
-Total Mac Addresses for this criterion: 0
-";
+    let output = d.state.generate_show_mac_address_table();
     let p = d.prompt();
-    d.queue_output(&format!("\n{}{}", output, p));
+    d.queue_output(&format!("\n{}\n{}", output, p));
 }
 
 pub fn handle_show_line(d: &mut MockIosDevice, _input: &str) {

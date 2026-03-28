@@ -839,6 +839,53 @@ impl DeviceState {
 
         lines.join("\n")
     }
+
+    pub fn generate_show_mac_address_table(&self) -> String {
+        let header = "          Mac Address Table\n\
+            -------------------------------------------\n\
+            \n\
+            Vlan    Mac Address       Type        Ports\n\
+            ----    -----------       --------    -----";
+
+        let mut entries: Vec<String> = Vec::new();
+
+        for iface in &self.interfaces {
+            if !iface.admin_up {
+                continue;
+            }
+
+            let (vlan, port_name) = if iface.name.starts_with("Vlan") {
+                // SVI: extract VLAN number from name like "Vlan1"
+                let vlan_num: u16 = iface.name
+                    .strip_prefix("Vlan")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                let short = short_interface_name(&iface.name);
+                (vlan_num, short)
+            } else {
+                // Physical interface: use access VLAN (default 1)
+                let vlan_num = iface.vlan.unwrap_or(1);
+                let short = short_interface_name(&iface.name);
+                (vlan_num, short)
+            };
+
+            let mac = &iface.mac_address;
+            entries.push(format!(
+                "{:>4}    {}    {:<12}{}",
+                vlan, mac, "STATIC", port_name
+            ));
+        }
+
+        let count = entries.len();
+        let mut output = header.to_string();
+        if !entries.is_empty() {
+            output.push('\n');
+            output.push_str(&entries.join("\n"));
+        }
+        output.push('\n');
+        output.push_str(&format!("Total Mac Addresses for this criterion: {}", count));
+        output
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1187,5 +1234,51 @@ mod tests {
             "Two spaces between Duplex and Speed: {:?}", gi5_line);
         assert_eq!(&gi5_line[61..66], " auto",
             "Speed should be right-aligned in 5-char field: {:?}", gi5_line);
+    }
+
+    #[test]
+    fn test_generate_show_mac_address_table() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_mac_address_table();
+        assert!(output.contains("Mac Address Table"), "Should have header");
+        assert!(output.contains("Vlan    Mac Address"), "Should have column headers");
+        assert!(output.contains("Total Mac Addresses"), "Should have footer");
+        // Should have entries for interfaces that are up
+        assert!(output.contains("STATIC"), "Should have static entries for own MACs");
+    }
+
+    #[test]
+    fn test_show_mac_address_table_vlan_and_ports() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_mac_address_table();
+
+        // Vlan1 SVI should appear as Vl1 in Ports column
+        assert!(output.contains("Vl1"), "Should have Vl1 for the SVI");
+
+        // Physical interfaces that are admin_up (Gi1/0/1 through Gi1/0/4) should appear as Gi shortnames
+        assert!(output.contains("Gi1/0/1"), "Should have Gi1/0/1 entry");
+        assert!(output.contains("Gi1/0/4"), "Should have Gi1/0/4 entry");
+
+        // Shutdown interfaces should NOT appear
+        assert!(!output.contains("Gi1/0/5"), "Gi1/0/5 is shutdown, should not appear");
+        assert!(!output.contains("Te1/0/1"), "Te1/0/1 is shutdown, should not appear");
+
+        // VLAN column for physical interfaces should be 1
+        // Find a Gi1/0/1 line and check it starts with "   1"
+        let gi1_line = output.lines().find(|l| l.contains("Gi1/0/1")).unwrap();
+        assert!(gi1_line.trim_start().starts_with("1 "), "VLAN should be 1 for Gi1/0/1: {:?}", gi1_line);
+    }
+
+    #[test]
+    fn test_show_mac_address_table_count() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_mac_address_table();
+
+        // admin_up interfaces: Vlan1 (1) + Gi1/0/1..4 (4) = 5 total
+        assert!(
+            output.contains("Total Mac Addresses for this criterion: 5"),
+            "Should count 5 admin-up interfaces, got output: {:?}",
+            output
+        );
     }
 }

@@ -5019,4 +5019,205 @@ mod tests {
         assert!(output.contains("switchport access vlan 100"),
             "Running config should show switchport access vlan 100");
     }
+
+    // ─── config-if realism: new stub commands ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_config_if_accepts_spanning_tree_portfast() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "spanning-tree portfast").await;
+        assert!(!output.contains("Invalid"), "spanning-tree portfast should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_spanning_tree_bpduguard() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "spanning-tree bpduguard enable").await;
+        assert!(!output.contains("Invalid"), "spanning-tree bpduguard should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_storm_control() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "storm-control broadcast level 10").await;
+        assert!(!output.contains("Invalid"), "storm-control should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_channel_group() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "channel-group 1 mode active").await;
+        assert!(!output.contains("Invalid"), "channel-group should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_power() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "power inline auto").await;
+        assert!(!output.contains("Invalid"), "power should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_port_security() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "port-security maximum 2").await;
+        assert!(!output.contains("Invalid"), "port-security should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_keepalive() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "keepalive").await;
+        assert!(!output.contains("Invalid"), "keepalive should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_load_interval() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "load-interval 30").await;
+        assert!(!output.contains("Invalid"), "load-interval should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_udld() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "udld port").await;
+        assert!(!output.contains("Invalid"), "udld should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_logging() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "logging event link-status").await;
+        assert!(!output.contains("Invalid"), "logging should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_snmp() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "snmp trap link-status").await;
+        assert!(!output.contains("Invalid"), "snmp should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_lldp() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "lldp transmit").await;
+        assert!(!output.contains("Invalid"), "lldp should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_dot1x() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "dot1x pae authenticator").await;
+        assert!(!output.contains("Invalid"), "dot1x should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_mtu() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "mtu 1500").await;
+        assert!(!output.contains("Invalid"), "mtu should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_service_policy() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "service-policy input MY_POLICY").await;
+        assert!(!output.contains("Invalid"), "service-policy should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_carrier_delay() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "carrier-delay 2").await;
+        assert!(!output.contains("Invalid"), "carrier-delay should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_flowcontrol() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "flowcontrol receive on").await;
+        assert!(!output.contains("Invalid"), "flowcontrol should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_mdix() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "mdix auto").await;
+        assert!(!output.contains("Invalid"), "mdix should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_negotiation() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "negotiation auto").await;
+        assert!(!output.contains("Invalid"), "negotiation should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_switchport_nonegotiate() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "switchport nonegotiate").await;
+        assert!(!output.contains("Invalid"), "switchport nonegotiate should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_accepts_switchport_port_security() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "switchport port-security").await;
+        assert!(!output.contains("Invalid"), "switchport port-security should be accepted: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_config_if_has_many_commands() {
+        let mut device = setup_device("Switch1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let output = send_cmd(&mut device, "?").await;
+        let cmd_count = output.lines().filter(|l| l.starts_with("  ")).count();
+        assert!(cmd_count >= 25, "config-if should have at least 25 commands, got {}", cmd_count);
+    }
 }

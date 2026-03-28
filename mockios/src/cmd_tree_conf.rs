@@ -48,7 +48,8 @@ pub fn handle_hostname(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("\n{}", p));
 }
 
-/// Normalize IOS interface names, e.g. "loopback 0" → "Loopback0", "vlan 100" → "Vlan100".
+/// Normalize IOS interface names, e.g. "loopback 0" -> "Loopback0",
+/// "g1/0/9" -> "GigabitEthernet1/0/9", "vlan 100" -> "Vlan100".
 pub fn normalize_interface_name(input: &str) -> String {
     let trimmed = input.trim();
     let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
@@ -58,36 +59,42 @@ pub fn normalize_interface_name(input: &str) -> String {
         _ => return trimmed.to_string(),
     };
 
-    let type_lower = type_part.to_lowercase();
-    let (canonical_type, separator) = match type_lower.as_str() {
-        t if t.starts_with("lo") => ("Loopback", ""),
-        t if t.starts_with("vl") => ("Vlan", ""),
-        t if t.starts_with("gi") => ("GigabitEthernet", ""),
-        t if t.starts_with("fa") => ("FastEthernet", ""),
-        t if t.starts_with("te") => ("TenGigabitEthernet", ""),
-        t if t.starts_with("hu") => ("HundredGigE", ""),
-        t if t.starts_with("mg") => ("Mgmt", ""),
-        t if t.starts_with("se") => ("Serial", ""),
-        t if t.starts_with("tu") => ("Tunnel", ""),
-        _ => (type_part, " "),
+    // Split type_part at the boundary where letters end and digits/slashes begin.
+    // E.g. "gi1/0/9" -> ("gi", "1/0/9"), "GigabitEthernet1/0/1" -> ("GigabitEthernet", "1/0/1")
+    let alpha_end = type_part.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(type_part.len());
+    let alpha_prefix = &type_part[..alpha_end];
+    let embedded_num = &type_part[alpha_end..];
+
+    // Determine the effective number part
+    let effective_num = if !embedded_num.is_empty() && !num_part.is_empty() {
+        format!("{} {}", embedded_num, num_part)
+    } else if !embedded_num.is_empty() {
+        embedded_num.to_string()
+    } else {
+        num_part.clone()
     };
 
-    // If the type_part itself already contained a number suffix (e.g. "GigabitEthernet0/0"),
-    // use it as-is and ignore num_part.
-    let type_has_trailing_digit = type_part.chars().last().map_or(false, |c| c.is_ascii_digit() || c == '/');
-    if type_has_trailing_digit && num_part.is_empty() {
-        return format!("{}", type_part);
-    }
-    if type_has_trailing_digit {
-        // Already fully specified like "GigabitEthernet0/0" with extra tokens — unlikely but safe
-        return format!("{} {}", type_part, num_part);
-    }
+    let alpha_lower = alpha_prefix.to_lowercase();
+    let canonical_type = match alpha_lower.as_str() {
+        t if t.starts_with("gi") || t == "g" => "GigabitEthernet",
+        t if t.starts_with("fa") || t == "f" => "FastEthernet",
+        t if t.starts_with("te") => "TenGigabitEthernet",
+        t if t.starts_with("hu") => "HundredGigE",
+        t if t.starts_with("lo") => "Loopback",
+        t if t.starts_with("vl") || t == "v" => "Vlan",
+        t if t.starts_with("mg") => "Mgmt",
+        t if t.starts_with("se") => "Serial",
+        t if t.starts_with("tu") => "Tunnel",
+        _ => {
+            if effective_num.is_empty() {
+                return trimmed.to_string();
+            } else {
+                return format!("{}{}", type_part, if num_part.is_empty() { "".to_string() } else { format!(" {}", num_part) });
+            }
+        }
+    };
 
-    if num_part.is_empty() {
-        canonical_type.to_string()
-    } else {
-        format!("{}{}{}", canonical_type, separator, num_part)
-    }
+    format!("{}{}", canonical_type, effective_num)
 }
 
 pub fn handle_interface(d: &mut MockIosDevice, input: &str) {
@@ -1361,5 +1368,56 @@ mod tests {
         let mode = CliMode::ConfigSub("config-if".to_string());
         let result = parse("spanning-tree portfast", tree, &mode);
         assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }));
+    }
+
+    #[test]
+    fn test_normalize_concatenated_gi() {
+        assert_eq!(normalize_interface_name("g1/0/9"), "GigabitEthernet1/0/9");
+    }
+
+    #[test]
+    fn test_normalize_concatenated_gi_two_letter() {
+        assert_eq!(normalize_interface_name("gi1/0/9"), "GigabitEthernet1/0/9");
+    }
+
+    #[test]
+    fn test_normalize_concatenated_te() {
+        assert_eq!(normalize_interface_name("te1/0/1"), "TenGigabitEthernet1/0/1");
+    }
+
+    #[test]
+    fn test_normalize_concatenated_fa() {
+        assert_eq!(normalize_interface_name("fa0/1"), "FastEthernet0/1");
+    }
+
+    #[test]
+    fn test_normalize_concatenated_lo() {
+        assert_eq!(normalize_interface_name("lo0"), "Loopback0");
+    }
+
+    #[test]
+    fn test_normalize_concatenated_vl() {
+        assert_eq!(normalize_interface_name("vl1"), "Vlan1");
+    }
+
+    #[test]
+    fn test_normalize_full_concatenated_name_passthrough() {
+        assert_eq!(normalize_interface_name("GigabitEthernet1/0/9"), "GigabitEthernet1/0/9");
+        assert_eq!(normalize_interface_name("Vlan1"), "Vlan1");
+        assert_eq!(normalize_interface_name("Loopback0"), "Loopback0");
+        assert_eq!(normalize_interface_name("TenGigabitEthernet1/0/1"), "TenGigabitEthernet1/0/1");
+    }
+
+    #[test]
+    fn test_normalize_space_separated_still_works() {
+        assert_eq!(normalize_interface_name("loopback 0"), "Loopback0");
+        assert_eq!(normalize_interface_name("vlan 100"), "Vlan100");
+        assert_eq!(normalize_interface_name("gi 1/0/9"), "GigabitEthernet1/0/9");
+    }
+
+    #[test]
+    fn test_normalize_case_insensitive() {
+        assert_eq!(normalize_interface_name("GIGABITETHERNET1/0/1"), "GigabitEthernet1/0/1");
+        assert_eq!(normalize_interface_name("Gi1/0/1"), "GigabitEthernet1/0/1");
     }
 }

@@ -109,7 +109,8 @@ pub fn handle_show_interfaces(d: &mut MockIosDevice, input: &str) {
     let iface_name: Option<String> = if tokens.len() > 2 {
         // The rest of the line after "show interfaces " is the interface name.
         // Handle abbreviated or full form — collect everything from index 2.
-        Some(tokens[2..].join(" "))
+        let raw = tokens[2..].join(" ");
+        Some(crate::cmd_tree_conf::normalize_interface_name(&raw))
     } else {
         None
     };

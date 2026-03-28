@@ -151,7 +151,7 @@ pub fn handle_show_interfaces(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_show_access_lists(d: &mut MockIosDevice, _input: &str) {
-    let mut output = String::from("\n");
+    let mut output = String::from("");
     for acl in &d.state.access_lists {
         output.push_str(&format!("{} IP access list {}\n", acl.acl_type, acl.name));
         for (i, entry) in acl.entries.iter().enumerate() {
@@ -193,14 +193,14 @@ pub fn handle_show_flash(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_terminal(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!(
-        "\nLine 0, Location: \"\", Type: \"\"\nLength: 0 lines, Width: 80 columns\nStatus: Ready, Active\nCapabilities: none\n{}",
+        "Line 0, Location: \"\", Type: \"\"\nLength: 0 lines, Width: 80 columns\nStatus: Ready, Active\nCapabilities: none\n{}",
         p
     ));
 }
 
 pub fn handle_show_history(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    let mut out = String::from("\n");
+    let mut out = String::from("");
     for cmd in &d.command_history {
         out.push_str(&format!("  {}\n", cmd));
     }
@@ -212,7 +212,7 @@ pub fn handle_show_history(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_incomplete(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!(
-        "\n% Type \"show ?\" for a list of subcommands\n{}",
+        "% Type \"show ?\" for a list of subcommands\n{}",
         p
     ));
 }
@@ -221,7 +221,7 @@ pub fn handle_configure_terminal(d: &mut MockIosDevice, _input: &str) {
     d.mode = CliMode::Config;
     let p = d.prompt();
     d.queue_output(&format!(
-        "\nEnter configuration commands, one per line.  End with CNTL/Z.\n{}",
+        "Enter configuration commands, one per line.  End with CNTL/Z.\n{}",
         p
     ));
 }
@@ -286,7 +286,7 @@ pub fn handle_reload_alone(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_reload_cancel(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!(
-        "\n***\n*** --- SHUTDOWN ABORTED ---\n***\n{}",
+        "***\n*** --- SHUTDOWN ABORTED ---\n***\n{}",
         p
     ));
 }
@@ -361,12 +361,12 @@ pub fn handle_ping(d: &mut MockIosDevice, input: &str) {
 
     if reachable {
         d.queue_output(&format!(
-            "\nType escape sequence to abort.\nSending 5, 100-byte ICMP Echos to {}, timeout is 2 seconds:\n!!!!!\nSuccess rate is 100 percent (5/5), round-trip min/avg/max = 1/1/1 ms\n{}",
+            "Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to {}, timeout is 2 seconds:\n!!!!!\nSuccess rate is 100 percent (5/5), round-trip min/avg/max = 1/1/1 ms\n{}",
             target_str, p
         ));
     } else {
         d.queue_output(&format!(
-            "\nType escape sequence to abort.\nSending 5, 100-byte ICMP Echos to {}, timeout is 2 seconds:\n.....\nSuccess rate is 0 percent (0/5)\n{}",
+            "Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to {}, timeout is 2 seconds:\n.....\nSuccess rate is 0 percent (0/5)\n{}",
             target_str, p
         ));
     }
@@ -530,7 +530,7 @@ pub fn handle_show_mac_address_table(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_line(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!(
-        "\n   Tty Line Typ     Tx/Rx    A Modem  Roty AccO AccI   Uses   Noise  Overruns   Int\n\
+        "   Tty Line Typ     Tx/Rx    A Modem  Roty AccO AccI   Uses   Noise  Overruns   Int\n\
 *    0    0 CTY              -    -      -    -    -      0       0     0/0       -\n\
      1    1 AUX   9600/9600  -    -      -    -    -      0       0     0/0       -\n\
    386  386 VTY              -    -      -    -    -      0       0     0/0       -\n\
@@ -543,7 +543,7 @@ pub fn handle_show_line(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_inventory(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!(
-        "\nNAME: \"1\", DESCR: \"{model}\"\n\nPID: {model}   , VID: V02  , SN: {sn}\n\n{p}",
+        "NAME: \"1\", DESCR: \"{model}\"\n\nPID: {model}   , VID: V02  , SN: {sn}\n\n{p}",
         model = d.state.model,
         sn = d.state.serial_number,
         p = p
@@ -553,7 +553,7 @@ pub fn handle_show_inventory(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_environment(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!(
-        "\nSYSTEM TEMPERATURE is OK\n\
+        "SYSTEM TEMPERATURE is OK\n\
 System Temperature Value: 37 Degree Celsius\n\
 System Temperature State: GREEN\n\
 Yellow Threshold : 56 Degree Celsius\n\

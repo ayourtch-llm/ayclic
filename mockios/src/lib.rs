@@ -584,7 +584,7 @@ impl MockIosDevice {
                 let p = self.prompt();
                 let spaces = " ".repeat(caret_pos);
                 self.queue_output(&format!(
-                    "{}^\n% Invalid input detected at '^' marker.\n{}",
+                    "{}^\n% Invalid input detected at '^' marker.\n\n{}",
                     spaces, p
                 ));
             }
@@ -885,7 +885,7 @@ impl MockIosDevice {
                 ParseResult::InvalidInput { caret_pos } => {
                     let spaces = " ".repeat(caret_pos);
                     self.queue_output(&format!(
-                        "{}^\n% Invalid input detected at '^' marker.\n",
+                        "{}^\n% Invalid input detected at '^' marker.\n\n",
                         spaces
                     ));
                 }
@@ -916,7 +916,7 @@ impl MockIosDevice {
                 let p = self.prompt();
                 let spaces = " ".repeat(caret_pos);
                 self.queue_output(&format!(
-                    "{}^\n% Invalid input detected at '^' marker.\n{}",
+                    "{}^\n% Invalid input detected at '^' marker.\n\n{}",
                     spaces, p
                 ));
             }
@@ -4198,14 +4198,30 @@ mod tests {
         let _ = send_cmd(&mut device, "end").await;
     }
 
-    // Bug 3: end from priv exec is a no-op
+    // Bug 3: 'end' does NOT exist in exec mode (real IOS only has it in config mode)
     #[tokio::test]
-    async fn test_end_from_priv_exec_is_noop() {
+    async fn test_end_not_available_in_priv_exec() {
         let mut device = setup_device("R1").await;
         let output = send_cmd(&mut device, "end").await;
         assert_eq!(device.mode, CliMode::PrivilegedExec,
-            "end from priv exec should stay in priv exec");
-        assert!(!output.contains("Invalid"), "'end' from priv exec should not error, got: {:?}", output);
+            "should stay in priv exec after invalid command");
+        assert!(output.contains("% Invalid input") || output.contains("% Unknown command"),
+            "'end' should not be valid in priv exec, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_quit_not_available_in_priv_exec() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "quit").await;
+        assert!(output.contains("% Invalid input") || output.contains("% Unknown command"),
+            "'quit' should not be valid in priv exec, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_exit_still_available_in_priv_exec() {
+        let mut device = setup_device("R1").await;
+        let _output = send_cmd(&mut device, "exit").await;
+        // exit from priv exec should work (transitions to logout/done)
     }
 
     // Bug 4: interface name normalization

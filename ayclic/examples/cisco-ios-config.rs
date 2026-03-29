@@ -66,7 +66,7 @@ enum Command {
         conn: ConnArgs,
 
         /// Path to the delta config file to apply
-        #[arg(short, long)]
+        #[arg(long)]
         delta: PathBuf,
 
         /// Schedule a safety reload (minutes) before applying.
@@ -101,15 +101,15 @@ enum Command {
 #[derive(Parser)]
 struct ConnArgs {
     /// Device address (IP or hostname, with optional :port)
-    #[arg(short, long)]
+    #[arg(long)]
     device: String,
 
     /// Username for authentication
-    #[arg(short, long)]
+    #[arg(long)]
     user: String,
 
     /// Password for authentication
-    #[arg(short, long)]
+    #[arg(long)]
     password: String,
 
     /// Connection type

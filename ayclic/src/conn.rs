@@ -64,25 +64,33 @@ fn build_chat_template(prompts: &[(&str, PromptAction)]) -> String {
 /// Uses the UDP-connect trick: bind a UDP socket, "connect" to the target
 /// (no actual traffic), and read back the local address the OS chose.
 pub fn local_ip_for_target(target: &str) -> Result<String, CiscoIosError> {
-    // Strip port if present, default to port 22 for the probe
-    let host = target
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(target)
-        .trim_matches(|c| c == '[' || c == ']');
-    let probe_addr = format!("{}:22", host);
+    use std::net::{IpAddr, SocketAddr, UdpSocket};
+    // Try parsing as SocketAddr (ip:port or [ip]:port), then as bare IpAddr
+    let ip: IpAddr = target
+        .parse::<SocketAddr>()
+        .map(|sa| sa.ip())
+        .or_else(|_| target.parse::<IpAddr>())
+        .map_err(|e| CiscoIosError::HttpUploadError(format!("parse target {target:?}: {e}")))?;
 
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| CiscoIosError::HttpUploadError(format!("bind UDP: {}", e)))?;
+    let probe_addr = SocketAddr::new(ip, 22);
+    let bind_addr: SocketAddr = if ip.is_ipv4() {
+        "0.0.0.0:0".parse().unwrap()
+    } else {
+        "[::]:0".parse().unwrap()
+    };
+
+    let socket = UdpSocket::bind(bind_addr)
+        .map_err(|e| CiscoIosError::HttpUploadError(format!("bind UDP: {e}")))?;
     socket
-        .connect(&probe_addr)
-        .map_err(|e| CiscoIosError::HttpUploadError(format!("connect UDP to {}: {}", probe_addr, e)))?;
+        .connect(probe_addr)
+        .map_err(|e| CiscoIosError::HttpUploadError(format!("connect UDP to {probe_addr}: {e}")))?;
     let local_addr = socket
         .local_addr()
-        .map_err(|e| CiscoIosError::HttpUploadError(format!("local_addr: {}", e)))?;
+        .map_err(|e| CiscoIosError::HttpUploadError(format!("local_addr: {e}")))?;
 
     Ok(local_addr.ip().to_string())
 }
+
 
 /// Start an HTTP server that serves `content` at `/<filename>`, and shuts
 /// down when a GET to `/<filename>/done` is received. The file-specific
@@ -820,14 +828,20 @@ impl CiscoIosConn {
         }
 
         // Determine our local IP reachable from the device
+        info!("config_atomic: trying to determine local ip for target {}", &self.config.target);
         let local_ip = local_ip_for_target(&self.config.target)?;
         info!("config_atomic: local IP for device is {}", local_ip);
 
         // Start HTTP server (stays alive until /<filename>/done is requested)
         let (ip, port, http_handle) =
             start_config_http(file_content, &local_ip, &flash_file).await?;
-        let http_url = format!("http://{}:{}/{}", ip, port, flash_file);
-        let done_url = format!("http://{}:{}/{}/done", ip, port, flash_file);
+        let wrapped_ip = if ip.contains(":") {
+            format!("[{}]", ip)
+        } else {
+            ip
+        };
+        let http_url = format!("http://{}:{}/{}", wrapped_ip, port, flash_file);
+        let done_url = format!("http://{}:{}/{}/done", wrapped_ip, port, flash_file);
         info!("config_atomic: serving config at {}", http_url);
 
         // Download file from our HTTP server to flash, with retry

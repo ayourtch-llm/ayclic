@@ -639,9 +639,10 @@ impl DeviceState {
                 "act/unsup"
             };
 
-            // Wrap port list: Ports column starts at position 48, max ~52 chars wide
+            // Wrap port list: Ports column starts at position 48
+            // Real IOS wraps at ~31 chars (fits 3 GigabitEthernet short names per line)
             const PORTS_COL: usize = 48;
-            const MAX_PORTS_WIDTH: usize = 52;
+            const MAX_PORTS_WIDTH: usize = 31;
 
             let mut port_lines: Vec<String> = Vec::new();
             let mut current_line = String::new();
@@ -1588,6 +1589,13 @@ mod tests {
             assert!(line.starts_with(&" ".repeat(48)),
                 "Continuation should be indented 48 spaces: {:?}", line);
         }
+        // Real IOS wraps at ~3 Gi ports per line (31 char port column width)
+        // First data line should have 3 ports, not 6
+        let first_port_section = vlan1_lines[0].split("active").last().unwrap().trim();
+        let port_count = first_port_section.split(',').count();
+        assert!(port_count <= 4,
+            "First line should have ~3 ports (real IOS wraps at 31 chars), got {}: {:?}",
+            port_count, first_port_section);
     }
 
     #[test]

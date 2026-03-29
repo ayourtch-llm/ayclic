@@ -775,7 +775,37 @@ impl MockIosDevice {
             }
         }
 
-        // Emit grouped routes
+        // Emit default/static routes FIRST (0.0.0.0/0 comes before all others
+        // in real IOS, which sorts routes by prefix numerically).
+        for route in &self.state.static_routes {
+            let prefix = route.prefix;
+            let mask = route.mask;
+            let dist = route.admin_distance;
+            let prefix_len = u32::from(mask).count_ones();
+            let is_default = prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
+                && mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
+            if !is_default {
+                continue;
+            }
+            let code = "S*";
+            let prefix_str = format!("{}/{}", prefix, prefix_len);
+            if let Some(nh) = route.next_hop {
+                output.push_str(&format!(
+                    "{:<9}{} [{}/0] via {}\n",
+                    code, prefix_str, dist, nh
+                ));
+            } else if let Some(iface) = &route.interface {
+                output.push_str(&format!(
+                    "{:<9}{} is directly connected, {}\n",
+                    code, prefix_str, iface
+                ));
+            }
+        }
+
+        // Sort group_keys by major network address (numerically)
+        group_keys.sort_by_key(|(addr, _len)| u32::from(*addr));
+
+        // Emit grouped routes (sorted by prefix)
         for key in &group_keys {
             let indices = &groups[key];
             let (major_addr, major_len) = key;
@@ -811,32 +841,6 @@ impl MockIosDevice {
                 "{:<9}{}/{} {}\n",
                 e.code, e.prefix, e.prefix_len, e.description
             ));
-        }
-
-        // Emit default/static routes that were skipped above
-        for route in &self.state.static_routes {
-            let prefix = route.prefix;
-            let mask = route.mask;
-            let dist = route.admin_distance;
-            let prefix_len = u32::from(mask).count_ones();
-            let is_default = prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
-                && mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
-            if !is_default {
-                continue;
-            }
-            let code = "S*";
-            let prefix_str = format!("{}/{}", prefix, prefix_len);
-            if let Some(nh) = route.next_hop {
-                output.push_str(&format!(
-                    "{:<9}{} [{}/0] via {}\n",
-                    code, prefix_str, dist, nh
-                ));
-            } else if let Some(iface) = &route.interface {
-                output.push_str(&format!(
-                    "{:<9}{} is directly connected, {}\n",
-                    code, prefix_str, iface
-                ));
-            }
         }
 
         output.push_str(&self.prompt());
@@ -4103,6 +4107,50 @@ mod tests {
         assert!(
             pos_10_header < pos_10_route,
             "Group header should precede member routes"
+        );
+    }
+
+    /// Real IOS orders routes by prefix: default route (0.0.0.0/0) appears BEFORE
+    /// connected route groups. Verify this ordering.
+    #[tokio::test]
+    async fn test_show_ip_route_default_route_before_connected() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip route").await;
+        // Default route (S* 0.0.0.0/0) should appear before the 10.x group header
+        let pos_default = output.find("S*").expect("Should have S* default route");
+        let pos_10_group = output
+            .find("10.0.0.0/8 is variably subnetted")
+            .expect("Should have 10.0.0.0/8 group");
+        assert!(
+            pos_default < pos_10_group,
+            "Default route (S*) should appear BEFORE connected route groups.\n\
+             S* at position {}, 10.0.0.0/8 group at position {}\nOutput:\n{}",
+            pos_default, pos_10_group, output
+        );
+    }
+
+    /// In real IOS, route groups are sorted by major network address.
+    /// 10.x routes come before 192.168.x routes.
+    #[tokio::test]
+    async fn test_show_ip_route_groups_sorted_by_prefix() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet 1/0/2").await;
+        let _ = send_cmd(&mut device, "ip address 192.168.1.1 255.255.255.0").await;
+        let _ = send_cmd(&mut device, "no shutdown").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ip route").await;
+        let pos_10 = output
+            .find("10.0.0.0/8 is variably subnetted")
+            .expect("Should have 10.0.0.0/8 group");
+        let pos_192 = output
+            .find("192.168.1.0/24 is variably subnetted")
+            .expect("Should have 192.168.1.0/24 group");
+        assert!(
+            pos_10 < pos_192,
+            "10.x group should appear before 192.168.x group (sorted by prefix).\nOutput:\n{}",
+            output
         );
     }
 

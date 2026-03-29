@@ -791,6 +791,116 @@ pub fn handle_show_vtp(d: &mut MockIosDevice, _input: &str) {
     );
 }
 
+// ─── New stub handlers ────────────────────────────────────────────────────────
+
+pub fn handle_access_enable(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_archive(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_cd(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_connect(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_disconnect(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_erase(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("[OK]\n{}", p));
+}
+
+pub fn handle_exec_ip(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_lock(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_login(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_mkdir(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_monitor(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_more(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_pwd(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("flash:/\n{}", p));
+}
+
+pub fn handle_rename(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_rmdir(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_send(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_session(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_set(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_setup(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!(
+        "--- System Configuration Dialog ---\nWould you like to enter the initial configuration dialog? [yes/no]: \n{}",
+        p
+    ));
+}
+
+pub fn handle_test(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_where(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("No connections open\n{}", p));
+}
+
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static EXEC_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -805,6 +915,16 @@ fn priv_only() -> ModeFilter {
 
 fn build_exec_tree() -> Vec<CommandNode> {
     vec![
+        // access-enable [priv only]
+        keyword("access-enable", "Create a temporary Access-List entry")
+            .mode(priv_only())
+            .handler(handle_access_enable),
+
+        // archive [priv only]
+        keyword("archive", "manage archive files")
+            .mode(priv_only())
+            .handler(handle_archive),
+
         // show
         keyword("show", "Show running system information")
             .handler(handle_show_incomplete as CmdHandler)
@@ -992,6 +1112,14 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     .handler(handle_show_vtp),
             ]),
 
+        // cd [priv only]
+        keyword("cd", "Change current directory")
+            .mode(priv_only())
+            .children(vec![
+                param("<directory>", ParamType::RestOfLine, "Directory URL")
+                    .handler(handle_cd),
+            ]),
+
         // configure [priv only]
         keyword("configure", "Enter configuration mode")
             .mode(priv_only())
@@ -1023,6 +1151,14 @@ fn build_exec_tree() -> Vec<CommandNode> {
                         param("<number>", ParamType::Number, "Number of columns")
                             .handler(handle_terminal_width),
                     ]),
+            ]),
+
+        // connect [priv only]
+        keyword("connect", "Open a terminal connection")
+            .mode(priv_only())
+            .children(vec![
+                param("<host>", ParamType::Word, "Hostname or IP address")
+                    .handler(handle_connect),
             ]),
 
         // copy [priv only]
@@ -1064,6 +1200,22 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     .handler(handle_dir),
             ]),
 
+        // disconnect [priv only]
+        keyword("disconnect", "Disconnect an existing network connection")
+            .mode(priv_only())
+            .children(vec![
+                param("<connection>", ParamType::Word, "Connection number or name")
+                    .handler(handle_disconnect),
+            ]),
+
+        // erase [priv only]
+        keyword("erase", "Erase a filesystem")
+            .mode(priv_only())
+            .children(vec![
+                param("<filesystem>", ParamType::Word, "Filesystem (e.g. flash:)")
+                    .handler(handle_erase),
+            ]),
+
         // reload [priv only]
         keyword("reload", "Halt and perform a cold restart")
             .mode(priv_only())
@@ -1079,7 +1231,7 @@ fn build_exec_tree() -> Vec<CommandNode> {
             ]),
 
         // write [priv only]
-        keyword("write", "Write running configuration to memory or network")
+        keyword("write", "Write running configuration to memory, network, or terminal")
             .mode(priv_only())
             .handler(handle_write_memory as CmdHandler)
             .children(vec![
@@ -1110,12 +1262,106 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     ]),
             ]),
 
+        // ip [priv only]
+        keyword("ip", "Global IP commands")
+            .mode(priv_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "IP command arguments")
+                    .handler(handle_exec_ip),
+            ]),
+
+        // lock [priv only]
+        keyword("lock", "Lock the terminal")
+            .mode(priv_only())
+            .handler(handle_lock),
+
+        // login — available in all exec modes
+        keyword("login", "Log in as a particular user")
+            .handler(handle_login),
+
+        // logout
+        // (already present below; login belongs alphabetically before logout)
+
+        // mkdir [priv only]
+        keyword("mkdir", "Create new directory")
+            .mode(priv_only())
+            .children(vec![
+                param("<directory>", ParamType::Word, "New directory name")
+                    .handler(handle_mkdir),
+            ]),
+
+        // monitor [priv only]
+        keyword("monitor", "Monitoring different system events")
+            .mode(priv_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Monitor command arguments")
+                    .handler(handle_monitor),
+            ]),
+
+        // more [priv only]
+        keyword("more", "Display the contents of a file")
+            .mode(priv_only())
+            .children(vec![
+                param("<file>", ParamType::RestOfLine, "Filename or URL")
+                    .handler(handle_more),
+            ]),
+
         // ping
         keyword("ping", "Send echo messages")
             .children(vec![
                 param("<target>", ParamType::Word, "Target address")
                     .handler(handle_ping),
             ]),
+
+        // pwd [priv only]
+        keyword("pwd", "Display current working directory")
+            .mode(priv_only())
+            .handler(handle_pwd),
+
+        // rename [priv only]
+        keyword("rename", "Rename a file")
+            .mode(priv_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Source and destination filenames")
+                    .handler(handle_rename),
+            ]),
+
+        // rmdir [priv only]
+        keyword("rmdir", "Remove existing directory")
+            .mode(priv_only())
+            .children(vec![
+                param("<directory>", ParamType::Word, "Directory to remove")
+                    .handler(handle_rmdir),
+            ]),
+
+        // send [priv only]
+        keyword("send", "Send a message to other tty lines")
+            .mode(priv_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Line number or all, followed by message")
+                    .handler(handle_send),
+            ]),
+
+        // session [priv only]
+        keyword("session", "Run command on member switch")
+            .mode(priv_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Member switch and command")
+                    .handler(handle_session),
+            ]),
+
+        // set [priv only]
+        keyword("set", "Set system parameter (not config)")
+            .mode(priv_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Parameter and value")
+                    .handler(handle_set),
+            ]),
+
+        // setup [priv only]
+        keyword("setup", "Run the SETUP command facility")
+            .mode(priv_only())
+            .handler(handle_setup),
 
         // traceroute
         keyword("traceroute", "Trace route to destination")
@@ -1127,6 +1373,14 @@ fn build_exec_tree() -> Vec<CommandNode> {
         // help — available in all modes
         keyword("help", "Description of the interactive help system")
             .handler(handle_help_command),
+
+        // test [priv only]
+        keyword("test", "Test subsystems, memory, and interfaces")
+            .mode(priv_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "What to test")
+                    .handler(handle_test),
+            ]),
 
         // clock set [priv only]
         keyword("clock", "Manage the system clock")
@@ -1197,6 +1451,11 @@ fn build_exec_tree() -> Vec<CommandNode> {
             .handler(handle_exit),
         keyword("logout", "Exit from the EXEC")
             .handler(handle_exit),
+
+        // where [priv only]
+        keyword("where", "List active connections")
+            .mode(priv_only())
+            .handler(handle_where),
     ]
 }
 
@@ -1423,6 +1682,113 @@ mod tests {
             "show ? should list at least 40 commands, got {}: {:?}",
             command_count,
             output
+        );
+    }
+
+    /// Verify that all 21 new stub commands appear in privileged exec `?` help.
+    #[tokio::test]
+    async fn test_new_stub_commands_appear_in_exec_help() {
+        use ayclic::raw_transport::RawTransport;
+        use std::time::Duration;
+
+        let mut device = MockIosDevice::new("Router1");
+        // Consume initial prompt
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Request top-level help
+        device.send(b"?").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+
+        let expected_cmds = [
+            "access-enable",
+            "archive",
+            "cd",
+            "connect",
+            "disconnect",
+            "erase",
+            "ip",
+            "lock",
+            "login",
+            "mkdir",
+            "monitor",
+            "more",
+            "pwd",
+            "rename",
+            "rmdir",
+            "send",
+            "session",
+            "set",
+            "setup",
+            "test",
+            "where",
+        ];
+
+        for cmd in &expected_cmds {
+            assert!(
+                output.contains(cmd),
+                "Expected command '{}' to appear in exec ? help, but got:\n{}",
+                cmd,
+                output
+            );
+        }
+    }
+
+    /// Verify the `write` help text matches real IOS exactly.
+    #[test]
+    fn test_write_help_text() {
+        use crate::cmd_tree::TokenMatcher;
+        let tree = exec_tree();
+        let write_node = tree.iter().find(|n| {
+            matches!(&n.matcher, TokenMatcher::Keyword(kw) if kw == "write")
+        });
+        assert!(write_node.is_some(), "write command not found in exec tree");
+        assert_eq!(
+            write_node.unwrap().help,
+            "Write running configuration to memory, network, or terminal",
+            "write help text should match real IOS"
+        );
+    }
+
+    /// Verify pwd outputs "flash:/"
+    #[test]
+    fn test_pwd_output() {
+        let mut device = make_device();
+        handle_pwd(&mut device, "pwd");
+        let output = device.drain_output();
+        assert!(output.contains("flash:/"), "pwd should output flash:/");
+    }
+
+    /// Verify setup outputs the system configuration dialog header.
+    #[test]
+    fn test_setup_output() {
+        let mut device = make_device();
+        handle_setup(&mut device, "setup");
+        let output = device.drain_output();
+        assert!(
+            output.contains("System Configuration Dialog"),
+            "setup should output System Configuration Dialog"
+        );
+    }
+
+    /// Verify erase outputs [OK]
+    #[test]
+    fn test_erase_output() {
+        let mut device = make_device();
+        handle_erase(&mut device, "erase flash:");
+        let output = device.drain_output();
+        assert!(output.contains("[OK]"), "erase should output [OK]");
+    }
+
+    /// Verify where outputs "No connections open"
+    #[test]
+    fn test_where_output() {
+        let mut device = make_device();
+        handle_where(&mut device, "where");
+        let output = device.drain_output();
+        assert!(
+            output.contains("No connections open"),
+            "where should output 'No connections open'"
         );
     }
 }

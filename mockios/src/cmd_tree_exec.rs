@@ -578,7 +578,7 @@ pub fn handle_show_line(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_inventory(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!(
-        "NAME: \"1\", DESCR: \"{model}\"\n\nPID: {model}   , VID: V02  , SN: {sn}\n\n{p}",
+        "NAME: \"1\", DESCR: \"{model}\"\nPID: {model} , VID: V02  , SN: {sn}\n\n\n{p}",
         model = d.state.model,
         sn = d.state.serial_number,
         p = p

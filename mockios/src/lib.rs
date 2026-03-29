@@ -4727,6 +4727,29 @@ mod tests {
         );
     }
 
+    /// Real IOS show inventory: NAME+PID on consecutive lines (no blank line between),
+    /// then two blank lines after.
+    #[tokio::test]
+    async fn test_show_inventory_format_matches_real_ios() {
+        let mut device = MockIosDevice::new("R1")
+            .with_model("WS-C3560CX-12PD-S");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = send_cmd(&mut device, "show inventory").await;
+        // NAME and PID should be on consecutive lines (no blank line between)
+        // Output uses \r\n line endings
+        assert!(
+            output.contains("DESCR: \"WS-C3560CX-12PD-S\"\r\nPID:"),
+            "NAME and PID lines should be consecutive (no blank line between).\nGot: {:?}",
+            output
+        );
+        // PID should have single space after model before comma
+        assert!(
+            output.contains("PID: WS-C3560CX-12PD-S ,"),
+            "PID should have single space after model before comma.\nGot: {:?}",
+            output
+        );
+    }
+
     #[tokio::test]
     async fn test_show_environment() {
         let mut device = setup_device("Router1").await;

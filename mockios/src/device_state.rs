@@ -236,14 +236,24 @@ impl InterfaceState {
     pub fn new(name: &str) -> Self {
         // Generate a deterministic MAC based on the interface name hash
         let mac = Self::generate_mac(name);
+        // TenGigabitEthernet ports default to full/10G; others default to auto/auto
+        let is_te = name.starts_with("TenGigabitEthernet");
+        let (speed, duplex) = if is_te {
+            ("10000".to_string(), "full".to_string())
+        } else {
+            ("auto".to_string(), "auto".to_string())
+        };
+        // Virtual interfaces (Vlan, Loopback) are always link-up when admin-up.
+        // Physical interfaces have no cable by default.
+        let is_virtual = name.starts_with("Vlan") || name.starts_with("Loopback");
         Self {
             name: name.to_string(),
             description: String::new(),
             admin_up: true,
-            link_up: true,
+            link_up: is_virtual,
             ip_address: None,
-            speed: "auto".to_string(),
-            duplex: "auto".to_string(),
+            speed,
+            duplex,
             mtu: 1500,
             switchport_mode: None,
             vlan: None,
@@ -468,32 +478,38 @@ pub fn short_interface_name(name: &str) -> String {
 /// - `TenGigabitEthernet1/0/1` (25 chars) → `Te1/0/1` (abbreviated)
 /// - `GigabitEthernet1/0/1` (22 chars) → kept as-is (fits)
 /// - `GigabitEthernet1/0/10` (23 chars) → kept as-is (fits)
+/// Standard Cisco interface name abbreviation prefixes.
+const INTERFACE_PREFIXES: &[(&str, &str)] = &[
+    ("TenGigabitEthernet", "Te"),
+    ("GigabitEthernet",    "Gi"),
+    ("FastEthernet",       "Fa"),
+    ("Loopback",           "Lo"),
+    ("Vlan",               "Vl"),
+];
+
+/// Abbreviate an interface name to fit a fixed-width column (e.g., `show interfaces status`).
+/// Only abbreviates if the name exceeds `max_len` characters.
 pub fn abbreviate_interface_name(name: &str) -> String {
-    // If it fits in 23-char column with at least 1 trailing space, no abbreviation needed
-    if name.len() < 23 {
+    abbreviate_interface_name_max(name, 23)
+}
+
+/// Abbreviate an interface name only if it exceeds `max_len` characters.
+fn abbreviate_interface_name_max(name: &str, max_len: usize) -> String {
+    if name.len() < max_len {
         return name.to_string();
     }
 
-    let prefixes: &[(&str, &str)] = &[
-        ("TenGigabitEthernet", "Te"),
-        ("GigabitEthernet",    "Gi"),
-        ("FastEthernet",       "Fa"),
-        ("Loopback",           "Lo"),
-        ("Vlan",               "Vl"),
-    ];
-
-    for (long, short) in prefixes {
+    for (long, short) in INTERFACE_PREFIXES {
         if let Some(suffix) = name.strip_prefix(long) {
             let abbreviated = format!("{}{}", short, suffix);
-            if abbreviated.len() > 23 {
-                return abbreviated[..23].to_string();
+            if abbreviated.len() > max_len {
+                return abbreviated[..max_len].to_string();
             }
             return abbreviated;
         }
     }
 
-    // No matching prefix — truncate to 23
-    name[..23].to_string()
+    name[..max_len].to_string()
 }
 
 impl DeviceState {
@@ -509,11 +525,12 @@ impl DeviceState {
         vlan1.link_up = true;
 
         // GigabitEthernet1/0/1 through 1/0/12
-        // Ports 1-4: admin up, link up (connected); ports 5-12: shutdown (unconnected)
+        // Ports 1-4: admin up, no link (notconnect — no cable in simulation)
+        // Ports 5-12: shutdown (disabled)
         let mut gi_interfaces: Vec<InterfaceState> = (1..=12).map(|n| {
             let mut iface = InterfaceState::new(&format!("GigabitEthernet1/0/{}", n));
             iface.admin_up = n <= 4;
-            iface.link_up = n <= 4;
+            // link_up remains false (no cable); Vlan1 is the only link_up=true interface
             iface
         }).collect();
 
@@ -521,15 +538,14 @@ impl DeviceState {
         let mut gi_uplink: Vec<InterfaceState> = (13..=16).map(|n| {
             let mut iface = InterfaceState::new(&format!("GigabitEthernet1/0/{}", n));
             iface.admin_up = false;
-            iface.link_up = false;
             iface
         }).collect();
 
         // TenGigabitEthernet1/0/1 and 1/0/2: shutdown (unconnected)
+        // Speed/duplex are already set to 10000/full by InterfaceState::new for Te ports.
         let te_interfaces: Vec<InterfaceState> = (1..=2).map(|n| {
             let mut iface = InterfaceState::new(&format!("TenGigabitEthernet1/0/{}", n));
             iface.admin_up = false;
-            iface.link_up = false;
             iface
         }).collect();
 
@@ -625,6 +641,44 @@ impl DeviceState {
         }
     }
 
+    /// Compute VLAN access port membership dynamically from interface state.
+    /// Real IOS only shows access-mode ports in show vlan brief, not trunks.
+    fn vlan_access_ports(&self, vlan_id: u16) -> Vec<String> {
+        self.interfaces
+            .iter()
+            .filter(|iface| {
+                let is_physical = iface.name.contains("Ethernet");
+                let is_trunk = iface.switchport_mode.as_deref() == Some("trunk");
+                let iface_vlan = iface.vlan.unwrap_or(1);
+                is_physical && !is_trunk && iface_vlan == vlan_id
+            })
+            .map(|iface| short_interface_name(&iface.name))
+            .collect()
+    }
+
+    /// Wrap a list of items into lines of at most `max_width` characters, comma-separated.
+    fn wrap_comma_list(items: &[String], max_width: usize) -> Vec<String> {
+        let mut result: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for item in items {
+            if current.is_empty() {
+                current.push_str(item);
+            } else {
+                let candidate = format!("{}, {}", current, item);
+                if candidate.len() <= max_width {
+                    current = candidate;
+                } else {
+                    result.push(current);
+                    current = item.clone();
+                }
+            }
+        }
+        if !current.is_empty() {
+            result.push(current);
+        }
+        result
+    }
+
     /// Generate the `show vlan brief` table output.
     pub fn generate_show_vlan_brief(&self) -> String {
         let header = "VLAN Name                             Status    Ports\n\
@@ -639,29 +693,14 @@ impl DeviceState {
                 "act/unsup"
             };
 
-            // Wrap port list: Ports column starts at position 48
-            // Real IOS wraps at ~31 chars (fits 3 GigabitEthernet short names per line)
+            // Dynamically compute port list from interface state
+            let ports = self.vlan_access_ports(vlan.id);
+
+            // Ports column starts at position 48; real IOS wraps at ~31 chars
             const PORTS_COL: usize = 48;
             const MAX_PORTS_WIDTH: usize = 31;
 
-            let mut port_lines: Vec<String> = Vec::new();
-            let mut current_line = String::new();
-            for port in &vlan.ports {
-                if current_line.is_empty() {
-                    current_line.push_str(port);
-                } else {
-                    let candidate = format!("{}, {}", current_line, port);
-                    if candidate.len() <= MAX_PORTS_WIDTH {
-                        current_line = candidate;
-                    } else {
-                        port_lines.push(current_line);
-                        current_line = port.clone();
-                    }
-                }
-            }
-            if !current_line.is_empty() {
-                port_lines.push(current_line);
-            }
+            let port_lines = Self::wrap_comma_list(&ports, MAX_PORTS_WIDTH);
 
             let first_ports = port_lines.first().map(|s| s.as_str()).unwrap_or("");
             lines.push(format!(
@@ -958,20 +997,22 @@ impl DeviceState {
             let priority = 32768u32 + vlan.id as u32;
 
             // Collect interfaces that are: physical (not Vlan*), admin_up, link_up,
-            // and assigned to this VLAN.
+            // and assigned to this VLAN (access mode, not trunk).
             let mut iface_lines: Vec<String> = Vec::new();
             for iface in &self.interfaces {
-                if iface.name.starts_with("Vlan") {
+                if iface.name.starts_with("Vlan") || iface.name.starts_with("Loopback") {
                     continue;
                 }
                 if !iface.admin_up || !iface.link_up {
                     continue;
                 }
-                // Check membership: the VLAN's ports list uses short names
-                let short = short_interface_name(&iface.name);
-                if !vlan.ports.contains(&short) {
+                // Dynamic VLAN membership: access ports in this VLAN
+                let is_trunk = iface.switchport_mode.as_deref() == Some("trunk");
+                let iface_vlan = iface.vlan.unwrap_or(1);
+                if is_trunk || iface_vlan != vlan.id {
                     continue;
                 }
+                let short = short_interface_name(&iface.name);
 
                 let port_num = extract_port_number(&iface.name);
                 let cost = if iface.name.starts_with("TenGigabitEthernet") {
@@ -1066,11 +1107,31 @@ impl DeviceState {
             let is_connected = iface.admin_up && iface.link_up;
             let is_te = iface.name.starts_with("TenGigabitEthernet");
 
-            let duplex = if is_connected { "a-full" } else { "auto" };
-            let speed = if is_connected {
-                if is_te { "10G" } else { "a-1000" }
+            // Duplex: use interface configured value for non-auto; show "auto" for unresolved Gi
+            let duplex = if is_te {
+                // Te ports always display their configured duplex (full)
+                match iface.duplex.as_str() {
+                    "full" => "full",
+                    "half" => "half",
+                    _ => "auto",
+                }
+            } else if is_connected {
+                "a-full"
             } else {
                 "auto"
+            };
+            // Speed: use interface configured value for Te; show "auto" for unresolved Gi
+            let speed: String = if is_te {
+                // Te ports always show their configured speed
+                match iface.speed.as_str() {
+                    "10000" => "10G".to_string(),
+                    "1000" => "1G".to_string(),
+                    s => s.to_string(),
+                }
+            } else if is_connected {
+                "a-1000".to_string()
+            } else {
+                "auto".to_string()
             };
             let itype = if is_te { "Not Present" } else { "10/100/1000BaseTX" };
 
@@ -1436,7 +1497,8 @@ mod tests {
         let iface = InterfaceState::new("GigabitEthernet1/0/1");
         assert_eq!(iface.name, "GigabitEthernet1/0/1");
         assert!(iface.admin_up);
-        assert!(iface.link_up);
+        // Physical interfaces default to link_up=false (no cable connected)
+        assert!(!iface.link_up);
         assert_eq!(iface.mtu, 1500);
         assert_eq!(iface.speed, "auto");
         assert_eq!(iface.duplex, "auto");
@@ -1598,6 +1660,24 @@ mod tests {
             port_count, first_port_section);
     }
 
+    /// Real IOS excludes trunk ports from show vlan brief port lists.
+    #[test]
+    fn test_show_vlan_brief_excludes_trunk_ports() {
+        let mut state = DeviceState::new("Switch1");
+        // Set Gi1/0/1 to trunk mode
+        if let Some(iface) = state.get_interface_mut("GigabitEthernet1/0/1") {
+            iface.switchport_mode = Some("trunk".to_string());
+        }
+        let output = state.generate_show_vlan_brief();
+        // Gi1/0/1 should NOT appear in the VLAN 1 port list
+        let vlan1_line = output.lines().find(|l| l.starts_with("1 ") || l.starts_with("1    ")).unwrap();
+        assert!(!vlan1_line.contains("Gi1/0/1"),
+            "Trunk port Gi1/0/1 should not appear in VLAN port list, got: {:?}", vlan1_line);
+        // But Gi1/0/2 (still access) should appear
+        assert!(output.contains("Gi1/0/2"),
+            "Access port Gi1/0/2 should still appear in VLAN port list");
+    }
+
     #[test]
     fn test_abbreviate_interface_name() {
         // TenGigabitEthernet1/0/1 = 25 chars > 23, must abbreviate to Te
@@ -1619,13 +1699,13 @@ mod tests {
     #[test]
     fn test_default_state_shutdown_interfaces() {
         let state = DeviceState::new("Switch1");
-        // Gi1/0/1 through 1/0/4 should be admin up (connected ports)
+        // Gi1/0/1 through 1/0/4 should be admin up but link down (no cable)
         let gi1 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/1").unwrap();
         assert!(gi1.admin_up, "Gi1/0/1 should be admin up");
-        assert!(gi1.link_up, "Gi1/0/1 should be link up");
+        assert!(!gi1.link_up, "Gi1/0/1 should be link down (no cable by default)");
         let gi4 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/4").unwrap();
         assert!(gi4.admin_up, "Gi1/0/4 should be admin up");
-        assert!(gi4.link_up, "Gi1/0/4 should be link up");
+        assert!(!gi4.link_up, "Gi1/0/4 should be link down (no cable by default)");
         // Gi1/0/5 through 1/0/12 should be shutdown
         let gi5 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/5").unwrap();
         assert!(!gi5.admin_up, "Gi1/0/5 should be admin down (shutdown)");
@@ -1688,7 +1768,11 @@ mod tests {
 
     #[test]
     fn test_generate_show_spanning_tree() {
-        let state = DeviceState::new("Switch1");
+        let mut state = DeviceState::new("Switch1");
+        // Simulate a cable connected to Gi1/0/1
+        if let Some(iface) = state.get_interface_mut("GigabitEthernet1/0/1") {
+            iface.link_up = true;
+        }
         let output = state.generate_show_spanning_tree();
         assert!(output.contains("VLAN0001"), "Should show VLAN 1");
         assert!(output.contains("protocol rstp"), "Should show rstp protocol");
@@ -1734,9 +1818,9 @@ mod tests {
         // Should have header
         assert!(output.contains("Port"), "Output should contain 'Port' header: {:?}", &output[..output.len().min(200)]);
         assert!(output.contains("Status"), "Output should contain 'Status' header");
-        // Gi1/0/1 is admin_up + link_up → "connected"
+        // Gi1/0/1 is admin_up + link_down → "notconnect" (no cable by default)
         let gi1_line = output.lines().find(|l| l.starts_with("Gi1/0/1")).unwrap();
-        assert!(gi1_line.contains("connected"), "Gi1/0/1 should be connected: {:?}", gi1_line);
+        assert!(gi1_line.contains("notconnect"), "Gi1/0/1 should be notconnect (admin up, no link): {:?}", gi1_line);
         // Gi1/0/5 is admin_up=false → "disabled"
         let gi5_line = output.lines().find(|l| l.starts_with("Gi1/0/5")).unwrap();
         assert!(gi5_line.contains("disabled"), "Gi1/0/5 should be disabled: {:?}", gi5_line);
@@ -2020,5 +2104,86 @@ mod tests {
         assert!(!state.ipv6_unicast_routing);
         assert!(state.ipv6_static_routes.is_empty());
         assert!(state.ospfv3_processes.is_empty());
+    }
+
+    // ─── Interface Status State Tests ─────────────────────────────────────────
+
+    /// Default (non-shutdown, no cable) ports must show `notconnect` in
+    /// `show interfaces status`.  Only ports that are explicitly shutdown
+    /// should show `disabled`.
+    #[test]
+    fn test_show_interfaces_status_notconnect_default() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_status();
+
+        // All Gi ports (1-16) that are admin_up should be notconnect by default
+        // (no physical cable connected in simulation).
+        // In the NEW model Gi1/0/1..16 are all admin_up, link_up=false → notconnect.
+        let gi1_line = output.lines().find(|l| l.starts_with("Gi1/0/1 ")).unwrap();
+        assert!(gi1_line.contains("notconnect"),
+            "Gi1/0/1 (admin up, no link) should be notconnect: {:?}", gi1_line);
+    }
+
+    /// Explicitly shutdown ports must show `disabled`.
+    #[test]
+    fn test_show_interfaces_status_disabled_for_shutdown() {
+        let mut state = DeviceState::new("Switch1");
+        // Manually shut down Gi1/0/3
+        state.interfaces.iter_mut()
+            .find(|i| i.name == "GigabitEthernet1/0/3")
+            .unwrap()
+            .admin_up = false;
+        let output = state.generate_show_interfaces_status();
+        let gi3_line = output.lines().find(|l| l.starts_with("Gi1/0/3")).unwrap();
+        assert!(gi3_line.contains("disabled"),
+            "Shutdown Gi1/0/3 should show disabled: {:?}", gi3_line);
+    }
+
+    /// Te ports must show `full` duplex and `10G` speed in
+    /// `show interfaces status` regardless of link state.
+    #[test]
+    fn test_show_interfaces_status_te_port_defaults() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_status();
+        let te1_line = output.lines().find(|l| l.starts_with("Te1/0/1")).unwrap();
+        assert!(te1_line.contains("10G"),
+            "Te1/0/1 should show 10G speed: {:?}", te1_line);
+        assert!(te1_line.contains("full"),
+            "Te1/0/1 should show full duplex: {:?}", te1_line);
+    }
+
+    /// `InterfaceState::new()` for a TenGigabitEthernet port should default to
+    /// `speed = "10000"` and `duplex = "full"`.
+    #[test]
+    fn test_te_interface_new_defaults_speed_duplex() {
+        let iface = InterfaceState::new("TenGigabitEthernet1/0/1");
+        assert_eq!(iface.speed, "10000",
+            "Te interface should default to speed 10000, got: {:?}", iface.speed);
+        assert_eq!(iface.duplex, "full",
+            "Te interface should default to duplex full, got: {:?}", iface.duplex);
+    }
+
+    /// `InterfaceState::new()` should default `link_up` to `false` (no cable
+    /// connected in the simulation).
+    #[test]
+    fn test_interface_new_defaults_link_up_false() {
+        let iface = InterfaceState::new("GigabitEthernet1/0/1");
+        assert!(!iface.link_up,
+            "New interface should default to link_up=false (no cable): {:?}", iface.link_up);
+    }
+
+    /// `show ip interface brief` must show `down`/`down` for a port that is
+    /// admin-up but has no physical link (notconnect state).
+    #[test]
+    fn test_show_ip_interface_brief_notconnect_shows_down() {
+        let state = DeviceState::new("Switch1");
+        // Gi1/0/1 should be admin_up=true, link_up=false in new model
+        let gi1 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/1").unwrap();
+        assert!(gi1.admin_up, "Gi1/0/1 should be admin up");
+        assert!(!gi1.link_up, "Gi1/0/1 should have no link in default state");
+
+        // The generate_show_interface method should reflect down/down for notconnect
+        let detail = gi1.generate_show_interface();
+        assert!(detail.contains("down"), "notconnect port should show 'down' in show interface detail");
     }
 }

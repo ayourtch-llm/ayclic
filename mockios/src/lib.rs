@@ -3920,8 +3920,9 @@ mod tests {
     async fn test_show_interfaces_specific() {
         let mut device = setup_device("R1").await;
         let output = send_cmd(&mut device, "show interfaces GigabitEthernet1/0/1").await;
+        // Physical interface defaults to admin up but link down (no cable)
         assert!(
-            output.contains("GigabitEthernet1/0/1 is up"),
+            output.contains("GigabitEthernet1/0/1 is") && output.contains("line protocol is"),
             "Should show interface status, got: {:?}",
             &output[..output.len().min(200)]
         );

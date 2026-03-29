@@ -736,6 +736,11 @@ impl DeviceState {
             lines.push("!".to_string());
         }
 
+        if self.ipv6_unicast_routing {
+            lines.push("ipv6 unicast-routing".to_string());
+            lines.push("!".to_string());
+        }
+
         // 5. Before spanning-tree: no ip source-route
         lines.push("no ip source-route".to_string());
         lines.push("!".to_string());
@@ -770,6 +775,27 @@ impl DeviceState {
             if let Some((addr, mask)) = &iface.ip_address {
                 lines.push(format!(" ip address {} {}", addr, mask));
             }
+            // IPv6 addresses
+            for v6addr in &iface.ipv6_addresses {
+                match v6addr.addr_type {
+                    Ipv6AddrType::LinkLocal => {
+                        lines.push(format!(" ipv6 address {} link-local", v6addr.address));
+                    }
+                    Ipv6AddrType::Global => {
+                        lines.push(format!(" ipv6 address {}/{}", v6addr.address, v6addr.prefix_len));
+                    }
+                }
+            }
+            if iface.ipv6_enabled && iface.ipv6_addresses.is_empty() {
+                lines.push(" ipv6 enable".to_string());
+            }
+            // OSPFv3 interface config
+            if let Some(ref ospf_cfg) = iface.ospfv3_config {
+                if let Some(ref net_type) = ospf_cfg.network_type {
+                    lines.push(format!(" ip ospf network {}", net_type));
+                }
+                lines.push(format!(" ipv6 ospf {} area {}", ospf_cfg.process_id, ospf_cfg.area_id));
+            }
             if !iface.admin_up {
                 lines.push(" shutdown".to_string());
             }
@@ -793,6 +819,28 @@ impl DeviceState {
         }
 
         if !self.static_routes.is_empty() {
+            lines.push("!".to_string());
+        }
+
+        // IPv6 static routes
+        for route in &self.ipv6_static_routes {
+            if let Some(nh) = route.next_hop {
+                lines.push(format!("ipv6 route {}/{} {}", route.prefix, route.prefix_len, nh));
+            } else if let Some(ref iface) = route.interface {
+                lines.push(format!("ipv6 route {}/{} {}", route.prefix, route.prefix_len, iface));
+            }
+        }
+
+        if !self.ipv6_static_routes.is_empty() {
+            lines.push("!".to_string());
+        }
+
+        // OSPFv3 processes
+        for proc in &self.ospfv3_processes {
+            lines.push(format!("ipv6 router ospf {}", proc.process_id));
+            if let Some(rid) = proc.router_id {
+                lines.push(format!(" router-id {}", rid));
+            }
             lines.push("!".to_string());
         }
 

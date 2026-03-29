@@ -94,6 +94,41 @@ pub fn handle_show_ip_incomplete(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("% Incomplete command.\n{}", p));
 }
 
+// ─── IPv6 Show Handlers ─────────────────────────────────────────────────────
+
+pub fn handle_show_ipv6_interface_brief(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_ipv6_interface_brief();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
+pub fn handle_show_ipv6_route(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_ipv6_route();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
+pub fn handle_show_ipv6_ospf(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_ipv6_ospf();
+    let p = d.prompt();
+    if output.is_empty() {
+        d.queue_output(&format!("{}", p));
+    } else {
+        d.queue_output(&format!("{}\n\n{}", output, p));
+    }
+}
+
+pub fn handle_show_ipv6_ospf_interface_brief(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_ipv6_ospf_interface_brief();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
+pub fn handle_show_ipv6_incomplete(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("% Incomplete command.\n{}", p));
+}
+
 pub fn handle_show_install_summary(d: &mut MockIosDevice, _input: &str) {
     d.handle_show_install_summary();
 }
@@ -804,6 +839,42 @@ fn build_exec_tree() -> Vec<CommandNode> {
                             .handler(handle_show_ip_ospf),
                         keyword("protocols", "IP routing protocol process parameters and statistics")
                             .handler(handle_show_ip_protocols),
+                    ]),
+                keyword("ipv6", "IPv6 information")
+                    .handler(handle_show_ipv6_incomplete as CmdHandler)
+                    .children(vec![
+                        keyword("interface", "IPv6 interface status and configuration")
+                            .children(vec![
+                                keyword("brief", "Brief summary of IPv6 status and configuration")
+                                    .handler(handle_show_ipv6_interface_brief),
+                            ]),
+                        keyword("route", "Show IPv6 route table entries")
+                            .handler(handle_show_ipv6_route),
+                        keyword("ospf", "OSPF information")
+                            .handler(handle_show_ipv6_ospf)
+                            .children(vec![
+                                keyword("interface", "Interface information")
+                                    .children(vec![
+                                        keyword("brief", "Summary of interface information")
+                                            .handler(handle_show_ipv6_ospf_interface_brief),
+                                    ]),
+                            ]),
+                        keyword("neighbors", "Show IPv6 neighbor cache entries")
+                            .handler(handle_show_ipv6_incomplete),
+                        keyword("protocols", "IPv6 Routing Protocols")
+                            .handler(handle_show_ipv6_incomplete),
+                        keyword("traffic", "IPv6 traffic statistics")
+                            .handler(handle_show_ipv6_incomplete),
+                        keyword("access-list", "Summary of access lists")
+                            .handler(handle_show_ipv6_incomplete),
+                        keyword("cef", "Cisco Express Forwarding for IPv6")
+                            .handler(handle_show_ipv6_incomplete),
+                        keyword("nd", "Show IPv6 ND related information")
+                            .handler(handle_show_ipv6_incomplete),
+                        keyword("prefix-list", "List IPv6 prefix lists")
+                            .handler(handle_show_ipv6_incomplete),
+                        keyword("routers", "Show local IPv6 routers")
+                            .handler(handle_show_ipv6_incomplete),
                     ]),
                 keyword("boot", "Boot and startup information")
                     .handler(handle_show_boot),

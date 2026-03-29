@@ -1,10 +1,12 @@
 //! Config-mode command tree definitions and handlers for MockIOS.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
 
 use crate::cmd_tree::{keyword, param, CliModeClass, CmdHandler, CommandNode, ModeFilter, ParamType};
-use crate::device_state::{AccessList, AccessListEntry, StaticRoute};
+use crate::device_state::{AccessList, AccessListEntry, StaticRoute,
+    Ipv6AddrConfig, Ipv6AddrType, Ipv6StaticRoute,
+    OspfV3Process, OspfV3Area, InterfaceOspfV3Config};
 use crate::{CliMode, MockIosDevice};
 
 // ─── Mode helpers ─────────────────────────────────────────────────────────────
@@ -169,6 +171,229 @@ pub fn handle_ip_route(d: &mut MockIosDevice, input: &str) {
                     interface: None,
                     admin_distance: 1,
                 });
+            }
+        }
+    }
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+// ─── IPv6 Handlers ───────────────────────────────────────────────────────────
+
+pub fn handle_ipv6_unicast_routing(d: &mut MockIosDevice, input: &str) {
+    let negated = input.trim().starts_with("no");
+    d.state.ipv6_unicast_routing = !negated;
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_ipv6_enable(d: &mut MockIosDevice, input: &str) {
+    let negated = input.trim().starts_with("no");
+    if let Some(ref iface_name) = d.current_interface.clone() {
+        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+            iface.ipv6_enabled = !negated;
+        }
+    }
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_ipv6_address(d: &mut MockIosDevice, input: &str) {
+    let negated = input.trim().starts_with("no");
+    let trimmed = input.trim();
+
+    if negated {
+        // "no ipv6 address" — remove all IPv6 addresses from current interface
+        if let Some(ref iface_name) = d.current_interface.clone() {
+            if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                iface.ipv6_addresses.clear();
+                iface.ipv6_enabled = false;
+            }
+        }
+    } else {
+        // Parse "ipv6 address <addr>/<prefix-len>" or "ipv6 address <addr> link-local"
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        // parts[0] = "ipv6", parts[1] = "address", parts[2] = addr/prefix or addr, parts[3..] = options
+        if parts.len() >= 3 {
+            let addr_str = parts[2];
+            let is_link_local = parts.len() >= 4 && parts[3].eq_ignore_ascii_case("link-local");
+
+            if is_link_local {
+                // Explicit link-local: "ipv6 address FE80::1 link-local"
+                if let Ok(addr) = addr_str.parse::<Ipv6Addr>() {
+                    if let Some(ref iface_name) = d.current_interface.clone() {
+                        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                            // Remove any existing link-local
+                            iface.ipv6_addresses.retain(|a| a.addr_type != Ipv6AddrType::LinkLocal);
+                            iface.ipv6_addresses.push(Ipv6AddrConfig {
+                                address: addr,
+                                prefix_len: 128,
+                                addr_type: Ipv6AddrType::LinkLocal,
+                                eui64: false,
+                            });
+                        }
+                    }
+                }
+            } else if let Some(slash_pos) = addr_str.find('/') {
+                // Global address: "ipv6 address 2001:db8::1/64"
+                let addr_part = &addr_str[..slash_pos];
+                let prefix_part = &addr_str[slash_pos + 1..];
+                if let (Ok(addr), Ok(prefix_len)) = (
+                    addr_part.parse::<Ipv6Addr>(),
+                    prefix_part.parse::<u8>(),
+                ) {
+                    if let Some(ref iface_name) = d.current_interface.clone() {
+                        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                            iface.ipv6_addresses.push(Ipv6AddrConfig {
+                                address: addr,
+                                prefix_len,
+                                addr_type: Ipv6AddrType::Global,
+                                eui64: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_ipv6_route(d: &mut MockIosDevice, input: &str) {
+    let trimmed = input.trim();
+    let negated = trimmed.starts_with("no");
+
+    // Strip "no " prefix if present, then "ipv6 route "
+    let route_part = if negated {
+        trimmed.strip_prefix("no").unwrap_or(trimmed).trim()
+    } else {
+        trimmed
+    };
+    let route_part = route_part.strip_prefix("ipv6").unwrap_or(route_part).trim();
+    let route_part = route_part.strip_prefix("route").unwrap_or(route_part).trim();
+
+    let parts: Vec<&str> = route_part.split_whitespace().collect();
+    // Expected: <prefix/len> <next-hop or interface>
+    if !parts.is_empty() {
+        if let Some(slash_pos) = parts[0].find('/') {
+            let prefix_str = &parts[0][..slash_pos];
+            let len_str = &parts[0][slash_pos + 1..];
+            if let (Ok(prefix), Ok(prefix_len)) = (
+                prefix_str.parse::<Ipv6Addr>(),
+                len_str.parse::<u8>(),
+            ) {
+                if negated {
+                    d.state.ipv6_static_routes.retain(|r| {
+                        !(r.prefix == prefix && r.prefix_len == prefix_len)
+                    });
+                } else if parts.len() >= 2 {
+                    let next_hop = parts[1].parse::<Ipv6Addr>().ok();
+                    let interface = if next_hop.is_none() {
+                        Some(parts[1].to_string())
+                    } else {
+                        None
+                    };
+                    d.state.ipv6_static_routes.push(Ipv6StaticRoute {
+                        prefix,
+                        prefix_len,
+                        next_hop,
+                        interface,
+                        admin_distance: 1,
+                    });
+                }
+            }
+        }
+    }
+
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_ipv6_router_ospf(d: &mut MockIosDevice, input: &str) {
+    // "ipv6 router ospf <pid>" — create process if needed, enter config-router
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    if let Some(pid_str) = parts.last() {
+        if let Ok(pid) = pid_str.parse::<u16>() {
+            // Create process if it doesn't exist
+            if !d.state.ospfv3_processes.iter().any(|p| p.process_id == pid) {
+                d.state.ospfv3_processes.push(OspfV3Process::new(pid));
+            }
+        }
+    }
+    d.mode = CliMode::ConfigSub("config-router".to_string());
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_ipv6_ospf_interface(d: &mut MockIosDevice, input: &str) {
+    // "ipv6 ospf <pid> area <area-id>" — assign interface to OSPFv3 area
+    let negated = input.trim().starts_with("no");
+    let parts: Vec<&str> = input.split_whitespace().collect();
+
+    if negated {
+        if let Some(ref iface_name) = d.current_interface.clone() {
+            if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                iface.ospfv3_config = None;
+            }
+        }
+    } else {
+        // Find "ospf" position, then <pid>, then "area", then <area-id>
+        let ospf_pos = parts.iter().position(|p| p.eq_ignore_ascii_case("ospf"));
+        if let Some(pos) = ospf_pos {
+            let pid = parts.get(pos + 1).and_then(|s| s.parse::<u16>().ok());
+            let area_keyword = parts.get(pos + 2).map(|s| s.eq_ignore_ascii_case("area")).unwrap_or(false);
+            let area_id = if area_keyword {
+                parts.get(pos + 3).and_then(|s| s.parse::<u32>().ok())
+            } else {
+                None
+            };
+
+            if let (Some(pid), Some(area_id)) = (pid, area_id) {
+                if let Some(ref iface_name) = d.current_interface.clone() {
+                    // Ensure the OSPFv3 process exists and has this area
+                    if let Some(proc) = d.state.ospfv3_processes.iter_mut().find(|p| p.process_id == pid) {
+                        if !proc.areas.iter().any(|a| a.area_id == area_id) {
+                            proc.areas.push(OspfV3Area::new(area_id));
+                        }
+                    }
+
+                    if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                        iface.ospfv3_config = Some(InterfaceOspfV3Config {
+                            process_id: pid,
+                            area_id,
+                            network_type: None,
+                            cost: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_ipv6_ospf_network(d: &mut MockIosDevice, input: &str) {
+    // "ipv6 ospf network point-to-point" — set network type on interface
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let network_pos = parts.iter().position(|p| p.eq_ignore_ascii_case("network"));
+    if let Some(pos) = network_pos {
+        if let Some(net_type) = parts.get(pos + 1) {
+            if let Some(ref iface_name) = d.current_interface.clone() {
+                if let Some(iface) = d.state.get_interface_mut(iface_name) {
+                    if let Some(ref mut ospf_cfg) = iface.ospfv3_config {
+                        ospf_cfg.network_type = Some(net_type.to_string());
+                    }
+                }
             }
         }
     }
@@ -635,6 +860,71 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     ]),
             ]),
 
+        // ipv6 ...
+        keyword("ipv6", "Global IPv6 configuration subcommands")
+            .children(vec![
+                // ipv6 unicast-routing [config only]
+                keyword("unicast-routing", "Enable IPv6 unicast routing")
+                    .mode(config_only())
+                    .handler(handle_ipv6_unicast_routing),
+                // ipv6 route <prefix/len> <nexthop|interface> [config only]
+                keyword("route", "Establish static IPv6 routes")
+                    .mode(config_only())
+                    .children(vec![
+                        param("<prefix/len>", ParamType::Word, "IPv6 prefix/prefix-length")
+                            .children(vec![
+                                param("<nexthop>", ParamType::Word, "Next-hop IPv6 address or interface")
+                                    .handler(handle_ipv6_route),
+                            ]),
+                    ]),
+                // ipv6 router ospf <pid> [config only]
+                keyword("router", "IPv6 router")
+                    .mode(config_only())
+                    .children(vec![
+                        keyword("ospf", "OSPFv3")
+                            .children(vec![
+                                param("<process-id>", ParamType::Number, "Process ID")
+                                    .handler(handle_ipv6_router_ospf),
+                            ]),
+                    ]),
+                // ipv6 address <addr/prefix-len> or <addr> link-local [config-if only]
+                keyword("address", "Set the IPv6 address of an interface")
+                    .mode(config_if_only())
+                    .handler(handle_ipv6_address)
+                    .children(vec![
+                        param("<addr/prefix-len>", ParamType::Word, "IPv6 address with prefix length (X:X:X:X::X/<0-128>)")
+                            .handler(handle_ipv6_address)
+                            .children(vec![
+                                keyword("link-local", "Use as link-local address")
+                                    .handler(handle_ipv6_address),
+                            ]),
+                    ]),
+                // ipv6 enable [config-if only]
+                keyword("enable", "Enable IPv6 on interface")
+                    .mode(config_if_only())
+                    .handler(handle_ipv6_enable),
+                // ipv6 ospf <pid> area <area> [config-if only]
+                keyword("ospf", "OSPFv3 interface commands")
+                    .mode(config_if_only())
+                    .children(vec![
+                        param("<process-id>", ParamType::Number, "Process ID")
+                            .children(vec![
+                                keyword("area", "Set the OSPF area ID")
+                                    .children(vec![
+                                        param("<area-id>", ParamType::Number, "OSPF area ID as integer")
+                                            .handler(handle_ipv6_ospf_interface),
+                                    ]),
+                            ]),
+                        keyword("network", "Network type")
+                            .children(vec![
+                                keyword("point-to-point", "Specify OSPF point-to-point network")
+                                    .handler(handle_ipv6_ospf_network),
+                                keyword("broadcast", "Specify OSPF broadcast multi-access network")
+                                    .handler(handle_ipv6_ospf_network),
+                            ]),
+                    ]),
+            ]),
+
         // line vty/console
         keyword("line", "Configure a terminal line")
             .mode(config_only())
@@ -797,6 +1087,41 @@ fn build_config_if_tree() -> Vec<CommandNode> {
                             .children(vec![
                                 param("<mask>", ParamType::Word, "Subnet mask")
                                     .handler(handle_ip_address),
+                            ]),
+                    ]),
+            ]),
+
+        // ipv6 (interface config)
+        keyword("ipv6", "IPv6 interface subcommands")
+            .children(vec![
+                keyword("address", "Set the IPv6 address of an interface")
+                    .handler(handle_ipv6_address)
+                    .children(vec![
+                        param("<addr/prefix-len>", ParamType::Word, "IPv6 prefix (X:X:X:X::X/<0-128>)")
+                            .handler(handle_ipv6_address)
+                            .children(vec![
+                                keyword("link-local", "Use as link-local address")
+                                    .handler(handle_ipv6_address),
+                            ]),
+                    ]),
+                keyword("enable", "Enable IPv6 on interface")
+                    .handler(handle_ipv6_enable),
+                keyword("ospf", "OSPFv3 interface commands")
+                    .children(vec![
+                        param("<process-id>", ParamType::Number, "Process ID")
+                            .children(vec![
+                                keyword("area", "Set the OSPF area ID")
+                                    .children(vec![
+                                        param("<area-id>", ParamType::Number, "OSPF area ID as integer")
+                                            .handler(handle_ipv6_ospf_interface),
+                                    ]),
+                            ]),
+                        keyword("network", "Network type")
+                            .children(vec![
+                                keyword("point-to-point", "Specify OSPF point-to-point network")
+                                    .handler(handle_ipv6_ospf_network),
+                                keyword("broadcast", "Specify OSPF broadcast multi-access network")
+                                    .handler(handle_ipv6_ospf_network),
                             ]),
                     ]),
             ]),

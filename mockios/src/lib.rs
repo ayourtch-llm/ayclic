@@ -5219,4 +5219,217 @@ mod tests {
         let cmd_count = output.lines().filter(|l| l.starts_with("  ")).count();
         assert!(cmd_count >= 25, "config-if should have at least 25 commands, got {}", cmd_count);
     }
+
+    // ─── IPv6 Integration Tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_ipv6_unicast_routing() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ipv6 unicast-routing").await;
+        let _ = send_cmd(&mut device, "end").await;
+        assert!(device.state.ipv6_unicast_routing, "ipv6 unicast-routing should be enabled");
+
+        let config = device.state.generate_running_config();
+        assert!(config.contains("ipv6 unicast-routing"),
+            "Running config should contain 'ipv6 unicast-routing'");
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_address_on_interface() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface Vlan1").await;
+        let _ = send_cmd(&mut device, "ipv6 address 2001:db8::1/64").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let vlan1 = device.state.get_interface("Vlan1").unwrap();
+        assert_eq!(vlan1.ipv6_addresses.len(), 1);
+        assert_eq!(vlan1.ipv6_addresses[0].address, "2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap());
+        assert_eq!(vlan1.ipv6_addresses[0].prefix_len, 64);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_address_link_local() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface Loopback0").await;
+        let _ = send_cmd(&mut device, "ipv6 address FE80::10:127:0:0 link-local").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let lo0 = device.state.get_interface("Loopback0").unwrap();
+        assert_eq!(lo0.ipv6_addresses.len(), 1);
+        assert_eq!(lo0.ipv6_addresses[0].address, "fe80::10:127:0:0".parse::<std::net::Ipv6Addr>().unwrap());
+        assert_eq!(lo0.ipv6_addresses[0].addr_type, device_state::Ipv6AddrType::LinkLocal);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_enable() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface GigabitEthernet1/0/1").await;
+        let _ = send_cmd(&mut device, "ipv6 enable").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let gi1 = device.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        assert!(gi1.ipv6_enabled, "ipv6 enable should set ipv6_enabled");
+        assert!(gi1.ipv6_link_local().is_some(), "ipv6 enable should generate link-local");
+    }
+
+    #[tokio::test]
+    async fn test_show_ipv6_interface_brief() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface Vlan1").await;
+        let _ = send_cmd(&mut device, "ipv6 address 2001:db8::1/64").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ipv6 interface brief").await;
+        assert!(output.contains("[up/up]"), "Should show interface status: {:?}", output);
+        assert!(output.contains("2001:db8::1"), "Should show global address: {:?}", output);
+        assert!(output.contains("unassigned"), "Interfaces without IPv6 should show 'unassigned': {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ipv6_route() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface Vlan1").await;
+        let _ = send_cmd(&mut device, "ipv6 address 2001:db8::1/64").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ipv6 route").await;
+        assert!(output.contains("IPv6 Routing Table"), "Should have header: {:?}", output);
+        assert!(output.contains("Codes: C - Connected"), "Should have codes: {:?}", output);
+        assert!(output.contains("2001:db8::/64"), "Should have connected route: {:?}", output);
+        assert!(output.contains("2001:db8::1/128"), "Should have local route: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_router_ospf() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ipv6 router ospf 1").await;
+
+        assert!(matches!(device.mode, CliMode::ConfigSub(ref s) if s == "config-router"),
+            "Should enter config-router mode: {:?}", device.mode);
+        assert_eq!(device.state.ospfv3_processes.len(), 1);
+        assert_eq!(device.state.ospfv3_processes[0].process_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_ospf_on_interface() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ipv6 router ospf 1").await;
+        let _ = send_cmd(&mut device, "exit").await;
+        let _ = send_cmd(&mut device, "interface Loopback0").await;
+        let _ = send_cmd(&mut device, "ipv6 ospf 1 area 0").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let lo0 = device.state.get_interface("Loopback0").unwrap();
+        assert!(lo0.ospfv3_config.is_some(), "Should have OSPFv3 config");
+        let ospf = lo0.ospfv3_config.as_ref().unwrap();
+        assert_eq!(ospf.process_id, 1);
+        assert_eq!(ospf.area_id, 0);
+
+        // Area should be created in the process
+        assert!(!device.state.ospfv3_processes[0].areas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_show_ipv6_ospf() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ipv6 router ospf 1").await;
+        let _ = send_cmd(&mut device, "exit").await;
+        let _ = send_cmd(&mut device, "interface Loopback0").await;
+        let _ = send_cmd(&mut device, "ipv6 ospf 1 area 0").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ipv6 ospf").await;
+        assert!(output.contains("ospfv3 1"), "Should show OSPFv3 process: {:?}", output);
+        assert!(output.contains("BACKBONE(0)"), "Should show area 0: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ipv6_ospf_interface_brief() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ipv6 router ospf 1").await;
+        let _ = send_cmd(&mut device, "exit").await;
+        let _ = send_cmd(&mut device, "interface Loopback0").await;
+        let _ = send_cmd(&mut device, "ipv6 ospf 1 area 0").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ipv6 ospf interface brief").await;
+        assert!(output.contains("Interface"), "Should have header: {:?}", output);
+        assert!(output.contains("Lo0"), "Should show Loopback0 as Lo0: {:?}", output);
+        assert!(output.contains("LOOP"), "Loopback should show LOOP state: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_running_config() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ipv6 unicast-routing").await;
+        let _ = send_cmd(&mut device, "ipv6 router ospf 1").await;
+        let _ = send_cmd(&mut device, "exit").await;
+        let _ = send_cmd(&mut device, "interface Loopback0").await;
+        let _ = send_cmd(&mut device, "ipv6 address 2a11:d940:2:7f00::/128").await;
+        let _ = send_cmd(&mut device, "ipv6 address FE80::10:127:0:0 link-local").await;
+        let _ = send_cmd(&mut device, "ipv6 ospf 1 area 0").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let config = device.state.generate_running_config();
+        assert!(config.contains("ipv6 unicast-routing"), "Config should have ipv6 unicast-routing");
+        assert!(config.contains("ipv6 address fe80::10:127:0:0 link-local") ||
+                config.contains("ipv6 address FE80::10:127:0:0 link-local"),
+            "Config should have link-local address: {:?}",
+            config.lines().filter(|l| l.contains("ipv6")).collect::<Vec<_>>());
+        assert!(config.contains("ipv6 address 2a11:d940:2:7f00::/128"),
+            "Config should have global address");
+        assert!(config.contains("ipv6 ospf 1 area 0"), "Config should have ospf area assignment");
+        assert!(config.contains("ipv6 router ospf 1"), "Config should have ospf process");
+    }
+
+    #[tokio::test]
+    async fn test_ip_not_ambiguous_with_ipv6() {
+        // Verify that "ip" is not ambiguous with "ipv6" (exact match should win)
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip interface brief").await;
+        assert!(!output.contains("Ambiguous"), "'show ip' should not be ambiguous: {:?}", output);
+        assert!(output.contains("Interface"), "Should show ip interface brief output: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ipv6_incomplete() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ipv6").await;
+        assert!(output.contains("Incomplete command"), "'show ipv6' alone should be incomplete: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_static_route() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "ipv6 route ::/0 2001:db8::254").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        assert_eq!(device.state.ipv6_static_routes.len(), 1);
+        let config = device.state.generate_running_config();
+        assert!(config.contains("ipv6 route ::/0 2001:db8::254"), "Config should show IPv6 static route");
+    }
+
+    #[tokio::test]
+    async fn test_loopback_interface_creation() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface Loopback0").await;
+
+        // Loopback should be created and always up/up
+        let lo0 = device.state.get_interface("Loopback0").unwrap();
+        assert!(lo0.admin_up, "Loopback should be admin up");
+        assert!(lo0.link_up, "Loopback should be link up");
+    }
 }

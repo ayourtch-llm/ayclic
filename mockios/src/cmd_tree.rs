@@ -221,7 +221,22 @@ pub fn find_matches<'a>(
         .collect();
 
     if !keyword_matches.is_empty() {
-        keyword_matches
+        // If exactly one keyword is an exact match, prefer it over prefix matches.
+        // This is how real IOS works: "ip" is not ambiguous with "ipv6" because
+        // "ip" is an exact match for the "ip" keyword.
+        let exact_matches: Vec<&'a CommandNode> = keyword_matches
+            .iter()
+            .copied()
+            .filter(|n| match &n.matcher {
+                TokenMatcher::Keyword(kw) => kw.to_lowercase() == token_lower,
+                _ => false,
+            })
+            .collect();
+        if exact_matches.len() == 1 {
+            exact_matches
+        } else {
+            keyword_matches
+        }
     } else {
         all_matches
     }

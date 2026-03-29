@@ -1,7 +1,7 @@
 //! Structured device state — the "data model" behind the CLI.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::InstallState;
 
@@ -50,6 +50,10 @@ pub struct DeviceState {
     pub spanning_tree_mode: String,
     pub vtp_mode: String,
     pub vtp_domain: String,
+    // IPv6 state
+    pub ipv6_unicast_routing: bool,
+    pub ipv6_static_routes: Vec<Ipv6StaticRoute>,
+    pub ospfv3_processes: Vec<OspfV3Process>,
 }
 
 pub struct InterfaceState {
@@ -64,6 +68,10 @@ pub struct InterfaceState {
     pub switchport_mode: Option<String>,
     pub vlan: Option<u16>,
     pub mac_address: String, // "xxxx.xxxx.xxxx" format
+    // IPv6 state
+    pub ipv6_enabled: bool,
+    pub ipv6_addresses: Vec<Ipv6AddrConfig>,
+    pub ospfv3_config: Option<InterfaceOspfV3Config>,
     // Counters (simplified)
     pub input_packets: u64,
     pub output_packets: u64,
@@ -90,6 +98,140 @@ pub struct StaticRoute {
     pub admin_distance: u8,
 }
 
+// ─── IPv6 Types ──────────────────────────────────────────────────────────────
+
+/// An IPv6 address configured on an interface, with prefix length and type.
+#[derive(Clone, Debug)]
+pub struct Ipv6AddrConfig {
+    pub address: Ipv6Addr,
+    pub prefix_len: u8,
+    pub addr_type: Ipv6AddrType,
+    pub eui64: bool, // was this auto-generated via EUI-64?
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ipv6AddrType {
+    LinkLocal,
+    Global,
+}
+
+/// An entry in the IPv6 routing table (forwarding-engine-ready).
+#[derive(Clone, Debug)]
+pub struct Ipv6Route {
+    pub prefix: Ipv6Addr,
+    pub prefix_len: u8,
+    pub route_type: Ipv6RouteType,
+    pub admin_distance: u16,
+    pub metric: u32,
+    pub next_hop: Option<Ipv6Addr>,
+    pub interface: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ipv6RouteType {
+    Connected,      // C
+    Local,          // L
+    LocalConnected, // LC (loopback connected)
+    Static,         // S
+    OspfIntra,      // O
+    OspfInter,      // OI
+    OspfExt1,       // OE1
+    OspfExt2,       // OE2
+    NdDefault,      // ND
+    NdPrefix,       // NDp
+}
+
+impl Ipv6RouteType {
+    /// Short code as displayed in `show ipv6 route`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Connected => "C",
+            Self::Local => "L",
+            Self::LocalConnected => "LC",
+            Self::Static => "S",
+            Self::OspfIntra => "O",
+            Self::OspfInter => "OI",
+            Self::OspfExt1 => "OE1",
+            Self::OspfExt2 => "OE2",
+            Self::NdDefault => "ND",
+            Self::NdPrefix => "NDp",
+        }
+    }
+}
+
+/// IPv6 static route (config: `ipv6 route <prefix>/<len> <next-hop|interface>`).
+#[derive(Clone, Debug)]
+pub struct Ipv6StaticRoute {
+    pub prefix: Ipv6Addr,
+    pub prefix_len: u8,
+    pub next_hop: Option<Ipv6Addr>,
+    pub interface: Option<String>,
+    pub admin_distance: u8,
+}
+
+/// OSPFv3 process state (forwarding-engine-ready structure).
+#[derive(Clone, Debug)]
+pub struct OspfV3Process {
+    pub process_id: u16,
+    pub router_id: Option<Ipv4Addr>, // OSPFv3 still uses IPv4 router-ID
+    pub areas: Vec<OspfV3Area>,
+    pub reference_bandwidth: u32, // Mbps, default 100
+    pub spf_delay: u32,           // initial delay ms, default 5000
+    pub spf_hold: u32,            // min hold ms, default 10000
+    pub spf_max_wait: u32,        // max wait ms, default 10000
+}
+
+impl OspfV3Process {
+    pub fn new(process_id: u16) -> Self {
+        Self {
+            process_id,
+            router_id: None,
+            areas: Vec::new(),
+            reference_bandwidth: 100,
+            spf_delay: 5000,
+            spf_hold: 10000,
+            spf_max_wait: 10000,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OspfV3Area {
+    pub area_id: u32,
+    pub area_type: OspfV3AreaType,
+    pub spf_executions: u32,
+    pub lsa_count: u32,
+    pub lsa_checksum: u32,
+}
+
+impl OspfV3Area {
+    pub fn new(area_id: u32) -> Self {
+        Self {
+            area_id,
+            area_type: OspfV3AreaType::Normal,
+            spf_executions: 0,
+            lsa_count: 0,
+            lsa_checksum: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum OspfV3AreaType {
+    Normal,
+    Stub,
+    Nssa,
+}
+
+/// Per-interface OSPFv3 config.
+#[derive(Clone, Debug)]
+pub struct InterfaceOspfV3Config {
+    pub process_id: u16,
+    pub area_id: u32,
+    pub network_type: Option<String>, // "point-to-point", "broadcast", etc.
+    pub cost: Option<u32>,
+}
+
 impl InterfaceState {
     pub fn new(name: &str) -> Self {
         // Generate a deterministic MAC based on the interface name hash
@@ -106,6 +248,9 @@ impl InterfaceState {
             switchport_mode: None,
             vlan: None,
             mac_address: mac,
+            ipv6_enabled: false,
+            ipv6_addresses: Vec::new(),
+            ospfv3_config: None,
             input_packets: 0,
             output_packets: 0,
             input_bytes: 0,
@@ -133,6 +278,38 @@ impl InterfaceState {
             "{:02x}{:02x}.{:02x}{:02x}.{:02x}{:02x}",
             b0, b1, b2, b3, b4, b5
         )
+    }
+
+    /// Generate an EUI-64 link-local IPv6 address from this interface's MAC.
+    /// MAC format: "xxxx.xxxx.xxxx" (Cisco dotted) → FE80::EUI64
+    pub fn generate_eui64_link_local(&self) -> Ipv6Addr {
+        mac_to_eui64_link_local(&self.mac_address)
+    }
+
+    /// Get the link-local address for this interface.
+    /// Returns the explicitly configured one, or auto-generated EUI-64 if ipv6 is enabled.
+    pub fn ipv6_link_local(&self) -> Option<Ipv6Addr> {
+        // Check for explicitly configured link-local first
+        for addr in &self.ipv6_addresses {
+            if addr.addr_type == Ipv6AddrType::LinkLocal {
+                return Some(addr.address);
+            }
+        }
+        // Auto-generate from MAC if IPv6 is enabled or any global address exists
+        if self.ipv6_enabled || self.ipv6_addresses.iter().any(|a| a.addr_type == Ipv6AddrType::Global) {
+            return Some(self.generate_eui64_link_local());
+        }
+        None
+    }
+
+    /// Get all global IPv6 addresses configured on this interface.
+    pub fn ipv6_global_addrs(&self) -> Vec<&Ipv6AddrConfig> {
+        self.ipv6_addresses.iter().filter(|a| a.addr_type == Ipv6AddrType::Global).collect()
+    }
+
+    /// Whether this interface has any IPv6 configuration (enabled or addresses).
+    pub fn has_ipv6(&self) -> bool {
+        self.ipv6_enabled || !self.ipv6_addresses.is_empty()
     }
 
     /// Generate detailed `show interfaces` output for this interface (IOS format).
@@ -216,6 +393,40 @@ impl InterfaceState {
 /// Convert an IPv4 netmask to prefix length.
 fn ipv4_mask_to_prefix_len(mask: Ipv4Addr) -> u8 {
     u32::from(mask).count_ones() as u8
+}
+
+/// Generate an EUI-64 link-local address from a Cisco dotted MAC (xxxx.xxxx.xxxx).
+pub fn mac_to_eui64_link_local(mac: &str) -> Ipv6Addr {
+    // Parse MAC bytes from Cisco dotted format or colon format
+    let hex: String = mac.replace('.', "").replace(':', "").to_lowercase();
+    if hex.len() < 12 {
+        return Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+    }
+    let bytes: Vec<u8> = (0..6)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0))
+        .collect();
+
+    // EUI-64: insert FF:FE in the middle, flip bit 7 (universal/local)
+    let b0 = bytes[0] ^ 0x02; // flip U/L bit
+    let eui64: [u8; 8] = [b0, bytes[1], bytes[2], 0xff, 0xfe, bytes[3], bytes[4], bytes[5]];
+
+    Ipv6Addr::new(
+        0xfe80, 0, 0, 0,
+        u16::from_be_bytes([eui64[0], eui64[1]]),
+        u16::from_be_bytes([eui64[2], eui64[3]]),
+        u16::from_be_bytes([eui64[4], eui64[5]]),
+        u16::from_be_bytes([eui64[6], eui64[7]]),
+    )
+}
+
+/// Apply a prefix length mask to an IPv6 address (zero out host bits).
+pub fn ipv6_apply_prefix(addr: Ipv6Addr, prefix_len: u8) -> Ipv6Addr {
+    let bits = u128::from(addr);
+    if prefix_len >= 128 {
+        return addr;
+    }
+    let mask = !((1u128 << (128 - prefix_len)) - 1);
+    Ipv6Addr::from(bits & mask)
 }
 
 /// Convert a colon-separated MAC address (e.g., "00:A3:D1:4F:22:80") to
@@ -408,6 +619,9 @@ impl DeviceState {
             spanning_tree_mode: "rapid-pvst".to_string(),
             vtp_mode: "transparent".to_string(),
             vtp_domain: String::new(),
+            ipv6_unicast_routing: false,
+            ipv6_static_routes: Vec::new(),
+            ospfv3_processes: Vec::new(),
         }
     }
 
@@ -886,6 +1100,280 @@ impl DeviceState {
         output.push_str(&format!("Total Mac Addresses for this criterion: {}", count));
         output
     }
+
+    // ─── IPv6 Show Commands ──────────────────────────────────────────────────
+
+    /// Generate `show ipv6 interface brief` output matching real IOS format.
+    pub fn generate_show_ipv6_interface_brief(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for iface in &self.interfaces {
+            let (status, protocol) = if !iface.admin_up {
+                ("administratively down", "down")
+            } else if iface.link_up {
+                ("up", "up")
+            } else {
+                ("down", "down")
+            };
+
+            // Interface name — abbreviated if > 23 chars (same as show ip interface brief)
+            let iface_display = abbreviate_interface_name(&iface.name);
+            lines.push(format!("{:<23}[{}/{}]", iface_display, status, protocol));
+
+            // IPv6 addresses: link-local first, then globals, or "unassigned"
+            if let Some(ll) = iface.ipv6_link_local() {
+                lines.push(format!("    {}", ll));
+                for global in iface.ipv6_global_addrs() {
+                    // Format: address without prefix for brief display
+                    lines.push(format!("    {}", global.address));
+                }
+            } else {
+                lines.push("    unassigned".to_string());
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Compute the IPv6 routing table from interface addresses and static routes.
+    pub fn compute_ipv6_routes(&self) -> Vec<Ipv6Route> {
+        let mut routes: Vec<Ipv6Route> = Vec::new();
+
+        for iface in &self.interfaces {
+            if !iface.admin_up || !iface.link_up {
+                continue;
+            }
+
+            let is_loopback = iface.name.starts_with("Loopback");
+
+            for addr_cfg in &iface.ipv6_addresses {
+                if addr_cfg.addr_type == Ipv6AddrType::LinkLocal {
+                    continue; // link-locals don't go in routing table
+                }
+
+                let prefix = ipv6_apply_prefix(addr_cfg.address, addr_cfg.prefix_len);
+
+                if is_loopback && addr_cfg.prefix_len == 128 {
+                    // Loopback /128: LC (Local Connected)
+                    routes.push(Ipv6Route {
+                        prefix: addr_cfg.address,
+                        prefix_len: 128,
+                        route_type: Ipv6RouteType::LocalConnected,
+                        admin_distance: 0,
+                        metric: 0,
+                        next_hop: None,
+                        interface: Some(iface.name.clone()),
+                    });
+                } else {
+                    // Connected route (network)
+                    routes.push(Ipv6Route {
+                        prefix,
+                        prefix_len: addr_cfg.prefix_len,
+                        route_type: Ipv6RouteType::Connected,
+                        admin_distance: 0,
+                        metric: 0,
+                        next_hop: None,
+                        interface: Some(iface.name.clone()),
+                    });
+
+                    // Local route (host /128)
+                    routes.push(Ipv6Route {
+                        prefix: addr_cfg.address,
+                        prefix_len: 128,
+                        route_type: Ipv6RouteType::Local,
+                        admin_distance: 0,
+                        metric: 0,
+                        next_hop: None,
+                        interface: Some(iface.name.clone()),
+                    });
+                }
+            }
+        }
+
+        // Static routes
+        for sr in &self.ipv6_static_routes {
+            routes.push(Ipv6Route {
+                prefix: sr.prefix,
+                prefix_len: sr.prefix_len,
+                route_type: Ipv6RouteType::Static,
+                admin_distance: sr.admin_distance as u16,
+                metric: 0,
+                next_hop: sr.next_hop,
+                interface: sr.interface.clone(),
+            });
+        }
+
+        // Multicast catch-all: FF00::/8 via Null0
+        routes.push(Ipv6Route {
+            prefix: "ff00::".parse().unwrap(),
+            prefix_len: 8,
+            route_type: Ipv6RouteType::Local,
+            admin_distance: 0,
+            metric: 0,
+            next_hop: None,
+            interface: Some("Null0".to_string()),
+        });
+
+        routes
+    }
+
+    /// Generate `show ipv6 route` output matching real IOS format.
+    pub fn generate_show_ipv6_route(&self) -> String {
+        let routes = self.compute_ipv6_routes();
+        let entry_count = routes.len();
+
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!("IPv6 Routing Table - default - {} entries", entry_count));
+        lines.push("Codes: C - Connected, L - Local, S - Static, U - Per-user Static route".to_string());
+        lines.push("       B - BGP, R - RIP, I1 - ISIS L1, I2 - ISIS L2".to_string());
+        lines.push("       IA - ISIS interarea, IS - ISIS summary, D - EIGRP, EX - EIGRP external".to_string());
+        lines.push("       ND - ND Default, NDp - ND Prefix, DCE - Destination, NDr - Redirect".to_string());
+        lines.push("       O - OSPF Intra, OI - OSPF Inter, OE1 - OSPF ext 1, OE2 - OSPF ext 2".to_string());
+        lines.push("       ON1 - OSPF NSSA ext 1, ON2 - OSPF NSSA ext 2, a - Application".to_string());
+
+        for route in &routes {
+            let code = route.route_type.code();
+            let prefix_str = format!("{}/{}", route.prefix, route.prefix_len);
+            lines.push(format!("{:<4}{} [{}/{}]",
+                code, prefix_str, route.admin_distance, route.metric));
+
+            // Next-hop line
+            if let Some(nh) = route.next_hop {
+                if let Some(ref iface) = route.interface {
+                    lines.push(format!("     via {}, {}", nh, iface));
+                } else {
+                    lines.push(format!("     via {}", nh));
+                }
+            } else if let Some(ref iface) = route.interface {
+                let via_type = match route.route_type {
+                    Ipv6RouteType::Connected => "directly connected",
+                    Ipv6RouteType::Local | Ipv6RouteType::LocalConnected => "receive",
+                    _ => "directly connected",
+                };
+                lines.push(format!("     via {}, {}", iface, via_type));
+            }
+        }
+
+        lines.join("\n")
+    }
+
+    /// Generate `show ipv6 ospf` output matching real IOS format.
+    pub fn generate_show_ipv6_ospf(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+
+        for proc in &self.ospfv3_processes {
+            let rid = proc.router_id
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "0.0.0.0".to_string());
+
+            lines.push(format!(" Routing Process \"ospfv3 {}\" with ID {}", proc.process_id, rid));
+            lines.push(" Supports NSSA (compatible with RFC 3101)".to_string());
+            lines.push(" Does not support Database Exchange Summary List Optimization (RFC 5243)".to_string());
+            lines.push(" Event-log enabled, Maximum number of events: 1000, Mode: cyclic".to_string());
+            lines.push(" Router is not originating router-LSAs with maximum metric".to_string());
+            lines.push(format!(" Initial SPF schedule delay {} msecs", proc.spf_delay));
+            lines.push(format!(" Minimum hold time between two consecutive SPFs {} msecs", proc.spf_hold));
+            lines.push(format!(" Maximum wait time between two consecutive SPFs {} msecs", proc.spf_max_wait));
+            lines.push(" Minimum LSA interval 5 secs".to_string());
+            lines.push(" Minimum LSA arrival 1000 msecs".to_string());
+            lines.push(" LSA group pacing timer 240 secs".to_string());
+            lines.push(" Interface flood pacing timer 33 msecs".to_string());
+            lines.push(" Retransmission pacing timer 66 msecs".to_string());
+            lines.push(" Retransmission limit dc 24 non-dc 24".to_string());
+            lines.push(" Number of external LSA 0. Checksum Sum 0x000000".to_string());
+
+            let normal_count = proc.areas.iter().filter(|a| a.area_type == OspfV3AreaType::Normal).count();
+            let stub_count = proc.areas.iter().filter(|a| a.area_type == OspfV3AreaType::Stub).count();
+            let nssa_count = proc.areas.iter().filter(|a| a.area_type == OspfV3AreaType::Nssa).count();
+            lines.push(format!(" Number of areas in this router is {}. {} normal {} stub {} nssa",
+                proc.areas.len(), normal_count, stub_count, nssa_count));
+            lines.push(" Graceful restart helper support enabled".to_string());
+            lines.push(format!(" Reference bandwidth unit is {} mbps", proc.reference_bandwidth));
+            lines.push(" RFC1583 compatibility enabled".to_string());
+
+            for area in &proc.areas {
+                let area_name = if area.area_id == 0 {
+                    "BACKBONE(0)".to_string()
+                } else {
+                    format!("{}", area.area_id)
+                };
+
+                // Count interfaces in this area
+                let iface_count = self.interfaces.iter()
+                    .filter(|i| i.ospfv3_config.as_ref()
+                        .map(|c| c.process_id == proc.process_id && c.area_id == area.area_id)
+                        .unwrap_or(false))
+                    .count();
+
+                let active = if iface_count > 0 && self.interfaces.iter()
+                    .any(|i| i.ospfv3_config.as_ref()
+                        .map(|c| c.process_id == proc.process_id && c.area_id == area.area_id)
+                        .unwrap_or(false) && i.admin_up && i.link_up)
+                {
+                    ""
+                } else {
+                    " (Inactive)"
+                };
+
+                lines.push(format!("    Area {}{}", area_name, active));
+                lines.push(format!("        Number of interfaces in this area is {}", iface_count));
+                lines.push(format!("        SPF algorithm executed {} times", area.spf_executions));
+                lines.push(format!("        Number of LSA {}. Checksum Sum 0x{:06X}", area.lsa_count, area.lsa_checksum));
+                lines.push("        Number of DCbitless LSA 0".to_string());
+                lines.push("        Number of indication LSA 0".to_string());
+                lines.push("        Number of DoNotAge LSA 0".to_string());
+                lines.push("        Flood list length 0".to_string());
+            }
+        }
+
+        if lines.is_empty() {
+            return String::new();
+        }
+
+        lines.join("\n")
+    }
+
+    /// Generate `show ipv6 ospf interface brief` output.
+    pub fn generate_show_ipv6_ospf_interface_brief(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("Interface    PID   Area            Intf ID    Cost  State Nbrs F/C".to_string());
+
+        let mut intf_id = 1u32;
+        for iface in &self.interfaces {
+            if let Some(ref ospf_cfg) = iface.ospfv3_config {
+                let short_name = short_interface_name(&iface.name);
+
+                let cost = ospf_cfg.cost.unwrap_or_else(|| {
+                    // Auto-calculate: reference_bandwidth / interface_bandwidth
+                    let ref_bw = self.ospfv3_processes.iter()
+                        .find(|p| p.process_id == ospf_cfg.process_id)
+                        .map(|p| p.reference_bandwidth)
+                        .unwrap_or(100);
+                    let iface_bw_mbps = match iface.speed.as_str() {
+                        "10" => 10u32,
+                        "100" => 100,
+                        "1000" => 1000,
+                        "10000" => 10000,
+                        _ => 1000, // default 1G for auto
+                    };
+                    std::cmp::max(1, ref_bw / iface_bw_mbps)
+                });
+
+                let state = if iface.name.starts_with("Loopback") {
+                    "LOOP"
+                } else if !iface.admin_up || !iface.link_up {
+                    "DOWN"
+                } else {
+                    "DR" // simplified — real IOS shows DR/BDR/DROTHER/P2P
+                };
+
+                lines.push(format!("{:<13}{:<6}{:<16}{:<11}{:<6}{:<6}0/0",
+                    short_name, ospf_cfg.process_id, ospf_cfg.area_id,
+                    intf_id, cost, state));
+                intf_id += 1;
+            }
+        }
+
+        lines.join("\n")
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1280,5 +1768,201 @@ mod tests {
             "Should count 5 admin-up interfaces, got output: {:?}",
             output
         );
+    }
+
+    // ─── IPv6 Tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eui64_link_local_from_cisco_mac() {
+        // Real device: MAC 18:8B:45:17:F7:80 → FE80::1A8B:45FF:FE17:F780
+        let ll = mac_to_eui64_link_local("188b.4517.f780");
+        // bit flip: 18 → 1A (bit 1 of first byte flipped)
+        assert_eq!(ll, "fe80::1a8b:45ff:fe17:f780".parse::<Ipv6Addr>().unwrap(),
+            "EUI-64 should match real IOS: got {}", ll);
+    }
+
+    #[test]
+    fn test_eui64_link_local_from_colon_mac() {
+        let ll = mac_to_eui64_link_local("00:A3:D1:4F:22:80");
+        // 00 → 02 (flip U/L bit), insert FF:FE
+        assert_eq!(ll, "fe80::2a3:d1ff:fe4f:2280".parse::<Ipv6Addr>().unwrap(),
+            "EUI-64 from colon MAC: got {}", ll);
+    }
+
+    #[test]
+    fn test_interface_ipv6_link_local_not_enabled() {
+        let iface = InterfaceState::new("GigabitEthernet1/0/1");
+        assert!(!iface.has_ipv6());
+        assert!(iface.ipv6_link_local().is_none());
+    }
+
+    #[test]
+    fn test_interface_ipv6_link_local_enabled() {
+        let mut iface = InterfaceState::new("GigabitEthernet1/0/1");
+        iface.ipv6_enabled = true;
+        assert!(iface.has_ipv6());
+        assert!(iface.ipv6_link_local().is_some());
+    }
+
+    #[test]
+    fn test_interface_ipv6_explicit_link_local() {
+        let mut iface = InterfaceState::new("Loopback0");
+        let explicit_ll: Ipv6Addr = "fe80::10:127:0:0".parse().unwrap();
+        iface.ipv6_addresses.push(Ipv6AddrConfig {
+            address: explicit_ll,
+            prefix_len: 128,
+            addr_type: Ipv6AddrType::LinkLocal,
+            eui64: false,
+        });
+        // Explicit link-local should be returned instead of EUI-64
+        assert_eq!(iface.ipv6_link_local().unwrap(), explicit_ll);
+    }
+
+    #[test]
+    fn test_interface_ipv6_global_address_implies_link_local() {
+        let mut iface = InterfaceState::new("Vlan1");
+        iface.ipv6_addresses.push(Ipv6AddrConfig {
+            address: "2001:db8::1".parse().unwrap(),
+            prefix_len: 64,
+            addr_type: Ipv6AddrType::Global,
+            eui64: false,
+        });
+        // Having a global address should auto-generate link-local
+        assert!(iface.ipv6_link_local().is_some());
+        assert!(iface.has_ipv6());
+    }
+
+    #[test]
+    fn test_ipv6_apply_prefix() {
+        let addr: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let prefix = ipv6_apply_prefix(addr, 64);
+        assert_eq!(prefix, "2001:db8::".parse::<Ipv6Addr>().unwrap());
+
+        let addr2: Ipv6Addr = "2a11:d940:2:7f00::".parse().unwrap();
+        let prefix2 = ipv6_apply_prefix(addr2, 128);
+        assert_eq!(prefix2, addr2);
+    }
+
+    #[test]
+    fn test_show_ipv6_interface_brief_no_ipv6() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ipv6_interface_brief();
+        // All interfaces should show "unassigned" since no IPv6 configured
+        for line in output.lines() {
+            if line.starts_with("    ") {
+                assert_eq!(line.trim(), "unassigned",
+                    "Without IPv6 config, should show 'unassigned': {:?}", line);
+            }
+        }
+    }
+
+    #[test]
+    fn test_show_ipv6_interface_brief_with_addresses() {
+        let mut state = DeviceState::new("Switch1");
+        // Add IPv6 to Vlan1 like the real device
+        let vlan1 = state.get_interface_mut("Vlan1").unwrap();
+        vlan1.ipv6_addresses.push(Ipv6AddrConfig {
+            address: "2001:db8::1".parse().unwrap(),
+            prefix_len: 64,
+            addr_type: Ipv6AddrType::Global,
+            eui64: false,
+        });
+
+        let output = state.generate_show_ipv6_interface_brief();
+        // Vlan1 should show link-local (auto EUI-64) + global
+        assert!(output.contains("[up/up]"), "Should show status");
+        let vlan1_section: Vec<&str> = output.lines()
+            .skip_while(|l| !l.starts_with("Vlan1"))
+            .take_while(|l| l.starts_with("Vlan1") || l.starts_with("    "))
+            .collect();
+        assert!(vlan1_section.len() >= 3,
+            "Vlan1 should have name + link-local + global lines, got: {:?}", vlan1_section);
+        assert!(vlan1_section[1].trim().starts_with("FE80::") || vlan1_section[1].trim().starts_with("fe80::"),
+            "Second line should be link-local: {:?}", vlan1_section[1]);
+        assert!(vlan1_section[2].trim().contains("2001:db8::1"),
+            "Third line should be global address: {:?}", vlan1_section[2]);
+    }
+
+    #[test]
+    fn test_show_ipv6_route_with_connected() {
+        let mut state = DeviceState::new("Switch1");
+        // Add IPv6 to Vlan1
+        let vlan1 = state.get_interface_mut("Vlan1").unwrap();
+        vlan1.ipv6_addresses.push(Ipv6AddrConfig {
+            address: "2001:db8::1".parse().unwrap(),
+            prefix_len: 64,
+            addr_type: Ipv6AddrType::Global,
+            eui64: false,
+        });
+
+        let output = state.generate_show_ipv6_route();
+        assert!(output.contains("IPv6 Routing Table"), "Should have header");
+        assert!(output.contains("Codes: C - Connected"), "Should have codes");
+        // Connected route for 2001:db8::/64
+        assert!(output.contains("2001:db8::/64"), "Should have connected route");
+        // Local route for 2001:db8::1/128
+        assert!(output.contains("2001:db8::1/128"), "Should have local route");
+        // Multicast FF00::/8
+        assert!(output.contains("FF00::/8") || output.contains("ff00::/8"),
+            "Should have multicast route");
+    }
+
+    #[test]
+    fn test_show_ipv6_route_loopback_lc() {
+        let mut state = DeviceState::new("Switch1");
+        // Add a Loopback0 with /128
+        let mut lo0 = InterfaceState::new("Loopback0");
+        lo0.ipv6_addresses.push(Ipv6AddrConfig {
+            address: "2a11:d940:2:7f00::".parse().unwrap(),
+            prefix_len: 128,
+            addr_type: Ipv6AddrType::Global,
+            eui64: false,
+        });
+        state.interfaces.push(lo0);
+
+        let output = state.generate_show_ipv6_route();
+        // Loopback /128 should appear as LC (Local Connected)
+        assert!(output.contains("LC"), "Loopback /128 should show as LC route");
+    }
+
+    #[test]
+    fn test_show_ipv6_ospf_empty() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ipv6_ospf();
+        assert!(output.is_empty(), "No OSPFv3 processes configured should give empty output");
+    }
+
+    #[test]
+    fn test_show_ipv6_ospf_with_process() {
+        let mut state = DeviceState::new("Switch1");
+        let mut proc = OspfV3Process::new(1);
+        proc.router_id = Some("10.127.0.0".parse().unwrap());
+        proc.areas.push(OspfV3Area::new(0));
+        state.ospfv3_processes.push(proc);
+
+        let output = state.generate_show_ipv6_ospf();
+        assert!(output.contains("ospfv3 1"), "Should show process ID");
+        assert!(output.contains("10.127.0.0"), "Should show router ID");
+        assert!(output.contains("BACKBONE(0)"), "Should show area 0 as BACKBONE");
+        assert!(output.contains("(Inactive)"), "Area with no active interfaces should be Inactive");
+        assert!(output.contains("Reference bandwidth unit is 100 mbps"), "Should show reference bandwidth");
+    }
+
+    #[test]
+    fn test_ipv6_route_type_codes() {
+        assert_eq!(Ipv6RouteType::Connected.code(), "C");
+        assert_eq!(Ipv6RouteType::Local.code(), "L");
+        assert_eq!(Ipv6RouteType::LocalConnected.code(), "LC");
+        assert_eq!(Ipv6RouteType::Static.code(), "S");
+        assert_eq!(Ipv6RouteType::OspfIntra.code(), "O");
+        assert_eq!(Ipv6RouteType::NdDefault.code(), "ND");
+    }
+
+    #[test]
+    fn test_default_state_no_ipv6() {
+        let state = DeviceState::new("Switch1");
+        assert!(!state.ipv6_unicast_routing);
+        assert!(state.ipv6_static_routes.is_empty());
+        assert!(state.ospfv3_processes.is_empty());
     }
 }

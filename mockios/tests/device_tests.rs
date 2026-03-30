@@ -861,3 +861,147 @@ async fn test_show_power_inline() {
         output
     );
 }
+
+#[tokio::test]
+async fn test_show_port_security() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show port-security\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Secure Port"),
+        "show port-security missing 'Secure Port' column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("MaxSecureAddr"),
+        "show port-security missing 'MaxSecureAddr' column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("SecurityViolation"),
+        "show port-security missing 'SecurityViolation' column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Security Action"),
+        "show port-security missing 'Security Action' column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("-----------"),
+        "show port-security missing separator line, got:\n{}",
+        output
+    );
+}
+
+#[tokio::test]
+async fn test_show_port_security_address() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show port-security address\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Secure Mac Address Table"),
+        "show port-security address missing table header, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Mac Address"),
+        "show port-security address missing 'Mac Address' column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Total Addresses in System"),
+        "show port-security address missing total addresses line, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains(": 0"),
+        "show port-security address total should be 0, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Max Addresses limit in System"),
+        "show port-security address missing max limit line, got:\n{}",
+        output
+    );
+}
+
+#[tokio::test]
+async fn test_show_port_security_interface_no_arg() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    // "show port-security interface" without an interface name shows the summary table
+    device
+        .send(b"show port-security interface\n")
+        .await
+        .unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Secure Port"),
+        "show port-security interface (no arg) missing 'Secure Port' column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("-----------"),
+        "show port-security interface (no arg) missing separator, got:\n{}",
+        output
+    );
+}
+
+#[tokio::test]
+async fn test_show_port_security_interface_with_name() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device
+        .send(b"show port-security interface GigabitEthernet1/0/1\n")
+        .await
+        .unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Port Security"),
+        "show port-security interface <name> missing 'Port Security' field, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Violation Mode"),
+        "show port-security interface <name> missing 'Violation Mode', got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Maximum MAC Addresses"),
+        "show port-security interface <name> missing 'Maximum MAC Addresses', got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Security Violation Count"),
+        "show port-security interface <name> missing 'Security Violation Count', got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("GigabitEthernet1/0/1"),
+        "show port-security interface <name> missing interface name in output, got:\n{}",
+        output
+    );
+}

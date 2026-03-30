@@ -2661,6 +2661,132 @@ impl Md5Hasher {
 }
 
 #[cfg(test)]
+mod pipe_filter_tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+Cisco IOS Software, Version 15.2(4)M3
+Router1 uptime is 2 days, 4 hours
+System image file is flash:c2900-universalk9-mz.SPA.154-3.M3.bin
+Cisco CISCO2901/K9 (revision 1.0) with 483328K/32768K bytes of memory.";
+
+    // --- Include ---
+
+    #[test]
+    fn test_include_basic() {
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Include("uptime".to_string()));
+        assert_eq!(result, "Router1 uptime is 2 days, 4 hours");
+    }
+
+    #[test]
+    fn test_include_regex_or() {
+        // Real IOS uses regex: `uptime|Version` should match both lines
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Include("uptime|Version".to_string()));
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2, "expected 2 lines, got: {:?}", lines);
+        assert!(lines.iter().any(|l| l.contains("Version")), "missing Version line");
+        assert!(lines.iter().any(|l| l.contains("uptime")), "missing uptime line");
+    }
+
+    #[test]
+    fn test_include_case_sensitive_match() {
+        // "Version" (capital V) must match
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Include("Version".to_string()));
+        assert!(result.contains("Version"), "should match 'Version'");
+    }
+
+    #[test]
+    fn test_include_case_sensitive_no_match() {
+        // "version" (lowercase) must NOT match "Version"
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Include("version".to_string()));
+        assert!(result.is_empty(), "lowercase 'version' should not match 'Version', got: {:?}", result);
+    }
+
+    #[test]
+    fn test_include_invalid_regex_fallback() {
+        // An invalid regex like "[unclosed" should fall back to literal matching
+        let input = "line with [unclosed bracket\nanother line";
+        let result = apply_pipe_filter(input, &PipeFilter::Include("[unclosed".to_string()));
+        assert_eq!(result, "line with [unclosed bracket");
+    }
+
+    // --- Exclude ---
+
+    #[test]
+    fn test_exclude_basic() {
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Exclude("uptime".to_string()));
+        assert!(!result.contains("uptime"), "excluded line should be removed");
+        assert!(result.contains("Version"), "non-excluded lines should remain");
+    }
+
+    #[test]
+    fn test_exclude_regex_or() {
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Exclude("uptime|Version".to_string()));
+        assert!(!result.contains("uptime"), "uptime line should be excluded");
+        assert!(!result.contains("Version"), "Version line should be excluded");
+        assert!(result.contains("flash:"), "other lines should remain");
+    }
+
+    #[test]
+    fn test_exclude_case_sensitive() {
+        // Excluding "version" (lowercase) should NOT remove the "Version" line
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Exclude("version".to_string()));
+        assert!(result.contains("Version"), "case-sensitive: 'version' should not exclude 'Version'");
+    }
+
+    // --- Begin ---
+
+    #[test]
+    fn test_begin_basic() {
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Begin("uptime".to_string()));
+        let lines: Vec<&str> = result.lines().collect();
+        // Should start from the "uptime" line and include everything after
+        assert_eq!(lines[0], "Router1 uptime is 2 days, 4 hours");
+        assert_eq!(lines.len(), 3, "should include uptime line and 2 following lines");
+    }
+
+    #[test]
+    fn test_begin_regex() {
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Begin("uptime|bytes".to_string()));
+        // Should start at first match (uptime)
+        assert!(result.starts_with("Router1 uptime"), "should start at first regex match");
+    }
+
+    #[test]
+    fn test_begin_case_sensitive_no_match() {
+        let result = apply_pipe_filter(SAMPLE, &PipeFilter::Begin("UPTIME".to_string()));
+        assert!(result.is_empty(), "case-sensitive begin: 'UPTIME' should not match 'uptime'");
+    }
+
+    // --- Section ---
+
+    #[test]
+    fn test_section_basic() {
+        let input = "interface GigabitEthernet0/0\n ip address 10.0.0.1 255.255.255.0\n!\ninterface GigabitEthernet0/1\n ip address 192.168.1.1 255.255.255.0\n!";
+        let result = apply_pipe_filter(input, &PipeFilter::Section("10\\.0\\.0".to_string()));
+        assert!(result.contains("GigabitEthernet0/0"), "section with match should be included");
+        assert!(!result.contains("GigabitEthernet0/1"), "section without match should be excluded");
+    }
+
+    #[test]
+    fn test_section_regex_pattern() {
+        let input = "interface GigabitEthernet0/0\n ip address 10.0.0.1 255.255.255.0\n!\ninterface Loopback0\n ip address 1.1.1.1 255.255.255.255\n!";
+        // Match sections containing either interface type
+        let result = apply_pipe_filter(input, &PipeFilter::Section("Loopback|GigabitEthernet".to_string()));
+        assert!(result.contains("GigabitEthernet0/0"), "GigabitEthernet section should match");
+        assert!(result.contains("Loopback0"), "Loopback section should match");
+    }
+
+    #[test]
+    fn test_section_case_sensitive() {
+        let input = "interface GigabitEthernet0/0\n ip address 10.0.0.1 255.255.255.0\n!\ninterface Loopback0\n ip address 1.1.1.1 255.255.255.255\n!";
+        // lowercase "loopback" should not match "Loopback"
+        let result = apply_pipe_filter(input, &PipeFilter::Section("loopback".to_string()));
+        assert!(!result.contains("Loopback0"), "case-sensitive: 'loopback' should not match 'Loopback0'");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ayclic::raw_transport::RawTransport;

@@ -574,9 +574,8 @@ impl DeviceState {
         // Real IOS shows "notconnect" for Te ports without SFP, not "disabled".
         // Speed/duplex are already set to 10000/full by InterfaceState::new for Te ports.
         let te_interfaces: Vec<InterfaceState> = (1..=2).map(|n| {
-            let mut iface = InterfaceState::new(&format!("TenGigabitEthernet1/0/{}", n));
+            InterfaceState::new(&format!("TenGigabitEthernet1/0/{}", n))
             // admin_up=true (default), link_up=false (no SFP) → notconnect
-            iface
         }).collect();
 
         let mut interfaces = vec![vlan1];
@@ -1371,6 +1370,58 @@ Appliance trust: none\n",
         }
 
         ranges.join(",")
+    }
+
+    /// Generate `show interfaces counters` output matching real IOS format.
+    ///
+    /// Produces two tables: input counters and output counters.
+    /// Skips Vlan (SVI) interfaces — only physical ports are shown.
+    pub fn generate_show_interfaces_counters(&self) -> String {
+        let mut lines = Vec::new();
+
+        // Input counters table
+        lines.push(format!(
+            "{:<16}{:>14}{:>14}{:>14}{:>14}",
+            "Port", "InOctets", "InUcastPkts", "InMcastPkts", "InBcastPkts"
+        ));
+        for iface in &self.interfaces {
+            if iface.name.starts_with("Vlan") {
+                continue;
+            }
+            let port = short_interface_name(&iface.name);
+            lines.push(format!(
+                "{:<16}{:>14}{:>14}{:>14}{:>14}",
+                port,
+                iface.input_bytes,
+                iface.input_packets,
+                0u64,
+                0u64,
+            ));
+        }
+
+        lines.push(String::new());
+
+        // Output counters table
+        lines.push(format!(
+            "{:<16}{:>14}{:>14}{:>14}{:>14}",
+            "Port", "OutOctets", "OutUcastPkts", "OutMcastPkts", "OutBcastPkts"
+        ));
+        for iface in &self.interfaces {
+            if iface.name.starts_with("Vlan") {
+                continue;
+            }
+            let port = short_interface_name(&iface.name);
+            lines.push(format!(
+                "{:<16}{:>14}{:>14}{:>14}{:>14}",
+                port,
+                iface.output_bytes,
+                iface.output_packets,
+                0u64,
+                0u64,
+            ));
+        }
+
+        lines.join("\n")
     }
 
     /// Generate `show interfaces description` output matching real IOS format.

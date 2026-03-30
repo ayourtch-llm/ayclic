@@ -1618,51 +1618,102 @@ Appliance trust: none\n",
         lines.join("\n")
     }
 
-    pub fn generate_show_mac_address_table(&self) -> String {
-        let header = "          Mac Address Table\n\
-            -------------------------------------------\n\
-            \n\
-            Vlan    Mac Address       Type        Ports\n\
-            ----    -----------       --------    -----";
+    /// Classify an interface as STATIC (SVI) or DYNAMIC (physical port).
+    fn mac_table_entry_type(iface: &InterfaceState) -> &'static str {
+        if iface.name.starts_with("Vlan") {
+            "STATIC"
+        } else {
+            "DYNAMIC"
+        }
+    }
 
-        let mut entries: Vec<String> = Vec::new();
-
+    /// Build the list of MAC table entries for admin-up interfaces.
+    /// Returns (vlan, mac, entry_type, port_name) tuples.
+    fn mac_table_entries(&self) -> Vec<(u16, String, &'static str, String)> {
+        let mut entries = Vec::new();
         for iface in &self.interfaces {
             if !iface.admin_up {
                 continue;
             }
-
-            let (vlan, port_name) = if iface.name.starts_with("Vlan") {
-                // SVI: extract VLAN number from name like "Vlan1"
+            let (vlan_num, port_name) = if iface.name.starts_with("Vlan") {
                 let vlan_num: u16 = iface.name
                     .strip_prefix("Vlan")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1);
-                let short = short_interface_name(&iface.name);
-                (vlan_num, short)
+                (vlan_num, short_interface_name(&iface.name))
             } else {
-                // Physical interface: use access VLAN (default 1)
                 let vlan_num = iface.vlan.unwrap_or(1);
-                let short = short_interface_name(&iface.name);
-                (vlan_num, short)
+                (vlan_num, short_interface_name(&iface.name))
             };
-
-            let mac = &iface.mac_address;
-            entries.push(format!(
-                "{:>4}    {}    {:<12}{}",
-                vlan, mac, "STATIC", port_name
-            ));
+            let entry_type = Self::mac_table_entry_type(iface);
+            entries.push((vlan_num, iface.mac_address.clone(), entry_type, port_name));
         }
+        entries
+    }
 
+    /// Format a list of MAC table entries into rows.
+    fn format_mac_table_rows(entries: &[(u16, String, &'static str, String)]) -> String {
+        entries
+            .iter()
+            .map(|(vlan, mac, entry_type, port)| {
+                format!("{:>4}    {}    {:<12}{}", vlan, mac, entry_type, port)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Standard MAC address table header matching real IOS 15.2 format.
+    fn mac_table_header() -> &'static str {
+        "          Mac Address Table\n\
+-------------------------------------------\n\
+\n\
+Vlan    Mac Address       Type        Ports\n\
+----    -----------       --------    -----"
+    }
+
+    pub fn generate_show_mac_address_table(&self) -> String {
+        let entries = self.mac_table_entries();
         let count = entries.len();
-        let mut output = header.to_string();
+        let mut output = Self::mac_table_header().to_string();
         if !entries.is_empty() {
             output.push('\n');
-            output.push_str(&entries.join("\n"));
+            output.push_str(&Self::format_mac_table_rows(&entries));
         }
         output.push('\n');
         output.push_str(&format!("Total Mac Addresses for this criterion: {}", count));
         output
+    }
+
+    pub fn generate_show_mac_address_table_dynamic(&self) -> String {
+        let entries: Vec<_> = self
+            .mac_table_entries()
+            .into_iter()
+            .filter(|(_, _, entry_type, _)| *entry_type == "DYNAMIC")
+            .collect();
+        let count = entries.len();
+        let mut output = Self::mac_table_header().to_string();
+        if !entries.is_empty() {
+            output.push('\n');
+            output.push_str(&Self::format_mac_table_rows(&entries));
+        }
+        output.push('\n');
+        output.push_str(&format!("Total Mac Addresses for this criterion: {}", count));
+        output
+    }
+
+    pub fn generate_show_mac_address_table_count(&self) -> String {
+        let entries = self.mac_table_entries();
+        let static_count = entries.iter().filter(|(_, _, t, _)| *t == "STATIC").count();
+        let dynamic_count = entries.iter().filter(|(_, _, t, _)| *t == "DYNAMIC").count();
+        let total = entries.len();
+        format!(
+            "Mac Entries for all vlans:\n\
+------------------------------------------\n\
+Dynamic Address Count : {}\n\
+Static  Address Count : {}\n\
+Total Mac Addresses   : {}",
+            dynamic_count, static_count, total
+        )
     }
 
     // ─── Protocols Show Command ──────────────────────────────────────────────
@@ -2687,6 +2738,101 @@ mod tests {
         assert!(
             output.contains("Total Mac Addresses for this criterion: 7"),
             "Should count 7 admin-up interfaces, got output: {:?}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_show_mac_address_table_header_exact_format() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_mac_address_table();
+
+        // Header must start with exactly these lines (no leading spaces from Rust indentation)
+        assert!(
+            output.starts_with("          Mac Address Table\n-------------------------------------------\n\nVlan    Mac Address       Type        Ports\n----    -----------       --------    -----"),
+            "Header format should match real IOS 15.2, got: {:?}",
+            &output[..output.len().min(200)]
+        );
+    }
+
+    #[test]
+    fn test_show_mac_address_table_svi_is_static_physical_is_dynamic() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_mac_address_table();
+
+        // SVI entries (Vl1) should be STATIC
+        let vl1_line = output.lines().find(|l| l.contains("Vl1")).unwrap();
+        assert!(
+            vl1_line.contains("STATIC"),
+            "SVI (Vl1) entry should have STATIC type, got: {:?}",
+            vl1_line
+        );
+
+        // Physical interface entries should be DYNAMIC
+        let gi1_line = output.lines().find(|l| l.contains("Gi1/0/1")).unwrap();
+        assert!(
+            gi1_line.contains("DYNAMIC"),
+            "Physical interface (Gi1/0/1) entry should have DYNAMIC type, got: {:?}",
+            gi1_line
+        );
+    }
+
+    #[test]
+    fn test_show_mac_address_table_dynamic_subcommand() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_mac_address_table_dynamic();
+
+        // Should have header
+        assert!(
+            output.contains("Mac Address Table"),
+            "Dynamic output should have header, got: {:?}",
+            output
+        );
+        // Should only have DYNAMIC entries, no STATIC
+        assert!(
+            output.contains("DYNAMIC"),
+            "Dynamic output should have DYNAMIC entries"
+        );
+        assert!(
+            !output.contains("STATIC"),
+            "Dynamic output should NOT have STATIC entries, got: {:?}",
+            output
+        );
+        // Physical interfaces should appear
+        assert!(output.contains("Gi1/0/1"), "Dynamic output should have Gi1/0/1");
+        // SVIs should NOT appear
+        assert!(!output.contains("Vl1"), "Dynamic output should not have SVI Vl1");
+    }
+
+    #[test]
+    fn test_show_mac_address_table_count_subcommand() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_mac_address_table_count();
+
+        // Should contain count summary lines
+        assert!(
+            output.contains("Dynamic Address Count"),
+            "Count output should have Dynamic Address Count line, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Static  Address Count"),
+            "Count output should have Static  Address Count line, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Total Mac Addresses"),
+            "Count output should have Total Mac Addresses line"
+        );
+        // Vlan1 SVI = 1 static; Gi1/0/1..4 + Te1/0/1..2 = 6 dynamic
+        assert!(
+            output.contains("Static  Address Count : 1"),
+            "Should have 1 static (Vlan1 SVI), got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Dynamic Address Count : 6"),
+            "Should have 6 dynamic (4 Gi + 2 Te), got: {:?}",
             output
         );
     }

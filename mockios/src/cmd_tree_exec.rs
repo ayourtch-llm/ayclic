@@ -698,6 +698,18 @@ pub fn handle_show_mac_address_table(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("{}\n{}", output, p));
 }
 
+pub fn handle_show_mac_address_table_dynamic(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_mac_address_table_dynamic();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
+pub fn handle_show_mac_address_table_count(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_mac_address_table_count();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
 pub fn handle_show_line(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!(
@@ -1479,7 +1491,13 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("mac", "MAC configuration")
                     .children(vec![
                         keyword("address-table", "MAC forwarding table")
-                            .handler(handle_show_mac_address_table),
+                            .handler(handle_show_mac_address_table)
+                            .children(vec![
+                                keyword("dynamic", "Show only dynamic entries")
+                                    .handler(handle_show_mac_address_table_dynamic),
+                                keyword("count", "Show the count of MAC address table entries")
+                                    .handler(handle_show_mac_address_table_count),
+                            ]),
                     ]),
                 keyword("spanning-tree", "Spanning tree topology")
                     .handler(handle_show_spanning_tree as CmdHandler)
@@ -1563,7 +1581,17 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("policy-map", "Show Policy Map")
                     .handler(handle_show_policy_map),
                 keyword("port-security", "Show secure port information")
-                    .handler(handle_show_port_security),
+                    .handler(handle_show_port_security as CmdHandler)
+                    .children(vec![
+                        keyword("interface", "Show secure port interface")
+                            .handler(handle_show_port_security_interface as CmdHandler)
+                            .children(vec![
+                                param("<name>", ParamType::RestOfLine, "Interface name")
+                                    .handler(handle_show_port_security_interface),
+                            ]),
+                        keyword("address", "Show secure port address")
+                            .handler(handle_show_port_security_address),
+                    ]),
                 keyword("power", "Switch Power")
                     .handler(handle_show_power as CmdHandler)
                     .children(vec![

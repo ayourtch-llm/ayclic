@@ -5034,6 +5034,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_show_mac_address_table_dynamic_cmd() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show mac address-table dynamic").await;
+        assert!(
+            output.contains("Mac Address Table"),
+            "show mac address-table dynamic should contain 'Mac Address Table', got: {:?}", output
+        );
+        assert!(
+            !output.contains("STATIC"),
+            "show mac address-table dynamic should not contain STATIC entries, got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_show_mac_address_table_count_cmd() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show mac address-table count").await;
+        assert!(
+            output.contains("Dynamic Address Count"),
+            "show mac address-table count should contain 'Dynamic Address Count', got: {:?}", output
+        );
+        assert!(
+            output.contains("Total Mac Addresses"),
+            "show mac address-table count should contain 'Total Mac Addresses', got: {:?}", output
+        );
+    }
+
+    #[tokio::test]
     async fn test_show_spanning_tree() {
         let mut device = setup_device("R1").await;
         let output = send_cmd(&mut device, "show spanning-tree").await;

@@ -744,6 +744,70 @@ impl DeviceState {
         lines.join("\n")
     }
 
+    /// Generate the secondary SAID/MTU table section for `show vlan`.
+    fn generate_vlan_said_table(&self) -> String {
+        let header = "\nVLAN Type  SAID       MTU   Parent RingNo BridgeNo Stp  BrdgMode Trans1 Trans2\n\
+---- ----- ---------- ----- ------ ------ -------- ---- -------- ------ ------";
+        let mut lines = vec![header.to_string()];
+        for vlan in &self.vlans {
+            let status = if vlan.unsupported || !vlan.active {
+                "act/--"
+            } else {
+                "act/--"
+            };
+            let said = 100000u32 + vlan.id as u32;
+            lines.push(format!(
+                "{:<5}{:<6}{:<11}{:<6}{:<7}{:<7}{:<9}{:<5}{:<9}{:<7}{}",
+                vlan.id, status, said, 1500, " ", " ", " ", " ", " ", " ", " "
+            ));
+        }
+        lines.join("\n")
+    }
+
+    /// Generate the `show vlan` output (brief table + SAID/MTU section).
+    pub fn generate_show_vlan(&self) -> String {
+        format!("{}{}", self.generate_show_vlan_brief(), self.generate_vlan_said_table())
+    }
+
+    /// Generate `show vlan id <N>` output for a specific VLAN.
+    pub fn generate_show_vlan_id(&self, vlan_id: u16) -> String {
+        let vlan = self.vlans.iter().find(|v| v.id == vlan_id);
+        match vlan {
+            None => format!("VLAN id {} not found in current VLAN database", vlan_id),
+            Some(vlan) => {
+                let status = if vlan.unsupported || !vlan.active {
+                    "act/unsup"
+                } else {
+                    "active"
+                };
+                let ports = self.vlan_access_ports(vlan_id);
+                const MAX_PORTS_WIDTH: usize = 31;
+                let port_lines = Self::wrap_comma_list(&ports, MAX_PORTS_WIDTH);
+                let first_ports = port_lines.first().map(|s| s.as_str()).unwrap_or("");
+
+                let mut lines = vec![
+                    "VLAN Name                             Status    Ports".to_string(),
+                    "---- -------------------------------- --------- -------------------------------".to_string(),
+                    format!("{:<5}{:<33}{:<10}{}", vlan.id, vlan.name, status, first_ports),
+                ];
+                let indent = " ".repeat(48);
+                for continuation in port_lines.iter().skip(1) {
+                    lines.push(format!("{}{}", indent, continuation));
+                }
+
+                let said = 100000u32 + vlan.id as u32;
+                lines.push(String::new());
+                lines.push("VLAN Type  SAID       MTU   Parent RingNo BridgeNo Stp  BrdgMode Trans1 Trans2".to_string());
+                lines.push("---- ----- ---------- ----- ------ ------ -------- ---- -------- ------ ------".to_string());
+                lines.push(format!(
+                    "{:<5}{:<6}{:<11}{:<6}{:<7}{:<7}{:<9}{:<5}{:<9}{:<7}{}",
+                    vlan.id, "act/--", said, 1500, " ", " ", " ", " ", " ", " ", " "
+                ));
+                lines.join("\n")
+            }
+        }
+    }
+
     /// Build the shared config body lines (used by both running-config and startup-config).
     fn build_config_body(&self) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();

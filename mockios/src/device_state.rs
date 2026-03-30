@@ -887,8 +887,19 @@ impl DeviceState {
         lines.push("lldp run".to_string());
         lines.push("!".to_string());
 
-        // Interfaces
-        for iface in &self.interfaces {
+        // Interfaces: real IOS shows physical first, then SVIs (Vlan/Loopback)
+        let physical_first = {
+            let mut sorted: Vec<&InterfaceState> = self.interfaces.iter().collect();
+            sorted.sort_by_key(|i| {
+                if i.name.starts_with("Vlan") || i.name.starts_with("Loopback") {
+                    1 // SVIs and loopbacks after physical
+                } else {
+                    0 // Physical first
+                }
+            });
+            sorted
+        };
+        for iface in physical_first {
             lines.push(format!("interface {}", iface.name));
             if !iface.description.is_empty() {
                 lines.push(format!(" description {}", iface.description));
@@ -941,24 +952,7 @@ impl DeviceState {
             lines.push("!".to_string());
         }
 
-        // Static routes
-        for route in &self.static_routes {
-            if let Some(nh) = route.next_hop {
-                lines.push(format!(
-                    "ip route {} {} {}",
-                    route.prefix, route.mask, nh
-                ));
-            } else if let Some(iface) = &route.interface {
-                lines.push(format!(
-                    "ip route {} {} {}",
-                    route.prefix, route.mask, iface
-                ));
-            }
-        }
-
-        if !self.static_routes.is_empty() {
-            lines.push("!".to_string());
-        }
+        // (Static routes emitted later, after ip http/ssh section)
 
         // IPv6 static routes
         for route in &self.ipv6_static_routes {
@@ -1015,6 +1009,14 @@ impl DeviceState {
         lines.push("ip forward-protocol nd".to_string());
         lines.push("ip http server".to_string());
         lines.push("ip http secure-server".to_string());
+        // Static routes: real IOS places ip route after ip http/ssh
+        for route in &self.static_routes {
+            if let Some(nh) = route.next_hop {
+                lines.push(format!("ip route {} {} {}", route.prefix, route.mask, nh));
+            } else if let Some(iface) = &route.interface {
+                lines.push(format!("ip route {} {} {}", route.prefix, route.mask, iface));
+            }
+        }
         lines.push("ip ssh version 2".to_string());
         lines.push("!".to_string());
 

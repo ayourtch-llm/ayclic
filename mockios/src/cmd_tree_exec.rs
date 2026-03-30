@@ -21,6 +21,47 @@ pub fn handle_show_running_config(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("{}\n{}", config, p));
 }
 
+/// Handle `show running-config interface <name>` — filters running config to one interface.
+pub fn handle_show_running_config_interface(d: &mut MockIosDevice, input: &str) {
+    // Extract interface name from input: "show running-config interface <name>"
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    let iface_name = tokens.get(3).copied().unwrap_or("");
+
+    // Normalize the interface name (e.g., "Gi1/0/1" → "GigabitEthernet1/0/1")
+    let normalized = crate::cmd_tree_conf::normalize_interface_name(iface_name);
+
+    let config = d.state.generate_running_config();
+    let p = d.prompt();
+
+    // Find the interface section in the config
+    let mut in_section = false;
+    let mut section_lines: Vec<&str> = Vec::new();
+    for line in config.lines() {
+        if line.starts_with("interface ") {
+            if line == format!("interface {}", normalized) {
+                in_section = true;
+                section_lines.push(line);
+            } else {
+                in_section = false;
+            }
+        } else if in_section {
+            if line == "!" {
+                section_lines.push(line);
+                break;
+            }
+            section_lines.push(line);
+        }
+    }
+
+    if section_lines.is_empty() {
+        d.queue_output(&format!("% Invalid input interface\n{}", p));
+    } else {
+        let header = "Building configuration...\n\nCurrent configuration:\n!\n";
+        let footer = "\nend\n";
+        d.queue_output(&format!("{}{}{}{}", header, section_lines.join("\n"), footer, p));
+    }
+}
+
 pub fn handle_show_startup_config(d: &mut MockIosDevice, _input: &str) {
     let config = d.state.generate_startup_config();
     let p = d.prompt();
@@ -1370,7 +1411,14 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("history", "Display the session command history")
                     .handler(handle_show_history),
                 keyword("running-config", "Current operating configuration")
-                    .handler(handle_show_running_config),
+                    .handler(handle_show_running_config as CmdHandler)
+                    .children(vec![
+                        keyword("interface", "Show interface configuration")
+                            .children(vec![
+                                param("<name>", ParamType::RestOfLine, "Interface name")
+                                    .handler(handle_show_running_config_interface),
+                            ]),
+                    ]),
                 keyword("startup-config", "Contents of startup configuration")
                     .mode(priv_only())
                     .handler(handle_show_startup_config),

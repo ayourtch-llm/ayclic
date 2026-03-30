@@ -738,29 +738,41 @@ CPU utilization for five seconds: 5%/0%; one minute: 5%; five minutes: 5%
 }
 
 pub fn handle_show_logging(d: &mut MockIosDevice, _input: &str) {
-    let output = "\
-Syslog logging: enabled (0 messages dropped, 0 messages rate-limited, 0 flushes, 0 overruns, xml disabled, filtering disabled)
-
-No Active Message Discriminator.
-
-
-No Inactive Message Discriminator.
-
-
-    Console logging: level debugging, 0 messages logged, xml disabled,
-                     filtering disabled
-    Monitor logging: level debugging, 0 messages logged, xml disabled,
-                     filtering disabled
-    Buffer logging:  level debugging, 0 messages logged, xml disabled,
-                    filtering disabled
-    Exception Logging: size (4096 bytes)
-    Count and timestamp logging messages: disabled
-    Persistent logging: disabled
-
-No active filter modules.
-
-    Trap logging: level debugging, 0 facility, 0 severity
-";
+    let console_status = if d.state.logging_console {
+        "level debugging, 0 messages logged, xml disabled,\n                     filtering disabled"
+    } else {
+        "disabled"
+    };
+    let monitor_status = if d.state.logging_monitor {
+        "level debugging, 0 messages logged, xml disabled,\n                     filtering disabled"
+    } else {
+        "disabled"
+    };
+    let buf_size = d.state.logging_buffered_size;
+    let mut output = format!(
+        "Syslog logging: enabled (0 messages dropped, 0 messages rate-limited, 0 flushes, 0 overruns, xml disabled, filtering disabled)\n\
+\n\
+No Active Message Discriminator.\n\
+\n\
+\n\
+No Inactive Message Discriminator.\n\
+\n\
+\n\
+    Console logging: {console_status}\n\
+    Monitor logging: {monitor_status}\n\
+    Buffer logging:  level debugging, 0 messages logged, xml disabled,\n\
+                    filtering disabled\n\
+    Exception Logging: size ({buf_size} bytes)\n\
+    Count and timestamp logging messages: disabled\n\
+    Persistent logging: disabled\n\
+\n\
+No active filter modules.\n\
+\n\
+    Trap logging: level debugging, 0 facility, 0 severity\n"
+    );
+    for host in &d.state.logging_hosts {
+        output.push_str(&format!("        Logging to {} (udp port 514, audit disabled,\n              link up),\n              0 message lines logged,\n              0 message lines rate-limited,\n              0 message lines dropped-by-MD,\n              xml disabled, sequence number disabled\n              filtering disabled\n", host));
+    }
     let p = d.prompt();
     d.queue_output(&format!("{}{}", output, p));
 }

@@ -621,20 +621,48 @@ pub fn handle_event(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("{}", p));
 }
 
-pub fn handle_logging_host(d: &mut MockIosDevice, input: &str) {
-    d.running_config.push(input.to_string());
-    let p = d.prompt();
-    d.queue_output(&format!("{}", p));
-}
+pub fn handle_logging(d: &mut MockIosDevice, input: &str) {
+    let trimmed = input.trim();
+    let negated = trimmed.starts_with("no");
+    let rest = if negated {
+        trimmed.strip_prefix("no").unwrap_or(trimmed).trim()
+    } else {
+        trimmed
+    };
 
-pub fn handle_logging_trap(d: &mut MockIosDevice, input: &str) {
-    d.running_config.push(input.to_string());
-    let p = d.prompt();
-    d.queue_output(&format!("{}", p));
-}
-
-pub fn handle_logging_buffered(d: &mut MockIosDevice, input: &str) {
-    d.running_config.push(input.to_string());
+    // rest is now like "logging buffered 8192", "logging host 10.0.0.1", etc.
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    // parts[0] should be "logging"
+    match parts.get(1).copied() {
+        Some("buffered") => {
+            if negated {
+                d.state.logging_buffered_size = 4096;
+            } else if let Some(size_str) = parts.get(2) {
+                if let Ok(size) = size_str.parse::<u32>() {
+                    d.state.logging_buffered_size = size;
+                }
+            }
+        }
+        Some("console") => {
+            d.state.logging_console = !negated;
+        }
+        Some("monitor") => {
+            d.state.logging_monitor = !negated;
+        }
+        Some("host") => {
+            if let Some(ip) = parts.get(2) {
+                let ip = ip.to_string();
+                if negated {
+                    d.state.logging_hosts.retain(|h| h != &ip);
+                } else if !d.state.logging_hosts.contains(&ip) {
+                    d.state.logging_hosts.push(ip);
+                }
+            }
+        }
+        _ => {
+            // trap or other unmodeled logging sub-commands — fall through
+        }
+    }
     let p = d.prompt();
     d.queue_output(&format!("{}", p));
 }
@@ -1472,24 +1500,35 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     .handler(handle_rest_of_line),
             ]),
 
-        // logging host/trap/buffered
+        // logging host/trap/buffered/console/monitor
         keyword("logging", "Modify message logging facilities")
             .mode(config_only())
+            .no_handler(handle_logging)
             .children(vec![
+                keyword("buffered", "Set buffered logging parameters")
+                    .handler(handle_logging)
+                    .no_handler(handle_logging)
+                    .children(vec![
+                        param("<size>", ParamType::Number, "Logging buffer size")
+                            .handler(handle_logging),
+                    ]),
+                keyword("console", "Set console logging parameters")
+                    .handler(handle_logging)
+                    .no_handler(handle_logging),
+                keyword("monitor", "Set terminal line (monitor) logging parameters")
+                    .handler(handle_logging)
+                    .no_handler(handle_logging),
                 keyword("host", "Set syslog server address and parameters")
+                    .no_handler(handle_logging)
                     .children(vec![
                         param("<hostname-or-ip>", ParamType::Word, "IP address or hostname of the syslog server")
-                            .handler(handle_logging_host),
+                            .handler(handle_logging)
+                            .no_handler(handle_logging),
                     ]),
                 keyword("trap", "Set syslog server logging level")
                     .children(vec![
                         param("<level>", ParamType::Word, "Logging severity level")
-                            .handler(handle_logging_trap),
-                    ]),
-                keyword("buffered", "Set buffered logging parameters")
-                    .children(vec![
-                        param("<rest>", ParamType::RestOfLine, "Buffered logging parameters")
-                            .handler(handle_logging_buffered),
+                            .handler(handle_logging),
                     ]),
                 param("<rest>", ParamType::RestOfLine, "Logging parameters")
                     .handler(handle_rest_of_line),
@@ -3312,6 +3351,122 @@ mod tests {
         handle_vlan(&mut device, "vlan 100");
         let vlan = device.state.vlans.iter().find(|v| v.id == 100).expect("VLAN 100 not found");
         assert_eq!(vlan.name, "FIRST", "Re-entering vlan 100 should not reset the name");
+    }
+
+    // --- logging command tests ---
+
+    #[test]
+    fn test_logging_buffered_size_updated() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_logging(&mut device, "logging buffered 8192");
+        assert_eq!(device.state.logging_buffered_size, 8192);
+    }
+
+    #[test]
+    fn test_logging_buffered_no_resets_to_default() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_logging(&mut device, "logging buffered 8192");
+        handle_logging(&mut device, "no logging buffered");
+        assert_eq!(device.state.logging_buffered_size, 4096);
+    }
+
+    #[test]
+    fn test_logging_host_adds_to_list() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_logging(&mut device, "logging host 10.0.0.1");
+        assert_eq!(device.state.logging_hosts, vec!["10.0.0.1"]);
+    }
+
+    #[test]
+    fn test_logging_host_no_removes_from_list() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_logging(&mut device, "logging host 10.0.0.1");
+        handle_logging(&mut device, "logging host 10.0.0.2");
+        handle_logging(&mut device, "no logging host 10.0.0.1");
+        assert_eq!(device.state.logging_hosts, vec!["10.0.0.2"]);
+    }
+
+    #[test]
+    fn test_logging_console_default_true() {
+        let device = make_device();
+        assert!(device.state.logging_console, "logging console should default to true");
+    }
+
+    #[test]
+    fn test_logging_no_console_disables() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_logging(&mut device, "no logging console");
+        assert!(!device.state.logging_console);
+    }
+
+    #[test]
+    fn test_logging_monitor_enable_disable() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        assert!(!device.state.logging_monitor, "monitor should default false");
+        handle_logging(&mut device, "logging monitor");
+        assert!(device.state.logging_monitor);
+        handle_logging(&mut device, "no logging monitor");
+        assert!(!device.state.logging_monitor);
+    }
+
+    #[test]
+    fn test_logging_buffered_size_in_running_config() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_logging(&mut device, "logging buffered 8192");
+        let rc = device.state.generate_running_config();
+        assert!(rc.contains("logging buffered 8192"), "running-config should contain custom buffer size");
+    }
+
+    #[test]
+    fn test_logging_host_in_running_config() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_logging(&mut device, "logging host 10.0.0.1");
+        let rc = device.state.generate_running_config();
+        assert!(rc.contains("logging host 10.0.0.1"), "running-config should contain logging host");
+    }
+
+    #[test]
+    fn test_logging_default_buffer_not_in_running_config() {
+        let device = make_device();
+        let rc = device.state.generate_running_config();
+        // Default 4096 should NOT appear — only non-default values are emitted
+        assert!(!rc.contains("logging buffered 4096"), "default buffer size should not appear in running-config");
+    }
+
+    #[test]
+    fn test_logging_no_console_in_running_config() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_logging(&mut device, "no logging console");
+        let rc = device.state.generate_running_config();
+        assert!(rc.contains("no logging console"), "running-config should emit 'no logging console' when disabled");
+    }
+
+    #[test]
+    fn test_logging_commands_parse_via_tree() {
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+        for cmd in &[
+            "logging buffered 4096",
+            "logging console",
+            "logging monitor",
+            "logging host 192.168.1.100",
+        ] {
+            let result = parse(cmd, tree, &mode);
+            assert!(
+                matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+                "'{}' should parse in config mode",
+                cmd
+            );
+        }
     }
 
 }

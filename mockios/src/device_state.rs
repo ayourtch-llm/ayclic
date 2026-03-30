@@ -79,6 +79,11 @@ pub struct DeviceState {
     pub ospfv3_processes: Vec<OspfV3Process>,
     // User accounts
     pub users: Vec<UserAccount>,
+    // Logging state
+    pub logging_buffered_size: u32,  // default 4096
+    pub logging_console: bool,       // default true
+    pub logging_monitor: bool,       // default false
+    pub logging_hosts: Vec<String>,  // syslog server IPs
 }
 
 pub struct InterfaceState {
@@ -766,6 +771,10 @@ impl DeviceState {
             ipv6_static_routes: Vec::new(),
             ospfv3_processes: Vec::new(),
             users: Vec::new(),
+            logging_buffered_size: 4096,
+            logging_console: true,
+            logging_monitor: false,
+            logging_hosts: Vec::new(),
         }
     }
 
@@ -1150,6 +1159,27 @@ impl DeviceState {
         }
 
         if !self.unmodeled_config.is_empty() {
+            lines.push("!".to_string());
+        }
+
+        // Logging configuration (emit non-default values)
+        if self.logging_buffered_size != 4096 {
+            lines.push(format!("logging buffered {}", self.logging_buffered_size));
+        }
+        if !self.logging_console {
+            lines.push("no logging console".to_string());
+        }
+        if self.logging_monitor {
+            lines.push("logging monitor".to_string());
+        }
+        for host in &self.logging_hosts {
+            lines.push(format!("logging host {}", host));
+        }
+        if self.logging_buffered_size != 4096
+            || !self.logging_console
+            || self.logging_monitor
+            || !self.logging_hosts.is_empty()
+        {
             lines.push("!".to_string());
         }
 

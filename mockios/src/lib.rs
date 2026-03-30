@@ -30,7 +30,7 @@ pub mod cmd_tree_exec;
 pub mod cmd_tree_conf;
 pub mod device_state;
 
-use device_state::{DeviceState, abbreviate_interface_name};
+use device_state::{DeviceState, abbreviate_interface_name, default_flash_listing};
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -513,6 +513,7 @@ impl MockIosDevice {
     pub fn with_version(mut self, version: &str) -> Self {
         self.version = version.to_string();
         self.state.version = version.to_string();
+        self.state.flash_listing = default_flash_listing(&self.state.model, version);
         self
     }
 
@@ -520,6 +521,7 @@ impl MockIosDevice {
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
         self.state.model = model.to_string();
+        self.state.flash_listing = default_flash_listing(model, &self.state.version);
         self
     }
 
@@ -548,6 +550,7 @@ impl MockIosDevice {
     pub fn with_flash_size(mut self, size: u64) -> Self {
         self.flash_total_size = size;
         self.state.flash_total_size = size;
+        self.state.flash_total_bytes = size;
         self
     }
 
@@ -619,6 +622,8 @@ impl MockIosDevice {
         derived_state.model = self.state.model.clone();
         derived_state.flash_files = self.state.flash_files.clone();
         derived_state.flash_total_size = self.state.flash_total_size;
+        derived_state.flash_listing = self.state.flash_listing.clone();
+        derived_state.flash_total_bytes = self.state.flash_total_bytes;
         derived_state.boot_variable = self.state.boot_variable.clone();
         derived_state.install_state = self.state.install_state.clone();
         derived_state.interfaces = self.state.interfaces.iter().map(|i| {
@@ -1185,12 +1190,12 @@ impl MockIosDevice {
                 let prefix_str = format!("{}/{}", prefix, prefix_len);
                 if let Some(nh) = route.next_hop {
                     output.push_str(&format!(
-                        "{:<9}{} [{}/0] via {}\n",
+                        "{:<6}{} [{}/0] via {}\n",
                         code, prefix_str, dist, nh
                     ));
                 } else if let Some(iface) = &route.interface {
                     output.push_str(&format!(
-                        "{:<9}{} is directly connected, {}\n",
+                        "{:<6}{} is directly connected, {}\n",
                         code, prefix_str, iface
                     ));
                 }
@@ -1546,19 +1551,44 @@ impl MockIosDevice {
 
     pub fn handle_dir_command(&mut self, _line: &str) {
         let mut output = String::from("\nDirectory of flash:/\n\n");
+
+        // Render from structured flash_listing in DeviceState if populated.
+        // Also include any dynamically added flash_files not already in the listing.
+        let listing = self.state.flash_listing.clone();
+        let listing_names: std::collections::HashSet<String> =
+            listing.iter().map(|f| f.name.clone()).collect();
+
         let mut used: u64 = 0;
-        for (name, content) in &self.flash_files {
+        for file in &listing {
             output.push_str(&format!(
-                "  {:>10} bytes  {}\n",
-                content.len(),
-                name
+                "{:>5}  {:<4}  {:>8}   {}  {}\n",
+                file.id, file.permissions, file.size, file.date, file.name
             ));
-            used += content.len() as u64;
+            used += file.size;
         }
-        let free = self.flash_total_size.saturating_sub(used);
+
+        // Any dynamic files added via with_flash_file that aren't in the listing
+        let mut extra_id = 20u32;
+        let mut sorted_extra: Vec<(String, u64)> = self.flash_files
+            .iter()
+            .filter(|(name, _)| !listing_names.contains(*name))
+            .map(|(name, content)| (name.clone(), content.len() as u64))
+            .collect();
+        sorted_extra.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, size) in &sorted_extra {
+            output.push_str(&format!(
+                "{:>5}  {:<4}  {:>8}   {}  {}\n",
+                extra_id, "-rwx", size, "Jan 1 2000 00:00:00 +00:00", name
+            ));
+            used += size;
+            extra_id += 1;
+        }
+
+        let total = self.state.flash_total_bytes;
+        let free = total.saturating_sub(used);
         output.push_str(&format!(
             "\n{} bytes total ({} bytes free)\n{}",
-            self.flash_total_size, free, self.prompt()
+            total, free, self.prompt()
         ));
         self.queue_output(&output);
     }
@@ -3124,7 +3154,7 @@ mod tests {
         let data = device.receive(Duration::from_secs(1)).await.unwrap();
         let output = String::from_utf8_lossy(&data);
         assert!(output.contains("test.bin"));
-        assert!(output.contains("1000 bytes"));
+        assert!(output.contains("1000"), "Should show file size 1000, got: {:?}", output);
         assert!(output.contains("bytes total"));
         assert!(output.contains("bytes free"));
     }
@@ -3776,6 +3806,45 @@ mod tests {
         assert!(output.contains("test.bin"), "Should list file name");
         assert!(output.contains("bytes total"), "Should show total");
         assert!(output.contains("bytes free"), "Should show free");
+    }
+
+    // --- show flash: default IOS image from model/version ---
+
+    #[tokio::test]
+    async fn test_show_flash_default_listing_from_model_version() {
+        // TDD: A default device with model WS-C3560CX-12PD-S and version 15.2(7)E13
+        // should produce a show flash: listing with the correct IOS image filename,
+        // vlan.dat, realistic total bytes, and a leading blank line.
+        let mut device = MockIosDevice::new("Switch1")
+            .with_model("WS-C3560CX-12PD-S")
+            .with_version("15.2(7)E13");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let output = send_cmd(&mut device, "show flash:").await;
+
+        // Leading blank line (as real IOS shows)
+        assert!(output.starts_with('\n') || output.contains("\nDirectory of flash:/"),
+            "Output should start with blank line before Directory header, got: {:?}", output);
+
+        // Directory header
+        assert!(output.contains("Directory of flash:/"),
+            "Should have 'Directory of flash:/' header, got: {:?}", output);
+
+        // IOS image filename derived from model + version
+        assert!(output.contains("c3560cx-universalk9-mz.152-7.E13.bin"),
+            "Should contain IOS image derived from model/version, got: {:?}", output);
+
+        // Standard flash files
+        assert!(output.contains("vlan.dat"),
+            "Should contain vlan.dat, got: {:?}", output);
+
+        // Realistic total bytes (not 8000000000)
+        assert!(output.contains("122185728 bytes total"),
+            "Should show realistic total bytes (122185728), got: {:?}", output);
+
+        // Not showing the unrealistic 8GB value
+        assert!(!output.contains("8000000000"),
+            "Should NOT show unrealistic 8GB value, got: {:?}", output);
     }
 
     // --- show boot format ---
@@ -4972,6 +5041,27 @@ mod tests {
         assert!(
             pos_10 < pos_192,
             "10.x group should appear before 192.168.x group (sorted by prefix).\nOutput:\n{}",
+            output
+        );
+    }
+
+    /// Real IOS formats top-level routes (like the default route S*) with the
+    /// code field padded to 6 chars, not 9. Sub-routes under a "variably subnetted"
+    /// group use 9. Verify the default route line starts with "S*    " (S*, 4 spaces).
+    #[tokio::test]
+    async fn test_show_ip_route_default_route_alignment() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip route").await;
+        // "S*    0.0.0.0/0" — S* followed by exactly 4 spaces (total 6 chars before network)
+        assert!(
+            output.contains("S*    0.0.0.0/0"),
+            "Default route should be formatted as 'S*    0.0.0.0/0' (code left-padded to 6), got:\n{}",
+            output
+        );
+        // Sub-routes like C and L should still use 9-wide padding
+        assert!(
+            output.contains("C        10.") || output.contains("L        10."),
+            "Sub-routes should be formatted with code left-padded to 9, got:\n{}",
             output
         );
     }

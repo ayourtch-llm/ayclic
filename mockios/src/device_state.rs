@@ -5,6 +5,16 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::InstallState;
 
+/// A file entry in flash: directory listing.
+#[derive(Clone, Debug)]
+pub struct FlashFile {
+    pub id: u32,
+    pub name: String,
+    pub size: u64,
+    pub permissions: String, // e.g. "-rwx"
+    pub date: String,        // e.g. "Mar 2 2000 22:14:48 +00:00"
+}
+
 pub struct AccessListEntry {
     pub action: String,      // "permit" or "deny"
     pub protocol: String,    // "ip", "tcp", "udp", "icmp"
@@ -31,6 +41,10 @@ pub struct DeviceState {
     pub static_routes: Vec<StaticRoute>,
     pub flash_files: HashMap<String, Vec<u8>>,
     pub flash_total_size: u64,
+    /// Ordered listing for `dir flash:` / `show flash:` display.
+    pub flash_listing: Vec<FlashFile>,
+    /// Total flash capacity in bytes (for display).
+    pub flash_total_bytes: u64,
     pub boot_variable: String,
     pub domain_name: String,
     pub name_servers: Vec<String>,
@@ -541,6 +555,77 @@ fn abbreviate_interface_name_max(name: &str, max_len: usize) -> String {
     name[..max_len].to_string()
 }
 
+/// Convert an IOS version string like "15.2(7)E13" into dotted form "152-7.E13".
+pub fn version_to_dotted(version: &str) -> String {
+    // Handles "15.2(7)E13" → "152-7.E13"
+    // General pattern: <major>.<minor>(<maintenance>)<train>
+    if let Some(paren_open) = version.find('(') {
+        if let Some(paren_close) = version.find(')') {
+            let major_minor = &version[..paren_open];
+            let maintenance = &version[paren_open + 1..paren_close];
+            let train = &version[paren_close + 1..];
+            // "15.2" → "152"
+            let major_minor_nodot = major_minor.replace('.', "");
+            return format!("{}-{}.{}", major_minor_nodot, maintenance, train);
+        }
+    }
+    // Fallback: return as-is
+    version.to_string()
+}
+
+/// Generate the IOS image filename from model and version strings.
+pub fn ios_image_filename(model: &str, version: &str) -> String {
+    let dotted = version_to_dotted(version);
+    // WS-C3560CX → c3560cx
+    if model.to_uppercase().contains("3560CX") {
+        return format!("c3560cx-universalk9-mz.{}.bin", dotted);
+    }
+    // Generic fallback: use model name lowercased with dashes removed
+    let model_clean: String = model
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    format!("{}-universalk9-mz.{}.bin", model_clean, dotted)
+}
+
+/// Build the default flash listing for a given model and version.
+pub fn default_flash_listing(model: &str, version: &str) -> Vec<FlashFile> {
+    let ios_image = ios_image_filename(model, version);
+    vec![
+        FlashFile {
+            id: 2,
+            name: "vlan.dat".to_string(),
+            size: 1824,
+            permissions: "-rwx".to_string(),
+            date: "Mar 2 2000 22:14:48 +00:00".to_string(),
+        },
+        FlashFile {
+            id: 3,
+            name: ios_image,
+            size: 22_966_272,
+            permissions: "-rwx".to_string(),
+            date: "Jan 8 2000 02:54:25 +00:00".to_string(),
+        },
+        FlashFile {
+            id: 7,
+            name: "config.text".to_string(),
+            size: 12_636,
+            permissions: "-rwx".to_string(),
+            date: "Mar 2 2000 22:09:41 +00:00".to_string(),
+        },
+        FlashFile {
+            id: 12,
+            name: "private-config.text".to_string(),
+            size: 5_136,
+            permissions: "-rwx".to_string(),
+            date: "Mar 2 2000 22:09:41 +00:00".to_string(),
+        },
+    ]
+}
+
 impl DeviceState {
     /// Create a default state matching a WS-C3560CX-12PD-S switch.
     pub fn new(hostname: &str) -> Self {
@@ -646,6 +731,8 @@ impl DeviceState {
             static_routes: vec![default_route],
             flash_files: HashMap::new(),
             flash_total_size: 8_000_000_000,
+            flash_listing: default_flash_listing("WS-C3560CX-12PD-S", "15.2(7)E13"),
+            flash_total_bytes: 122_185_728,
             boot_variable: String::new(),
             domain_name: String::new(),
             name_servers: Vec::new(),

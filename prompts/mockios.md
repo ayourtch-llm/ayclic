@@ -39,8 +39,8 @@ You are continuing an autonomous improvement cycle to make the `mockios` crate (
 
 ## Current state (session ended with)
 
-- **51 commits, 499 mockios tests, 750 total workspace tests, all passing**
-- Tests started at 335, so +164 new tests were added
+- **56 commits, 517 mockios tests, 768 total workspace tests, all passing**
+- Previous session ended at 499/750, this session added +18/+18 tests and 5 commits
 - 8 reference docs in `docs/cisco-docs/` (exec commands, show commands, config commands, CLI behavior, running-config format, interfaces, routes, interface types)
 - Gap analysis in `docs/cisco-docs/gap-analysis.md` and show-run diff in `docs/cisco-docs/show-run-diff-analysis.md`
 - Convergence plan in `docs/plans/mockios-convergence-plan.md`
@@ -80,27 +80,30 @@ You are continuing an autonomous improvement cycle to make the `mockios` crate (
 - Dynamic byte count
 
 ### Phase 4 — Behavioral fidelity (MOSTLY COMPLETE)
-- Pipe filtering (include/exclude/begin/section/count)
+- Pipe filtering (include/exclude/begin/section/count) — now uses regex (OR patterns work)
+- Pipe filters are case-sensitive (matching real IOS behavior)
 - `do` command in config mode
-- show interfaces detail with proper counters/DLY/hardware types
+- show interfaces detail with proper counters/DLY/hardware types and 2-space/5-space indentation
+- "30 second" input/output rate labels (matching real IOS)
 - Dynamic uptime in show version
 - `no` handled at dispatch level (no tree cloning)
+- No double-echo in interactive (stdin) mode via `local_echo` flag
+
+### Phase 5 — Realism improvements (NEW)
+- 38 config mode commands (was 25) — added aaa, arp, class-map, clock, default, dot1x, lldp, monitor, policy-map, port-channel, power, privilege, tacacs-server
+- Per-device flash filesystem model (FlashFile struct, IOS image filename derived from model+version)
+- Blank line before headers in show interfaces status, show vlan brief, show flash:
 
 ## What still needs work
 
 ### High priority
 - **More config mode commands**: The `show running-config` still has many sections simpler than real IOS (interface-level: switchport nonegotiate, load-interval, udld, spanning-tree portfast; also logging, snmp-server, ntp, event-manager)
-- **show interfaces <name> switchport**: Per-interface switchport view (just added but verify vs real)
-- **Config mode help text**: Compare `conf t` then `?` output with real IOS, add missing commands
-- **show ip interface brief**: Verify column widths match exactly per-character
 
 ### Medium priority
-- **show running-config | section**: Pipe `section` mode should show entire config blocks between `!` delimiters
 - **--More-- paging**: `terminal length` should trigger paging
-- **Tab completion accuracy**: Verify tab completion matches real IOS prefix matching
-- **show flash:**: Compare directory listing format with real device
-- **show processes cpu**: Add realistic output
 - **Config persistence**: `write memory` / `copy run start` should update startup-config
+- **show flash: column alignment**: Size field should be right-aligned in 8-char field to match real IOS exactly
+- **show spanning-tree summary**: Missing VLAN table, missing "PVST Simulation Default" and "Bridge Assurance" lines, column alignment differs
 
 ### Lower priority
 - **ACL configuration**: Support `ip access-list extended` in config mode

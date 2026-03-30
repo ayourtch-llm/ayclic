@@ -360,6 +360,18 @@ pub fn handle_terminal_width(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("{}", p));
 }
 
+pub fn handle_terminal_monitor(d: &mut MockIosDevice, _input: &str) {
+    d.terminal_monitor = true;
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_terminal_no_monitor(d: &mut MockIosDevice, _input: &str) {
+    d.terminal_monitor = false;
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
 pub fn handle_copy(d: &mut MockIosDevice, input: &str) {
     d.handle_copy_command(input);
 }
@@ -1493,6 +1505,13 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     .children(vec![
                         param("<number>", ParamType::Number, "Number of columns")
                             .handler(handle_terminal_width),
+                    ]),
+                keyword("monitor", "Copy debug output to the current terminal line")
+                    .handler(handle_terminal_monitor),
+                keyword("no", "Negate terminal settings")
+                    .children(vec![
+                        keyword("monitor", "Stop copying debug output to this terminal")
+                            .handler(handle_terminal_no_monitor),
                     ]),
             ]),
 

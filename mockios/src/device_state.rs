@@ -3103,4 +3103,125 @@ mod tests {
         // There should be a blank line between the two tables
         assert!(output.contains("\n\n"), "no blank line separator between tables: {output}");
     }
+
+    // ── show ip interface (full detail) ─────────────────────────────────────
+
+    #[test]
+    fn test_generate_show_ip_interface_with_ip_shows_address() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        // Vlan1 has 10.0.0.1/24 by default
+        assert!(
+            output.contains("Internet address is 10.0.0.1/24"),
+            "should show Vlan1 IP address, got: {:?}",
+            &output[..output.len().min(500)]
+        );
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_broadcast_address() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        // 10.0.0.1/24 → broadcast 10.0.0.255
+        assert!(
+            output.contains("Broadcast address is 10.0.0.255"),
+            "should show computed broadcast address: {:?}",
+            &output[..output.len().min(500)]
+        );
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_no_ip_shows_disabled() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        // GigabitEthernet interfaces have no IP
+        assert!(
+            output.contains("Internet protocol processing disabled"),
+            "interfaces without IP should show 'Internet protocol processing disabled': {:?}",
+            &output[..output.len().min(500)]
+        );
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_header_line_format() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        // Vlan1 is up, line protocol is up
+        assert!(
+            output.contains("Vlan1 is up, line protocol is up"),
+            "Vlan1 header line incorrect: {:?}",
+            &output[..output.len().min(500)]
+        );
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_down_interface_header() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        // GigabitEthernet1/0/1 admin_up=true, link_up=false → "down, line protocol is down"
+        assert!(
+            output.contains("GigabitEthernet1/0/1 is down, line protocol is down"),
+            "down interface header incorrect: {:?}",
+            &output[..output.len().min(1000)]
+        );
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_admin_down() {
+        let mut state = DeviceState::new("Switch1");
+        if let Some(iface) = state.get_interface_mut("GigabitEthernet1/0/1") {
+            iface.admin_up = false;
+        }
+        let output = state.generate_show_ip_interface();
+        assert!(
+            output.contains("GigabitEthernet1/0/1 is administratively down, line protocol is down"),
+            "admin-down interface header incorrect: {:?}",
+            &output[..output.len().min(1000)]
+        );
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_proxy_arp_enabled() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        assert!(
+            output.contains("Proxy ARP is enabled"),
+            "should show Proxy ARP is enabled for IP interface: {:?}",
+            &output[..output.len().min(500)]
+        );
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_icmp_lines() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        assert!(output.contains("ICMP redirects are always sent"), "ICMP redirects line missing");
+        assert!(output.contains("ICMP unreachables are always sent"), "ICMP unreachables line missing");
+        assert!(output.contains("ICMP mask replies are never sent"), "ICMP mask replies line missing");
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_mtu_line() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        assert!(
+            output.contains("MTU is 1500 bytes"),
+            "should show MTU for IP interface: {:?}",
+            &output[..output.len().min(500)]
+        );
+    }
+
+    #[test]
+    fn test_generate_show_ip_interface_all_interfaces_listed() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_ip_interface();
+        // All interfaces should appear in the output
+        for iface in &state.interfaces {
+            assert!(
+                output.contains(&iface.name),
+                "interface {} missing from show ip interface output",
+                iface.name
+            );
+        }
+    }
 }

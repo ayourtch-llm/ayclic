@@ -85,9 +85,10 @@ pub fn handle_show_ip_interface_brief(d: &mut MockIosDevice, _input: &str) {
     d.handle_show_ip_interface_brief();
 }
 
-pub fn handle_show_ip_interface(d: &mut MockIosDevice, input: &str) {
-    // Full detailed format is complex; reuse brief output for now
-    handle_show_ip_interface_brief(d, input);
+pub fn handle_show_ip_interface(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_ip_interface();
+    let p = d.prompt();
+    d.queue_output(&format!("{}{}", output, p));
 }
 
 pub fn handle_show_ip_route(d: &mut MockIosDevice, _input: &str) {
@@ -1159,7 +1160,11 @@ fn build_exec_tree() -> Vec<CommandNode> {
                         keyword("nat", "IP NAT information")
                             .handler(handle_show_ip_nat),
                         keyword("ospf", "OSPF information")
-                            .handler(handle_show_ip_ospf),
+                            .handler(handle_show_ip_ospf)
+                            .children(vec![
+                                keyword("neighbor", "OSPF neighbor list")
+                                    .handler(handle_show_ip_ospf_neighbor),
+                            ]),
                         keyword("pim", "PIM information")
                             .handler(handle_show_ip_pim),
                         keyword("protocols", "IP routing protocol process parameters and statistics")
@@ -2087,6 +2092,91 @@ mod tests {
         assert_eq!(
             keywords, sorted,
             "show ip ? subcommands should be listed in alphabetical order"
+        );
+    }
+
+    /// `show ip ospf` with no OSPF process configured returns the error message.
+    #[test]
+    fn test_show_ip_ospf_no_process() {
+        let mut device = make_device();
+        handle_show_ip_ospf(&mut device, "show ip ospf");
+        let output = device.drain_output();
+        assert!(
+            output.contains("No router process is configured"),
+            "Expected no-process error, got: {:?}",
+            output
+        );
+    }
+
+    /// `show ip ospf` with an OSPF process configured returns process info.
+    #[test]
+    fn test_show_ip_ospf_with_process() {
+        use crate::device_state::{OspfV3Area, OspfV3Process};
+        let mut device = make_device();
+        let mut proc = OspfV3Process::new(1);
+        proc.router_id = Some("10.127.0.1".parse().unwrap());
+        proc.areas.push(OspfV3Area::new(0));
+        device.state.ospfv3_processes.push(proc);
+
+        handle_show_ip_ospf(&mut device, "show ip ospf");
+        let output = device.drain_output();
+        assert!(
+            output.contains("ospf 1"),
+            "Expected process ID in output, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("10.127.0.1"),
+            "Expected router-ID in output, got: {:?}",
+            output
+        );
+        assert!(
+            !output.contains("No router process"),
+            "Should not show error when process exists, got: {:?}",
+            output
+        );
+    }
+
+    /// `show ip ospf neighbor` always returns a table with the standard header.
+    #[test]
+    fn test_show_ip_ospf_neighbor_header() {
+        let mut device = make_device();
+        handle_show_ip_ospf_neighbor(&mut device, "show ip ospf neighbor");
+        let output = device.drain_output();
+        assert!(
+            output.contains("Neighbor ID"),
+            "Expected 'Neighbor ID' column header, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("State"),
+            "Expected 'State' column header, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Interface"),
+            "Expected 'Interface' column header, got: {:?}",
+            output
+        );
+    }
+
+    /// `show ip ospf ?` help lists `neighbor` as a subcommand.
+    #[tokio::test]
+    async fn test_show_ip_ospf_neighbor_in_help() {
+        use ayclic::raw_transport::RawTransport;
+        use std::time::Duration;
+
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"show ip ospf ?").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+
+        assert!(
+            output.contains("neighbor"),
+            "Expected 'neighbor' in 'show ip ospf ?' help, got: {:?}",
+            output
         );
     }
 }

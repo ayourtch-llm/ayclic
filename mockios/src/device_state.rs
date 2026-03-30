@@ -1233,6 +1233,108 @@ impl DeviceState {
         output
     }
 
+    /// Generate `show interfaces switchport` output matching real IOS 15.2 format.
+    ///
+    /// Iterates all physical Ethernet interfaces (Gi, Te, Fa), skipping VLANs and
+    /// Loopbacks.  For each port emits a block showing administrative/operational
+    /// switchport mode, encapsulation, VLANs, etc.
+    pub fn generate_show_interfaces_switchport(&self) -> String {
+        let mut output = String::new();
+
+        for iface in &self.interfaces {
+            // Only physical Ethernet interfaces
+            if iface.name.starts_with("Vlan") || iface.name.starts_with("Loopback") {
+                continue;
+            }
+            if !iface.name.starts_with("GigabitEthernet")
+                && !iface.name.starts_with("TenGigabitEthernet")
+                && !iface.name.starts_with("FastEthernet")
+            {
+                continue;
+            }
+
+            let short = short_interface_name(&iface.name);
+
+            let is_trunk = iface.switchport_mode.as_deref() == Some("trunk");
+
+            // Operational mode: trunk when configured as trunk AND link is up,
+            // otherwise "down" (port not connected / negotiating).
+            let oper_mode = if is_trunk && iface.link_up {
+                "trunk"
+            } else {
+                "down"
+            };
+
+            let admin_mode = if is_trunk {
+                "trunk"
+            } else {
+                "dynamic auto"
+            };
+
+            let access_vlan = iface.vlan.unwrap_or(1);
+            let native_vlan = iface.vlan.unwrap_or(1);
+
+            // Look up VLAN name for the access VLAN.
+            let access_vlan_name: String = if access_vlan == 1 {
+                "default".to_string()
+            } else {
+                self.vlans.iter()
+                    .find(|v| v.id == access_vlan)
+                    .map(|v| v.name.clone())
+                    .unwrap_or_else(|| format!("VLAN{:04}", access_vlan))
+            };
+
+            let native_vlan_name: String = if native_vlan == 1 {
+                "default".to_string()
+            } else {
+                self.vlans.iter()
+                    .find(|v| v.id == native_vlan)
+                    .map(|v| v.name.clone())
+                    .unwrap_or_else(|| format!("VLAN{:04}", native_vlan))
+            };
+
+            output.push_str(&format!(
+                "Name: {short}\n\
+Switchport: Enabled\n\
+Administrative Mode: {admin_mode}\n\
+Operational Mode: {oper_mode}\n\
+Administrative Trunking Encapsulation: dot1q\n\
+Negotiation of Trunking: On\n\
+Access Mode VLAN: {access_vlan} ({access_vlan_name})\n\
+Trunking Native Mode VLAN: {native_vlan} ({native_vlan_name})\n\
+Administrative Native VLAN tagging: disabled\n\
+Voice VLAN: none\n\
+Administrative private-vlan host-association: none\n\
+Administrative private-vlan mapping: none\n\
+Administrative private-vlan trunk native VLAN: none\n\
+Administrative private-vlan trunk Native VLAN tagging: enabled\n\
+Administrative private-vlan trunk encapsulation: dot1q\n\
+Administrative private-vlan trunk normal VLANs: none\n\
+Administrative private-vlan trunk associations: none\n\
+Administrative private-vlan trunk mappings: none\n\
+Operational private-vlan: none\n\
+Trunking VLANs Enabled: ALL\n\
+Pruning VLANs Enabled: 2-1001\n\
+Capture Mode Disabled\n\
+Capture VLANs Allowed: ALL\n\
+\n\
+Protected: false\n\
+Unknown unicast blocked: disabled\n\
+Unknown multicast blocked: disabled\n\
+Appliance trust: none\n",
+                short = short,
+                admin_mode = admin_mode,
+                oper_mode = oper_mode,
+                access_vlan = access_vlan,
+                access_vlan_name = access_vlan_name,
+                native_vlan = native_vlan,
+                native_vlan_name = native_vlan_name,
+            ));
+        }
+
+        output
+    }
+
     /// Compress a list of VLAN ID strings into range notation (e.g., "1-15,100-101,127")
     fn compress_vlan_ranges(vlan_strs: &[String]) -> String {
         let mut ids: Vec<u16> = vlan_strs.iter()
@@ -2468,5 +2570,125 @@ mod tests {
         // The generate_show_interface method should reflect down/down for notconnect
         let detail = gi1.generate_show_interface();
         assert!(detail.contains("down"), "notconnect port should show 'down' in show interface detail");
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_switchport_basic() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_switchport();
+
+        // Physical Ethernet interfaces should appear
+        assert!(output.contains("Name: Gi1/0/1"),
+            "Gi1/0/1 should appear in switchport output: {:?}", &output[..output.len().min(400)]);
+        assert!(output.contains("Name: Te1/0/1"),
+            "Te1/0/1 should appear in switchport output");
+
+        // Vlan and Loopback interfaces should NOT appear
+        assert!(!output.contains("Name: Vl"),
+            "Vlan SVIs should not appear in switchport output");
+        assert!(!output.contains("Name: Lo"),
+            "Loopback interfaces should not appear in switchport output");
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_switchport_access_port_fields() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_switchport();
+
+        // Find the Gi1/0/1 block
+        let gi1_block_start = output.find("Name: Gi1/0/1").expect("Gi1/0/1 block missing");
+        let gi1_block_end = output[gi1_block_start..]
+            .find("\nName: ")
+            .map(|off| gi1_block_start + off)
+            .unwrap_or(output.len());
+        let gi1_block = &output[gi1_block_start..gi1_block_end];
+
+        assert!(gi1_block.contains("Switchport: Enabled"),
+            "Should show Switchport: Enabled: {:?}", gi1_block);
+        assert!(gi1_block.contains("Administrative Mode: dynamic auto"),
+            "Access port admin mode should be 'dynamic auto': {:?}", gi1_block);
+        assert!(gi1_block.contains("Operational Mode: down"),
+            "Unconnected access port operational mode should be 'down': {:?}", gi1_block);
+        assert!(gi1_block.contains("Administrative Trunking Encapsulation: dot1q"),
+            "Should show dot1q encapsulation: {:?}", gi1_block);
+        assert!(gi1_block.contains("Access Mode VLAN: 1 (default)"),
+            "Default VLAN should be 1 (default): {:?}", gi1_block);
+        assert!(gi1_block.contains("Trunking Native Mode VLAN: 1 (default)"),
+            "Native VLAN should be 1 (default): {:?}", gi1_block);
+        assert!(gi1_block.contains("Voice VLAN: none"),
+            "Voice VLAN should be none: {:?}", gi1_block);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_switchport_trunk_port() {
+        let mut state = DeviceState::new("Switch1");
+        // Configure Gi1/0/1 as a trunk with link up
+        if let Some(iface) = state.get_interface_mut("GigabitEthernet1/0/1") {
+            iface.switchport_mode = Some("trunk".to_string());
+            iface.link_up = true;
+        }
+        let output = state.generate_show_interfaces_switchport();
+
+        let gi1_block_start = output.find("Name: Gi1/0/1").expect("Gi1/0/1 block missing");
+        let gi1_block_end = output[gi1_block_start..]
+            .find("\nName: ")
+            .map(|off| gi1_block_start + off)
+            .unwrap_or(output.len());
+        let gi1_block = &output[gi1_block_start..gi1_block_end];
+
+        assert!(gi1_block.contains("Administrative Mode: trunk"),
+            "Trunk port admin mode should be 'trunk': {:?}", gi1_block);
+        assert!(gi1_block.contains("Operational Mode: trunk"),
+            "Connected trunk port operational mode should be 'trunk': {:?}", gi1_block);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_switchport_trunk_not_connected() {
+        let mut state = DeviceState::new("Switch1");
+        // Configure Gi1/0/1 as a trunk but link is down (no cable)
+        if let Some(iface) = state.get_interface_mut("GigabitEthernet1/0/1") {
+            iface.switchport_mode = Some("trunk".to_string());
+            iface.link_up = false;
+        }
+        let output = state.generate_show_interfaces_switchport();
+
+        let gi1_block_start = output.find("Name: Gi1/0/1").expect("Gi1/0/1 block missing");
+        let gi1_block_end = output[gi1_block_start..]
+            .find("\nName: ")
+            .map(|off| gi1_block_start + off)
+            .unwrap_or(output.len());
+        let gi1_block = &output[gi1_block_start..gi1_block_end];
+
+        assert!(gi1_block.contains("Administrative Mode: trunk"),
+            "Trunk port admin mode should be 'trunk': {:?}", gi1_block);
+        assert!(gi1_block.contains("Operational Mode: down"),
+            "Disconnected trunk port operational mode should be 'down': {:?}", gi1_block);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_switchport_custom_vlan() {
+        let mut state = DeviceState::new("Switch1");
+        // Add a custom VLAN and assign Gi1/0/2 to it
+        state.vlans.push(VlanState {
+            id: 10,
+            name: "DATA".to_string(),
+            active: true,
+            ports: vec!["Gi1/0/2".to_string()],
+            unsupported: false,
+        });
+        if let Some(iface) = state.get_interface_mut("GigabitEthernet1/0/2") {
+            iface.vlan = Some(10);
+        }
+        let output = state.generate_show_interfaces_switchport();
+
+        let gi2_block_start = output.find("Name: Gi1/0/2").expect("Gi1/0/2 block missing");
+        let gi2_block_end = output[gi2_block_start..]
+            .find("\nName: ")
+            .map(|off| gi2_block_start + off)
+            .unwrap_or(output.len());
+        let gi2_block = &output[gi2_block_start..gi2_block_end];
+
+        assert!(gi2_block.contains("Access Mode VLAN: 10 (DATA)"),
+            "VLAN 10 with name DATA should be shown: {:?}", gi2_block);
     }
 }

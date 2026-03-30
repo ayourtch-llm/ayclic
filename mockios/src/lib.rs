@@ -4828,6 +4828,32 @@ mod tests {
         let output = send_cmd(&mut device, "show cdp neighbors").await;
         assert!(output.contains("Capability Codes"),
             "show cdp neighbors should contain 'Capability Codes', got: {:?}", output);
+        assert!(output.contains("Device ID"),
+            "show cdp neighbors should contain 'Device ID', got: {:?}", output);
+        assert!(output.contains("Total cdp entries displayed : 0"),
+            "show cdp neighbors should contain 'Total cdp entries displayed : 0', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_cdp_neighbors_detail() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show cdp neighbors detail").await;
+        assert!(output.contains("Total cdp entries displayed : 0"),
+            "show cdp neighbors detail should contain 'Total cdp entries displayed : 0', got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_cdp() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show cdp").await;
+        assert!(output.contains("Global CDP information"),
+            "show cdp should contain 'Global CDP information', got: {:?}", output);
+        assert!(output.contains("Sending CDP packets every 60 seconds"),
+            "show cdp should contain sending interval, got: {:?}", output);
+        assert!(output.contains("holdtime value of 180 seconds"),
+            "show cdp should contain holdtime, got: {:?}", output);
+        assert!(output.contains("CDPv2"),
+            "show cdp should mention CDPv2, got: {:?}", output);
     }
 
     #[tokio::test]

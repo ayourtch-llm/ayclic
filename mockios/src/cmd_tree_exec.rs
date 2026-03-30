@@ -532,7 +532,24 @@ Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge
                   D - Remote, C - CVTA, M - Two-port Mac Relay
 
 Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID
-";
+
+Total cdp entries displayed : 0";
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
+pub fn handle_show_cdp_neighbors_detail(d: &mut MockIosDevice, _input: &str) {
+    let output = "Total cdp entries displayed : 0";
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
+pub fn handle_show_cdp(d: &mut MockIosDevice, _input: &str) {
+    let output = "\
+Global CDP information:
+    Sending CDP packets every 60 seconds
+    Sending a holdtime value of 180 seconds
+    Sending CDPv2 advertisements is  enabled";
     let p = d.prompt();
     d.queue_output(&format!("{}\n{}", output, p));
 }
@@ -678,8 +695,8 @@ pub fn handle_show_spanning_tree(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_ntp_status(d: &mut MockIosDevice, _input: &str) {
     let output = "\
 Clock is unsynchronized, stratum 16, no reference clock
-nominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10
-ntp uptime is 0 (1/100 of seconds), resolution is 4016
+nominal freq is 286.1023 Hz, actual freq is 286.1023 Hz, precision is 2**21
+ntp uptime is 0 (1/100 of seconds), resolution is 3496
 reference time is 00000000.00000000 (00:00:00.000 UTC Mon Jan 1 1900)
 clock offset is 0.0000 msec, root delay is 0.00 msec
 root dispersion is 0.00 msec, peer dispersion is 0.00 msec
@@ -1223,9 +1240,14 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("terminal", "Display terminal configuration parameters")
                     .handler(handle_show_terminal),
                 keyword("cdp", "CDP information")
+                    .handler(handle_show_cdp)
                     .children(vec![
                         keyword("neighbors", "CDP neighbor entries")
-                            .handler(handle_show_cdp_neighbors),
+                            .handler(handle_show_cdp_neighbors)
+                            .children(vec![
+                                keyword("detail", "Show detailed information for CDP entries")
+                                    .handler(handle_show_cdp_neighbors_detail),
+                            ]),
                     ]),
                 keyword("users", "Display information about terminal lines")
                     .handler(handle_show_users),

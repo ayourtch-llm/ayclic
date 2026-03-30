@@ -85,7 +85,7 @@ fn build_device(cli: &Cli) -> MockIosDevice {
 
 /// Run interactive CLI on stdin/stdout
 async fn run_interactive(cli: &Cli) {
-    let mut device = build_device(cli);
+    let mut device = build_device(cli).with_local_echo(false);
 
     // Get initial output (prompt or login banner)
     let initial = device.receive(Duration::from_secs(1)).await.unwrap();

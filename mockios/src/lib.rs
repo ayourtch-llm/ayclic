@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use regex::Regex;
 use tracing::debug;
 
 use ayclic::error::CiscoIosError;
@@ -159,6 +160,10 @@ pub struct MockIosDevice {
     pub current_interface: Option<String>,
     /// Whether `terminal monitor` has been issued on this VTY session.
     pub terminal_monitor: bool,
+    /// Whether the device should echo characters back to the client.
+    /// Set to `false` for interactive stdin/stdout mode where the terminal
+    /// already handles local echo.  Default is `true` (telnet/SSH behavior).
+    pub local_echo: bool,
     /// Instant when this device was created (used for dynamic uptime).
     created_at: Instant,
     /// SystemTime when this device was created (used to display "System restarted at").
@@ -245,33 +250,45 @@ pub fn parse_pipe_filter(filter_str: &str) -> Option<PipeFilter> {
     None
 }
 
+/// Build a `Regex` from a pattern string.
+/// If the pattern is not valid regex, fall back to treating it as a literal
+/// (escaping all regex metacharacters).  Real IOS uses case-sensitive matching.
+fn build_regex(pattern: &str) -> Regex {
+    Regex::new(pattern).unwrap_or_else(|_| {
+        Regex::new(&regex::escape(pattern)).expect("escaped pattern must compile")
+    })
+}
+
 /// Apply a pipe filter to command output text.
 /// `output` should be the raw command output (without the trailing prompt).
+/// Patterns are treated as case-sensitive regular expressions, matching real
+/// Cisco IOS behaviour.  If a pattern is not valid regex it is used as a
+/// literal string (metacharacters are escaped).
 pub fn apply_pipe_filter(output: &str, filter: &PipeFilter) -> String {
     match filter {
         PipeFilter::Include(pattern) => {
-            let pat = pattern.to_lowercase();
+            let re = build_regex(pattern);
             output
                 .lines()
-                .filter(|line| line.to_lowercase().contains(&pat))
+                .filter(|line| re.is_match(line))
                 .collect::<Vec<_>>()
                 .join("\n")
         }
         PipeFilter::Exclude(pattern) => {
-            let pat = pattern.to_lowercase();
+            let re = build_regex(pattern);
             output
                 .lines()
-                .filter(|line| !line.to_lowercase().contains(&pat))
+                .filter(|line| !re.is_match(line))
                 .collect::<Vec<_>>()
                 .join("\n")
         }
         PipeFilter::Begin(pattern) => {
-            let pat = pattern.to_lowercase();
+            let re = build_regex(pattern);
             let mut found = false;
             let filtered: Vec<&str> = output
                 .lines()
                 .filter(|line| {
-                    if !found && line.to_lowercase().contains(&pat) {
+                    if !found && re.is_match(line) {
                         found = true;
                     }
                     found
@@ -280,7 +297,7 @@ pub fn apply_pipe_filter(output: &str, filter: &PipeFilter) -> String {
             filtered.join("\n")
         }
         PipeFilter::Section(pattern) => {
-            let pat = pattern.to_lowercase();
+            let re = build_regex(pattern);
             // A "section" is a block of lines separated by blank lines or `!` lines.
             // We collect each section as a Vec<&str>, then keep sections that contain
             // the pattern in any of their lines.
@@ -301,11 +318,7 @@ pub fn apply_pipe_filter(output: &str, filter: &PipeFilter) -> String {
             }
             let matching: Vec<String> = sections
                 .into_iter()
-                .filter(|section| {
-                    section
-                        .iter()
-                        .any(|line| line.to_lowercase().contains(&pat))
-                })
+                .filter(|section| section.iter().any(|line| re.is_match(line)))
                 .map(|section| section.join("\n"))
                 .collect();
             matching.join("\n")
@@ -459,6 +472,7 @@ impl MockIosDevice {
             state: DeviceState::new(hostname),
             current_interface: None,
             terminal_monitor: false,
+            local_echo: true,
             created_at: Instant::now(),
             created_at_system: SystemTime::now(),
         };
@@ -482,6 +496,16 @@ impl MockIosDevice {
         } else {
             CliMode::UserExec
         };
+        self
+    }
+
+    /// Control whether the device echoes characters back to the client.
+    ///
+    /// Set to `false` when running in interactive stdin/stdout mode so that
+    /// the terminal's own local echo is not doubled.  Defaults to `true`
+    /// (correct behavior for telnet/SSH where the server owns echo).
+    pub fn with_local_echo(mut self, enabled: bool) -> Self {
+        self.local_echo = enabled;
         self
     }
 
@@ -673,6 +697,7 @@ impl MockIosDevice {
             state: derived_state,
             current_interface: None,
             terminal_monitor: false,
+            local_echo: self.local_echo,
             created_at: self.created_at,
             created_at_system: self.created_at_system,
         }
@@ -2192,7 +2217,11 @@ impl RawTransport for MockIosDevice {
                     }
                     self.cursor_pos = 0;
                     self.history_index = None;
-                    self.output_queue.extend_from_slice(b"\r\n");
+                    // Only echo \r\n if local_echo is enabled (telnet/SSH).
+                    // In interactive stdin mode the terminal handles newline display.
+                    if self.local_echo {
+                        self.output_queue.extend_from_slice(b"\r\n");
+                    }
                     self.handle_line(&line);
                 }
                 b'\n' => {
@@ -2212,7 +2241,10 @@ impl RawTransport for MockIosDevice {
                     }
                     self.cursor_pos = 0;
                     self.history_index = None;
-                    self.output_queue.extend_from_slice(b"\r\n");
+                    // Only echo \r\n if local_echo is enabled (telnet/SSH).
+                    if self.local_echo {
+                        self.output_queue.extend_from_slice(b"\r\n");
+                    }
                     self.handle_line(&line);
                 }
                 b'\0' => {
@@ -2322,15 +2354,19 @@ impl RawTransport for MockIosDevice {
                                 if self.cursor_pos > 0 {
                                     self.cursor_pos -= 1;
                                     self.input_buffer.remove(self.cursor_pos);
-                                    self.output_queue.extend_from_slice(b"\x08");
+                                    if self.local_echo {
+                                        self.output_queue.extend_from_slice(b"\x08");
+                                    }
                                 }
                             }
                             // Erase old text on screen, then write new text
-                            if erase_count > 0 {
-                                // Clear from cursor to end of line
-                                self.output_queue.extend_from_slice(b"\x1b[K");
+                            if self.local_echo {
+                                if erase_count > 0 {
+                                    // Clear from cursor to end of line
+                                    self.output_queue.extend_from_slice(b"\x1b[K");
+                                }
+                                self.output_queue.extend_from_slice(insert_text.as_bytes());
                             }
-                            self.output_queue.extend_from_slice(insert_text.as_bytes());
                             self.input_buffer.extend_from_slice(insert_text.as_bytes());
                             self.cursor_pos = self.input_buffer.len();
                         }
@@ -2467,11 +2503,12 @@ impl RawTransport for MockIosDevice {
                     }
                 }
                 _ => {
-                    // Regular printable character — echo unless in password mode,
-                    // insert at cursor_pos.
+                    // Regular printable character — echo unless in password mode
+                    // or local_echo is disabled (interactive stdin mode).
+                    // Insert at cursor_pos.
                     if self.cursor_pos == self.input_buffer.len() {
                         // Cursor at end — simple append
-                        if !self.is_password_mode() {
+                        if self.local_echo && !self.is_password_mode() {
                             self.output_queue.push(byte);
                         }
                         self.input_buffer.push(byte);
@@ -2480,7 +2517,7 @@ impl RawTransport for MockIosDevice {
                         // Cursor in middle — insert and redraw tail
                         self.input_buffer.insert(self.cursor_pos, byte);
                         self.cursor_pos += 1;
-                        if !self.is_password_mode() {
+                        if self.local_echo && !self.is_password_mode() {
                             // Echo inserted char + redraw rest of line + move back
                             self.output_queue.push(byte);
                             self.redraw_from_cursor();
@@ -4079,6 +4116,43 @@ mod tests {
         device.send(b"s").await.unwrap();
         let out = device.receive(Duration::from_secs(1)).await.unwrap();
         assert!(out.is_empty(), "Password chars should not echo");
+    }
+
+    /// When `local_echo` is disabled the device must not push typed characters,
+    /// the newline, or the command text back into the output queue — the terminal
+    /// itself handles that in interactive stdin mode.
+    #[tokio::test]
+    async fn test_local_echo_false_suppresses_char_echo() {
+        let mut device = MockIosDevice::new("R1").with_local_echo(false);
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // initial prompt
+
+        // Send individual characters — they must NOT be echoed
+        device.send(b"s").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(out.is_empty(), "Chars must not be echoed when local_echo=false, got: {:?}", out);
+
+        device.send(b"how version").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        assert!(out.is_empty(), "Chars must not be echoed when local_echo=false, got: {:?}", out);
+
+        // Send newline to execute the command
+        device.send(b"\n").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+
+        // The command result and prompt must be present
+        assert!(output.contains("Cisco IOS"),
+            "Command output must appear when local_echo=false. Got: {:?}", output);
+        assert!(output.contains("R1#"),
+            "Prompt must appear when local_echo=false. Got: {:?}", output);
+
+        // But the command text itself must NOT appear — the terminal echoed it already
+        assert!(!output.contains("show version"),
+            "Command text must NOT be echoed when local_echo=false. Got: {:?}", output);
+
+        // And there must be no leading \\r\\n (the terminal handles the newline display)
+        assert!(!output.starts_with("\r\n"),
+            "Output must not start with \\r\\n when local_echo=false. Got: {:?}", output);
     }
 
     #[tokio::test]

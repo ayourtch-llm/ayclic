@@ -29,6 +29,15 @@ pub struct AccessList {
     pub entries: Vec<AccessListEntry>,
 }
 
+/// A configured user account (from `username` command).
+#[derive(Clone, Debug)]
+pub struct UserAccount {
+    pub username: String,
+    pub privilege: u8,            // 0-15, default 0
+    pub secret: Option<String>,   // "secret" type password
+    pub password: Option<String>, // "password" type password
+}
+
 /// Top-level device state model.
 pub struct DeviceState {
     pub hostname: String,
@@ -68,6 +77,8 @@ pub struct DeviceState {
     pub ipv6_unicast_routing: bool,
     pub ipv6_static_routes: Vec<Ipv6StaticRoute>,
     pub ospfv3_processes: Vec<OspfV3Process>,
+    // User accounts
+    pub users: Vec<UserAccount>,
 }
 
 pub struct InterfaceState {
@@ -754,6 +765,7 @@ impl DeviceState {
             ipv6_unicast_routing: false,
             ipv6_static_routes: Vec::new(),
             ospfv3_processes: Vec::new(),
+            users: Vec::new(),
         }
     }
 
@@ -938,6 +950,23 @@ impl DeviceState {
             lines.push("aaa authentication login default local".to_string());
             lines.push("aaa authentication enable default enable".to_string());
             lines.push("aaa authorization exec default local".to_string());
+            lines.push("!".to_string());
+        }
+
+        // Username accounts (after AAA block, before switch provision)
+        for user in &self.users {
+            let mut line = format!("username {}", user.username);
+            if user.privilege != 1 {
+                line.push_str(&format!(" privilege {}", user.privilege));
+            }
+            if let Some(ref s) = user.secret {
+                line.push_str(&format!(" secret 0 {}", s));
+            } else if let Some(ref p) = user.password {
+                line.push_str(&format!(" password 0 {}", p));
+            }
+            lines.push(line);
+        }
+        if !self.users.is_empty() {
             lines.push("!".to_string());
         }
 

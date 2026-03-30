@@ -796,40 +796,6 @@ pub fn handle_config_sub_rest(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("{}", p));
 }
 
-// ─── Tree helpers ─────────────────────────────────────────────────────────────
-
-/// Filter out node names that shouldn't be cloned into the "no" subtree.
-fn should_exclude_from_no(node: &CommandNode) -> bool {
-    if let crate::cmd_tree::TokenMatcher::Keyword(kw) = &node.matcher {
-        matches!(kw.as_str(), "no" | "exit" | "end" | "help" | "do")
-    } else {
-        false
-    }
-}
-
-/// Clone a command node for use in the `no` subtree.
-/// If the node has a `no_handler`, promote it to `handler` so the negated form
-/// works without arguments (e.g., `no hostname` resets to default).
-fn clone_for_no(node: &CommandNode) -> CommandNode {
-    let mut cloned = node.clone();
-    if cloned.no_handler.is_some() {
-        cloned.handler = cloned.no_handler.take();
-    }
-    // Recursively apply to children
-    cloned.children = cloned.children.iter().map(clone_for_no).collect();
-    cloned
-}
-
-/// Build the "no" keyword node whose children are a clone of the provided commands.
-fn build_no_node(main_commands: &[CommandNode]) -> CommandNode {
-    let no_children: Vec<CommandNode> = main_commands.iter()
-        .filter(|n| !should_exclude_from_no(n))
-        .map(clone_for_no)
-        .collect();
-    keyword("no", "Negate a command or set its defaults")
-        .children(no_children)
-}
-
 // ─── Tree ─────────────────────────────────────────────────────────────────────
 
 static CONF_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
@@ -1284,10 +1250,9 @@ fn build_conf_tree() -> Vec<CommandNode> {
             ]),
     ];
 
-    // Build "no" with cloned children (excluding no/exit/end/help/do)
-    let no_node = build_no_node(&main_commands);
-    main_commands.push(no_node);
-
+    main_commands.push(
+        keyword("no", "Negate a command or set its defaults"),
+    );
     main_commands.push(
         keyword("help", "Description of the interactive help system")
             .handler(crate::cmd_tree_exec::handle_help_command),
@@ -1580,9 +1545,9 @@ fn build_config_if_tree() -> Vec<CommandNode> {
             ]),
     ];
 
-    let no_node = build_no_node(&main_commands);
-    main_commands.push(no_node);
-
+    main_commands.push(
+        keyword("no", "Negate a command or set its defaults"),
+    );
     main_commands.push(
         keyword("help", "Description of the interactive help system")
             .handler(crate::cmd_tree_exec::handle_help_command),
@@ -1655,9 +1620,9 @@ fn build_config_router_tree() -> Vec<CommandNode> {
             ]),
     ];
 
-    let no_node = build_no_node(&main_commands);
-    main_commands.push(no_node);
-
+    main_commands.push(
+        keyword("no", "Negate a command or set its defaults"),
+    );
     main_commands.push(
         keyword("help", "Description of the interactive help system")
             .handler(crate::cmd_tree_exec::handle_help_command),
@@ -1733,9 +1698,9 @@ fn build_config_line_tree() -> Vec<CommandNode> {
             ]),
     ];
 
-    let no_node = build_no_node(&main_commands);
-    main_commands.push(no_node);
-
+    main_commands.push(
+        keyword("no", "Negate a command or set its defaults"),
+    );
     main_commands.push(
         keyword("help", "Description of the interactive help system")
             .handler(crate::cmd_tree_exec::handle_help_command),
@@ -1849,22 +1814,97 @@ mod tests {
 
     #[test]
     fn test_conf_no_command_parses() {
-        // "no shutdown" should parse in config-if mode (shutdown is config-if only)
+        // "no shutdown" should parse in config-if mode via parse_for_no
+        use crate::cmd_tree::parse_for_no;
         let tree = config_if_tree();
         let mode = CliMode::ConfigSub("config-if".to_string());
-        let result = parse("no shutdown", tree, &mode);
+        let result = parse_for_no("shutdown", tree, &mode, "no shutdown");
         assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
             "no shutdown should parse in config-if mode");
     }
 
     #[test]
     fn test_conf_no_ip_route_parses() {
-        // "no ip route ..." should parse in config mode
+        // "no ip route ..." should parse in config mode via parse_for_no
+        use crate::cmd_tree::parse_for_no;
         let tree = conf_tree();
         let mode = CliMode::Config;
-        let result = parse("no ip route 0.0.0.0 0.0.0.0 10.0.0.1", tree, &mode);
+        let result = parse_for_no(
+            "ip route 0.0.0.0 0.0.0.0 10.0.0.1",
+            tree,
+            &mode,
+            "no ip route 0.0.0.0 0.0.0.0 10.0.0.1",
+        );
         assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
-            "no ip route should parse in config mode");
+            "no ip route should parse in config mode via parse_for_no");
+    }
+
+    #[test]
+    fn test_conf_no_hostname_uses_no_handler() {
+        // "no hostname" (no argument) should work via no_handler in parse_for_no
+        use crate::cmd_tree::parse_for_no;
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+        let result = parse_for_no("hostname", tree, &mode, "no hostname");
+        assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "no hostname should execute via no_handler");
+    }
+
+    #[test]
+    fn test_conf_no_help_lists_commands() {
+        // "no ?" should list commands from the main tree (excluding no/exit/end/help/do)
+        use crate::cmd_tree::{help_for_no, HelpResult};
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+        let result = help_for_no("", tree, &mode);
+        match result {
+            HelpResult::Subcommands(subs) => {
+                let names: Vec<&str> = subs.iter().map(|(k, _)| k.as_str()).collect();
+                assert!(names.contains(&"hostname"), "no ? should list 'hostname'");
+                assert!(names.contains(&"ip"), "no ? should list 'ip'");
+                // These should NOT appear in no ?
+                assert!(!names.contains(&"no"), "no ? should not list 'no'");
+                assert!(!names.contains(&"exit"), "no ? should not list 'exit'");
+                assert!(!names.contains(&"end"), "no ? should not list 'end'");
+                assert!(!names.contains(&"help"), "no ? should not list 'help'");
+                assert!(!names.contains(&"do"), "no ? should not list 'do'");
+            }
+            other => panic!("Expected Subcommands for 'no ?', got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_conf_hostname_no_cr_in_help() {
+        // "hostname ?" should NOT show <cr> since no_handler means positive form requires arg
+        use crate::cmd_tree::{help, HelpResult};
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+        let result = help("hostname ", tree, &mode);
+        match result {
+            HelpResult::Subcommands(subs) => {
+                let names: Vec<&str> = subs.iter().map(|(k, _)| k.as_str()).collect();
+                assert!(!names.contains(&"<cr>"),
+                    "hostname ? should NOT show <cr> (requires argument), got: {:?}", names);
+            }
+            other => panic!("Expected Subcommands, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_conf_no_hostname_shows_cr_in_help() {
+        // "no hostname ?" should show <cr> since no_handler makes it complete without args
+        use crate::cmd_tree::{help_for_no, HelpResult};
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+        let result = help_for_no("hostname ", tree, &mode);
+        match result {
+            HelpResult::Subcommands(subs) => {
+                let names: Vec<&str> = subs.iter().map(|(k, _)| k.as_str()).collect();
+                assert!(names.contains(&"<cr>"),
+                    "no hostname ? should show <cr>, got: {:?}", names);
+            }
+            other => panic!("Expected Subcommands, got {:?}", other),
+        }
     }
 
     #[test]

@@ -271,6 +271,151 @@ pub fn parse(input: &str, tree: &[CommandNode], mode: &CliMode) -> ParseResult {
     parse_tokens(&tokens, 0, tree, mode, trimmed)
 }
 
+/// Parse the remainder of a `no <cmd>` line (i.e., the part after "no ").
+///
+/// Unlike `parse()`, when the last token resolves to a node that has a
+/// `no_handler` (but no regular `handler`), this returns
+/// `Execute { handler: no_handler, input: original }` instead of `Incomplete`.
+/// The `original` passed in should be the full "no ..." line so handlers
+/// receive it intact.
+///
+/// For nodes that have both a `handler` and a `no_handler`, the `no_handler`
+/// is preferred (i.e., `no hostname` uses `no_handler` and does not require
+/// the `<name>` argument that the positive form needs).
+pub fn parse_for_no(
+    remainder: &str,
+    tree: &[CommandNode],
+    mode: &CliMode,
+    full_no_line: &str,
+) -> ParseResult {
+    let trimmed = remainder.trim();
+    if trimmed.is_empty() {
+        return ParseResult::Empty;
+    }
+
+    let tokens = tokenize_with_offsets(trimmed);
+    parse_tokens_for_no(&tokens, 0, tree, mode, full_no_line)
+}
+
+fn parse_tokens_for_no(
+    tokens: &[(String, usize)],
+    idx: usize,
+    nodes: &[CommandNode],
+    mode: &CliMode,
+    original: &str,
+) -> ParseResult {
+    if idx >= tokens.len() {
+        return ParseResult::Empty;
+    }
+
+    let (token, offset) = &tokens[idx];
+    let matches = find_matches(token, nodes, mode);
+
+    match matches.len() {
+        0 => ParseResult::InvalidInput { caret_pos: *offset + 3 }, // +3 for "no " prefix
+        1 => {
+            let node = matches[0];
+
+            // RestOfLine param consumes all remaining tokens
+            if let TokenMatcher::Param { param_type: ParamType::RestOfLine, .. } = &node.matcher {
+                if let Some(handler) = node.handler {
+                    return ParseResult::Execute {
+                        handler,
+                        input: original.to_string(),
+                    };
+                }
+                // RestOfLine with no handler — incomplete
+                return ParseResult::Incomplete;
+            }
+
+            let is_last = idx + 1 >= tokens.len();
+
+            if is_last {
+                // Prefer no_handler over handler for negated form
+                if let Some(no_handler) = node.no_handler {
+                    return ParseResult::Execute {
+                        handler: no_handler,
+                        input: original.to_string(),
+                    };
+                }
+                if let Some(handler) = node.handler {
+                    return ParseResult::Execute {
+                        handler,
+                        input: original.to_string(),
+                    };
+                }
+                // No handler at leaf — if it has children that might resolve, try descending.
+                // If it truly has no handler/no_handler and no children, incomplete.
+                if node.children.is_empty() {
+                    ParseResult::Incomplete
+                } else {
+                    ParseResult::Incomplete
+                }
+            } else {
+                // More tokens — descend into children
+                parse_tokens_for_no(tokens, idx + 1, &node.children, mode, original)
+            }
+        }
+        _ => {
+            // Multiple matches — ambiguous
+            let names: Vec<String> = matches
+                .iter()
+                .map(|n| match &n.matcher {
+                    TokenMatcher::Keyword(kw) => kw.clone(),
+                    TokenMatcher::Param { name, .. } => name.clone(),
+                })
+                .collect();
+            ParseResult::Ambiguous {
+                token: token.clone(),
+                matches: names,
+            }
+        }
+    }
+}
+
+/// Return the children of the node reached by following `remainder` into `tree`,
+/// used for `no ?` help listing. Returns `None` if path is invalid.
+pub fn children_for_no_help<'a>(
+    remainder: &str,
+    tree: &'a [CommandNode],
+    mode: &CliMode,
+) -> Option<&'a [CommandNode]> {
+    let trimmed = remainder.trim();
+    if trimmed.is_empty() {
+        return Some(tree);
+    }
+    let tokens = tokenize_with_offsets(trimmed);
+    // resolve the full path — return the children of the final resolved node
+    match resolve_path_for_no(&tokens, 0, tree, mode) {
+        Ok(children) => Some(children),
+        Err(_) => None,
+    }
+}
+
+fn resolve_path_for_no<'a>(
+    tokens: &[(String, usize)],
+    idx: usize,
+    nodes: &'a [CommandNode],
+    mode: &CliMode,
+) -> Result<&'a [CommandNode], usize> {
+    if idx >= tokens.len() {
+        return Ok(nodes);
+    }
+    let (token, offset) = &tokens[idx];
+    let matches = find_matches(token, nodes, mode);
+    match matches.len() {
+        0 => Err(*offset + 3),
+        1 => {
+            if idx + 1 >= tokens.len() {
+                Ok(&matches[0].children)
+            } else {
+                resolve_path_for_no(tokens, idx + 1, &matches[0].children, mode)
+            }
+        }
+        _ => Err(*offset + 3),
+    }
+}
+
 fn parse_tokens(
     tokens: &[(String, usize)],
     idx: usize,
@@ -403,6 +548,130 @@ pub fn help(input_before_question: &str, tree: &[CommandNode], mode: &CliMode) -
             .collect();
 
         HelpResult::PrefixMatches(matches)
+    }
+}
+
+/// Process a `?` help query for a `no <rest>?` input.
+///
+/// `remainder_before_question` is the text after "no " and before "?".
+/// Uses the same tree as the main config tree.
+/// In no-mode, a node with `no_handler` acts as a complete command (shows `<cr>`).
+pub fn help_for_no(
+    remainder_before_question: &str,
+    tree: &[CommandNode],
+    mode: &CliMode,
+) -> HelpResult {
+    let trimmed = remainder_before_question.trim_end();
+
+    let ends_with_space = remainder_before_question.ends_with(' ')
+        || remainder_before_question.is_empty()
+        || trimmed.is_empty();
+
+    if ends_with_space {
+        if trimmed.is_empty() {
+            // "no ?" — list top-level nodes (excluding no/exit/end/help/do)
+            let subs = visible_children_help_no(tree, mode);
+            return HelpResult::Subcommands(subs);
+        }
+        let tokens = tokenize_with_offsets(trimmed);
+        match resolve_path_with_node_for_no(&tokens, 0, tree, mode) {
+            Ok((children, node_has_no_cr)) => {
+                let mut subs = visible_children_help(children, mode);
+                if node_has_no_cr {
+                    subs.push(("<cr>".to_string(), String::new()));
+                }
+                HelpResult::Subcommands(subs)
+            }
+            Err(caret_pos) => HelpResult::NotFound { caret_pos },
+        }
+    } else {
+        // Partial token completion
+        let tokens = tokenize_with_offsets(trimmed);
+        if tokens.is_empty() {
+            let subs = visible_children_help_no(tree, mode);
+            return HelpResult::Subcommands(subs);
+        }
+
+        let (partial, _partial_offset) = tokens.last().unwrap();
+        let path_tokens = &tokens[..tokens.len() - 1];
+
+        let children: &[CommandNode] = if path_tokens.is_empty() {
+            tree
+        } else {
+            match resolve_path(path_tokens, 0, tree, mode) {
+                Ok(c) => c,
+                Err(caret_pos) => return HelpResult::NotFound { caret_pos },
+            }
+        };
+
+        let partial_lower = partial.to_lowercase();
+        let matches: Vec<String> = children
+            .iter()
+            .filter(|n| n.mode_filter.matches(mode))
+            .filter(|n| !is_excluded_from_no(n))
+            .filter_map(|n| match &n.matcher {
+                TokenMatcher::Keyword(kw) if kw.to_lowercase().starts_with(&partial_lower) => Some(kw.clone()),
+                _ => None,
+            })
+            .collect();
+
+        HelpResult::PrefixMatches(matches)
+    }
+}
+
+fn is_excluded_from_no(node: &CommandNode) -> bool {
+    if let TokenMatcher::Keyword(kw) = &node.matcher {
+        matches!(kw.as_str(), "no" | "exit" | "end" | "help" | "do")
+    } else {
+        false
+    }
+}
+
+fn visible_children_help_no(nodes: &[CommandNode], mode: &CliMode) -> Vec<(String, String)> {
+    let mut result: Vec<(String, String)> = nodes
+        .iter()
+        .filter(|n| n.mode_filter.matches(mode))
+        .filter(|n| !is_excluded_from_no(n))
+        .map(|n| {
+            let name = match &n.matcher {
+                TokenMatcher::Keyword(kw) => kw.clone(),
+                TokenMatcher::Param { name, .. } => name.clone(),
+            };
+            (name, n.help.clone())
+        })
+        .collect();
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+/// Walk the token path in no-mode, returning (children, shows_cr).
+/// `shows_cr` is true when the resolved node has a `no_handler` or `handler`
+/// (i.e., the negated command is complete at this point).
+fn resolve_path_with_node_for_no<'a>(
+    tokens: &[(String, usize)],
+    idx: usize,
+    nodes: &'a [CommandNode],
+    mode: &CliMode,
+) -> Result<(&'a [CommandNode], bool), usize> {
+    if idx >= tokens.len() {
+        return Ok((nodes, false));
+    }
+
+    let (token, offset) = &tokens[idx];
+    let matches = find_matches(token, nodes, mode);
+
+    match matches.len() {
+        0 => Err(*offset),
+        1 => {
+            if idx + 1 >= tokens.len() {
+                // In no-mode: show <cr> when node has no_handler OR handler
+                let has_cr = matches[0].no_handler.is_some() || matches[0].handler.is_some();
+                Ok((&matches[0].children, has_cr))
+            } else {
+                resolve_path_with_node_for_no(tokens, idx + 1, &matches[0].children, mode)
+            }
+        }
+        _ => Err(*offset),
     }
 }
 

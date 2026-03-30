@@ -1236,7 +1236,7 @@ impl MockIosDevice {
 
     /// Dispatch a config/config-sub command using the command tree.
     fn dispatch_config(&mut self, line: &str) {
-        use crate::cmd_tree::parse;
+        use crate::cmd_tree::{parse, parse_for_no};
         use crate::cmd_tree::ParseResult;
         use crate::cmd_tree_exec::exec_tree;
 
@@ -1268,6 +1268,44 @@ impl MockIosDevice {
             // Re-display config prompt after do command
             let p = self.prompt();
             self.queue_output(&format!("{}", p));
+            return;
+        }
+
+        // "no <cmd>" — handle at dispatch level (no tree cloning needed)
+        if cmd_lower.starts_with("no ") {
+            let remainder = &line[3..];
+            let mode = self.mode.clone();
+            let tree = self.config_tree_for_mode();
+            let result = parse_for_no(remainder, tree, &mode, line);
+            match result {
+                ParseResult::Execute { handler, .. } => {
+                    handler(self, line);
+                }
+                ParseResult::Incomplete => {
+                    let p = self.prompt();
+                    self.queue_output(&format!("% Incomplete command.\n{}", p));
+                }
+                ParseResult::InvalidInput { caret_pos } => {
+                    let p = self.prompt();
+                    let spaces = " ".repeat(caret_pos);
+                    self.queue_output(&format!(
+                        "{}^\n% Invalid input detected at '^' marker.\n\n{}",
+                        spaces, p
+                    ));
+                }
+                ParseResult::Ambiguous { token, .. } => {
+                    let p = self.prompt();
+                    self.queue_output(&format!(
+                        "% Ambiguous command:  \"{}\"\n{}",
+                        token,
+                        p
+                    ));
+                }
+                ParseResult::Empty => {
+                    let p = self.prompt();
+                    self.queue_output(&format!("% Incomplete command.\n{}", p));
+                }
+            }
             return;
         }
 
@@ -1953,7 +1991,22 @@ Configuration register is {config_reg}",
             _ => crate::cmd_tree_exec::exec_tree(),
         };
 
-        let tokens = tokenize_with_offsets(partial_input);
+        // For "no <cmd>" in config modes, complete against the main tree
+        let (effective_input, no_prefix_offset) =
+            if matches!(self.mode, CliMode::Config | CliMode::ConfigSub(_)) {
+                let lower = partial_input.to_lowercase();
+                if let Some(no_pos) = lower.find("no ") {
+                    let after_no = &partial_input[no_pos + 3..];
+                    (after_no, no_pos + 3)
+                } else {
+                    (partial_input, 0)
+                }
+            } else {
+                (partial_input, 0)
+            };
+        let _ = no_prefix_offset; // used implicitly via effective_input
+
+        let tokens = tokenize_with_offsets(effective_input);
         if tokens.is_empty() {
             return None;
         }
@@ -1982,7 +2035,7 @@ Configuration register is {config_reg}",
                 let kw_lower = kw.to_lowercase();
                 if kw_lower == last_token.to_lowercase() {
                     // Already complete — just add space if not there
-                    if !partial_input.ends_with(' ') {
+                    if !effective_input.ends_with(' ') {
                         return Some((0, " ".to_string()));
                     }
                 } else if kw_lower.starts_with(&last_token.to_lowercase()) {
@@ -2173,7 +2226,7 @@ impl RawTransport for MockIosDevice {
                     // Echo the '?' like real IOS does
                     self.output_queue.push(b'?');
                     // Immediate help — do NOT add '?' to the input buffer.
-                    use crate::cmd_tree::{help, HelpResult};
+                    use crate::cmd_tree::{help, help_for_no, HelpResult};
                     use crate::cmd_tree_exec::exec_tree;
                     use crate::cmd_tree_conf::conf_tree;
 
@@ -2188,7 +2241,17 @@ impl RawTransport for MockIosDevice {
                         _ => exec_tree(),
                     };
 
-                    let help_result = help(&partial, tree, &mode);
+                    // Check if user typed "no ..." — use no-mode help
+                    let partial_lower = partial.to_lowercase();
+                    let help_result = if (matches!(mode, CliMode::Config | CliMode::ConfigSub(_)))
+                        && partial_lower.trim_start().starts_with("no ")
+                    {
+                        let no_start = partial.to_lowercase().find("no ").unwrap();
+                        let remainder = &partial[no_start + 3..];
+                        help_for_no(remainder, tree, &mode)
+                    } else {
+                        help(&partial, tree, &mode)
+                    };
 
                     // Format help output like real IOS
                     let mut out = String::new();

@@ -807,11 +807,24 @@ fn should_exclude_from_no(node: &CommandNode) -> bool {
     }
 }
 
+/// Clone a command node for use in the `no` subtree.
+/// If the node has a `no_handler`, promote it to `handler` so the negated form
+/// works without arguments (e.g., `no hostname` resets to default).
+fn clone_for_no(node: &CommandNode) -> CommandNode {
+    let mut cloned = node.clone();
+    if cloned.no_handler.is_some() {
+        cloned.handler = cloned.no_handler.take();
+    }
+    // Recursively apply to children
+    cloned.children = cloned.children.iter().map(clone_for_no).collect();
+    cloned
+}
+
 /// Build the "no" keyword node whose children are a clone of the provided commands.
 fn build_no_node(main_commands: &[CommandNode]) -> CommandNode {
     let no_children: Vec<CommandNode> = main_commands.iter()
         .filter(|n| !should_exclude_from_no(n))
-        .cloned()
+        .map(clone_for_no)
         .collect();
     keyword("no", "Negate a command or set its defaults")
         .children(no_children)
@@ -827,10 +840,10 @@ pub fn conf_tree() -> &'static Vec<CommandNode> {
 
 fn build_conf_tree() -> Vec<CommandNode> {
     let mut main_commands: Vec<CommandNode> = vec![
-        // hostname <name>  (bare handler for "no hostname")
+        // hostname <name>  — positive form requires argument; "no hostname" resets to default
         keyword("hostname", "Set system's network name")
             .mode(config_only())
-            .handler(handle_hostname)
+            .no_handler(handle_hostname)
             .children(vec![
                 param("<name>", ParamType::Word, "Hostname string")
                     .handler(handle_hostname),

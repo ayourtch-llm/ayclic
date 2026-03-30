@@ -46,6 +46,11 @@ pub struct CommandNode {
     pub help: String,
     pub children: Vec<CommandNode>,
     pub handler: Option<CmdHandler>,
+    /// Handler invoked only when the command is negated (prefixed with `no`).
+    /// This allows commands where the affirmative form requires arguments but
+    /// the negated form does not (e.g., `hostname <name>` vs `no hostname`).
+    /// When set, `<cr>` is NOT shown in positive-form help output.
+    pub no_handler: Option<CmdHandler>,
     pub mode_filter: ModeFilter,
 }
 
@@ -122,6 +127,7 @@ pub fn keyword(name: &str, help: &str) -> CommandNode {
         help: help.to_string(),
         children: Vec::new(),
         handler: None,
+        no_handler: None,
         mode_filter: ModeFilter::Any,
     }
 }
@@ -133,6 +139,7 @@ pub fn param(name: &str, param_type: ParamType, help: &str) -> CommandNode {
         help: help.to_string(),
         children: Vec::new(),
         handler: None,
+        no_handler: None,
         mode_filter: ModeFilter::Any,
     }
 }
@@ -141,6 +148,13 @@ impl CommandNode {
     /// Set the handler for this node.
     pub fn handler(mut self, h: CmdHandler) -> Self {
         self.handler = Some(h);
+        self
+    }
+
+    /// Set the no-form handler. Used when the negated form (e.g., `no hostname`)
+    /// doesn't take arguments but the positive form does.
+    pub fn no_handler(mut self, h: CmdHandler) -> Self {
+        self.no_handler = Some(h);
         self
     }
 

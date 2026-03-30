@@ -221,6 +221,18 @@ pub fn handle_show_interfaces_status(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("{}\n{}", table, p));
 }
 
+pub fn handle_show_interfaces_description(d: &mut MockIosDevice, _input: &str) {
+    let table = d.state.generate_show_interfaces_description();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", table, p));
+}
+
+pub fn handle_show_interfaces_trunk(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_interfaces_trunk();
+    let p = d.prompt();
+    d.queue_output(&format!("{}{}", output, p));
+}
+
 pub fn handle_show_flash(d: &mut MockIosDevice, _input: &str) {
     d.handle_dir_command("");
 }
@@ -1098,6 +1110,10 @@ fn build_exec_tree() -> Vec<CommandNode> {
                     .children(vec![
                         keyword("status", "Show interface status")
                             .handler(handle_show_interfaces_status),
+                        keyword("description", "Show interface description")
+                            .handler(handle_show_interfaces_description),
+                        keyword("trunk", "Show trunk interface information")
+                            .handler(handle_show_interfaces_trunk),
                         param("<name>", ParamType::RestOfLine, "Interface name")
                             .handler(handle_show_interfaces),
                     ]),

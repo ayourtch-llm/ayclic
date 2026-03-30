@@ -1174,6 +1174,143 @@ impl DeviceState {
         lines.join("\n")
     }
 
+    /// Generate `show interfaces trunk` output.
+    /// Real IOS shows four sections: Mode/Encapsulation/Status, VLANs allowed,
+    /// VLANs active, and VLANs in STP forwarding.
+    pub fn generate_show_interfaces_trunk(&self) -> String {
+        let trunk_ifaces: Vec<&InterfaceState> = self.interfaces.iter()
+            .filter(|i| i.switchport_mode.as_deref() == Some("trunk") && i.admin_up)
+            .collect();
+
+        if trunk_ifaces.is_empty() {
+            return String::new();
+        }
+
+        let mut output = String::new();
+
+        // Section 1: Port Mode Encapsulation Status Native vlan
+        output.push_str("\nPort        Mode             Encapsulation  Status        Native vlan\n");
+        for iface in &trunk_ifaces {
+            let short = short_interface_name(&iface.name);
+            let status = if iface.link_up { "trunking" } else { "not-trunking" };
+            output.push_str(&format!(
+                "{:<12}{:<17}{:<15}{:<14}{}\n",
+                short, "on", "802.1q", status, iface.vlan.unwrap_or(1)
+            ));
+        }
+
+        // Section 2: VLANs allowed on trunk
+        output.push_str("\nPort        Vlans allowed on trunk\n");
+        for iface in &trunk_ifaces {
+            let short = short_interface_name(&iface.name);
+            output.push_str(&format!("{:<12}1-4094\n", short));
+        }
+
+        // Section 3: VLANs allowed and active in management domain
+        let active_vlans: Vec<String> = self.vlans.iter()
+            .filter(|v| v.active && !v.unsupported)
+            .map(|v| v.id.to_string())
+            .collect();
+        let active_str = Self::compress_vlan_ranges(&active_vlans);
+        output.push_str("\nPort        Vlans allowed and active in management domain\n");
+        for iface in &trunk_ifaces {
+            let short = short_interface_name(&iface.name);
+            output.push_str(&format!("{:<12}{}\n", short, active_str));
+        }
+
+        // Section 4: VLANs in spanning tree forwarding state and not pruned
+        output.push_str("\nPort        Vlans in spanning tree forwarding state and not pruned\n");
+        for iface in &trunk_ifaces {
+            let short = short_interface_name(&iface.name);
+            if iface.link_up {
+                output.push_str(&format!("{:<12}{}\n", short, active_str));
+            } else {
+                output.push_str(&format!("{:<12}none\n", short));
+            }
+        }
+
+        output
+    }
+
+    /// Compress a list of VLAN ID strings into range notation (e.g., "1-15,100-101,127")
+    fn compress_vlan_ranges(vlan_strs: &[String]) -> String {
+        let mut ids: Vec<u16> = vlan_strs.iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        ids.sort();
+        ids.dedup();
+
+        if ids.is_empty() {
+            return "none".to_string();
+        }
+
+        let mut ranges: Vec<String> = Vec::new();
+        let mut start = ids[0];
+        let mut end = ids[0];
+
+        for &id in &ids[1..] {
+            if id == end + 1 {
+                end = id;
+            } else {
+                if start == end {
+                    ranges.push(start.to_string());
+                } else {
+                    ranges.push(format!("{}-{}", start, end));
+                }
+                start = id;
+                end = id;
+            }
+        }
+        if start == end {
+            ranges.push(start.to_string());
+        } else {
+            ranges.push(format!("{}-{}", start, end));
+        }
+
+        ranges.join(",")
+    }
+
+    /// Generate `show interfaces description` output matching real IOS format.
+    ///
+    /// Format:
+    /// ```text
+    /// Interface                      Status         Protocol Description
+    /// Vl1                            up             up       Tool Provisioning VLAN
+    /// Gi1/0/1                        down           down
+    /// Gi1/0/5                        admin down     down     DISABLED-PORT
+    /// ```
+    pub fn generate_show_interfaces_description(&self) -> String {
+        let header = "Interface                      Status         Protocol Description";
+        let mut lines = vec![header.to_string()];
+
+        for iface in &self.interfaces {
+            let short = short_interface_name(&iface.name);
+
+            let status = if !iface.admin_up {
+                "admin down".to_string()
+            } else if iface.link_up {
+                "up".to_string()
+            } else {
+                "down".to_string()
+            };
+
+            let protocol = if iface.admin_up && iface.link_up {
+                "up"
+            } else {
+                "down"
+            };
+
+            let desc = &iface.description;
+
+            lines.push(format!(
+                "{:<31}{:<15}{:<9}{}",
+                short, status, protocol, desc
+            ));
+        }
+
+        lines.join("\n")
+    }
+
     /// Generate `show arp` output with self-entries for each interface that has an IP address.
     pub fn generate_show_arp(&self) -> String {
         let header = "Protocol  Address          Age (min)  Hardware Addr   Type   Interface";
@@ -1894,6 +2031,100 @@ mod tests {
             "Two spaces between Duplex and Speed: {:?}", gi5_line);
         assert_eq!(&gi5_line[61..66], " auto",
             "Speed should be right-aligned in 5-char field: {:?}", gi5_line);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_description_header() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_description();
+        let header = output.lines().next().unwrap();
+        assert_eq!(
+            header,
+            "Interface                      Status         Protocol Description",
+            "Header must match real IOS format exactly"
+        );
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_description_all_interfaces_present() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_description();
+        // All interfaces should be listed (VLANs, physical, loopbacks)
+        assert!(output.contains("Vl1"), "Vlan1 SVI should appear as Vl1");
+        assert!(output.contains("Gi1/0/1"), "GigabitEthernet should appear as Gi");
+        assert!(output.contains("Te1/0/1"), "TenGigabitEthernet should appear as Te");
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_description_status_up() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_description();
+        // Vlan1 is admin_up=true, link_up=true → "up" / "up"
+        let vl1_line = output.lines().find(|l| l.starts_with("Vl1")).unwrap();
+        // Status column at offset 31, 15 chars wide
+        assert_eq!(&vl1_line[31..46], "up             ",
+            "Vlan1 status should be 'up': {:?}", vl1_line);
+        // Protocol column at offset 46, 9 chars wide
+        assert_eq!(&vl1_line[46..55], "up       ",
+            "Vlan1 protocol should be 'up': {:?}", vl1_line);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_description_status_down() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_description();
+        // Gi1/0/1 is admin_up=true, link_up=false → "down" / "down"
+        let gi1_line = output.lines().find(|l| l.starts_with("Gi1/0/1")).unwrap();
+        assert_eq!(&gi1_line[31..46], "down           ",
+            "Gi1/0/1 status should be 'down': {:?}", gi1_line);
+        assert_eq!(&gi1_line[46..55], "down     ",
+            "Gi1/0/1 protocol should be 'down': {:?}", gi1_line);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_description_admin_down() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_description();
+        // Gi1/0/5 is admin_up=false → "admin down" / "down"
+        let gi5_line = output.lines().find(|l| l.starts_with("Gi1/0/5")).unwrap();
+        assert_eq!(&gi5_line[31..46], "admin down     ",
+            "Gi1/0/5 status should be 'admin down': {:?}", gi5_line);
+        assert_eq!(&gi5_line[46..55], "down     ",
+            "Gi1/0/5 protocol should be 'down': {:?}", gi5_line);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_description_with_description() {
+        let mut state = DeviceState::new("Switch1");
+        if let Some(iface) = state.get_interface_mut("GigabitEthernet1/0/1") {
+            iface.description = "uplink to core".to_string();
+        }
+        let output = state.generate_show_interfaces_description();
+        let gi1_line = output.lines().find(|l| l.starts_with("Gi1/0/1")).unwrap();
+        assert!(gi1_line.ends_with("uplink to core"),
+            "Description should appear at end of line: {:?}", gi1_line);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_description_empty_description() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_description();
+        // Gi1/0/1 has no description — line should end after protocol column
+        let gi1_line = output.lines().find(|l| l.starts_with("Gi1/0/1")).unwrap();
+        // After the 55-char prefix (31+15+9), there should be nothing extra
+        assert_eq!(gi1_line.len(), 55,
+            "Line with empty description should be exactly 55 chars: {:?}", gi1_line);
+    }
+
+    #[test]
+    fn test_generate_show_interfaces_description_interface_col_width() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_interfaces_description();
+        // Interface column is 31 chars wide
+        // "Vl1" is 3 chars, should be padded to 31
+        let vl1_line = output.lines().find(|l| l.starts_with("Vl1")).unwrap();
+        assert_eq!(&vl1_line[0..31], "Vl1                            ",
+            "Interface column should be 31 chars: {:?}", vl1_line);
     }
 
     #[test]

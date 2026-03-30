@@ -1042,7 +1042,8 @@ impl DeviceState {
     /// Generate a running-config string from the structured state.
     pub fn generate_running_config(&self) -> String {
         let body_lines = self.build_config_body();
-        let body = body_lines.join("\n");
+        // Real IOS terminates every line (including "end") with \n.
+        let body = body_lines.join("\n") + "\n";
         let byte_count = body.len();
 
         format!(
@@ -1054,7 +1055,8 @@ impl DeviceState {
     /// Generate a startup-config string (same content as running config, different header).
     pub fn generate_startup_config(&self) -> String {
         let body_lines = self.build_config_body();
-        let body = body_lines.join("\n");
+        // Real IOS terminates every line (including "end") with \n.
+        let body = body_lines.join("\n") + "\n";
         let byte_count = body.len();
 
         format!("Using {} out of 524288 bytes\n{}", byte_count, body)
@@ -2441,6 +2443,53 @@ mod tests {
         let config = state.generate_running_config();
         assert!(config.contains("hostname MySwitch"));
         assert!(!config.contains("hostname Switch1"));
+    }
+
+    #[test]
+    fn test_running_config_byte_count_matches_actual() {
+        // The "Current configuration : N bytes" header must report the actual
+        // byte count of the config body (from first "!" to "end" inclusive,
+        // each line terminated with \n as in real IOS).
+        let state = DeviceState::new("Switch1");
+        let config = state.generate_running_config();
+
+        // Extract the claimed byte count from the header line.
+        let claimed: usize = config
+            .lines()
+            .find_map(|line| {
+                let prefix = "Current configuration : ";
+                let suffix = " bytes";
+                if line.starts_with(prefix) && line.ends_with(suffix) {
+                    let num_str = &line[prefix.len()..line.len() - suffix.len()];
+                    num_str.parse().ok()
+                } else {
+                    None
+                }
+            })
+            .expect("output must contain 'Current configuration : N bytes' line");
+
+        // Compute the actual byte count: the body after the header line,
+        // with each line terminated by \n (including the final "end" line).
+        let header_prefix = "Current configuration : ";
+        let header_line_end = config
+            .find(header_prefix)
+            .and_then(|start| config[start..].find('\n').map(|n| start + n + 1))
+            .expect("header line must exist");
+        let body = &config[header_line_end..];
+        // Real IOS counts bytes with \n at end of every line including "end".
+        // body already starts at the first '!' line.  We need byte count as if
+        // every line has a trailing \n (i.e., body ends with \n).
+        let actual = if body.ends_with('\n') {
+            body.len()
+        } else {
+            body.len() + 1 // add trailing newline after "end"
+        };
+
+        assert_eq!(
+            claimed, actual,
+            "byte count in header ({}) must match actual config body bytes ({})\nConfig:\n{}",
+            claimed, actual, config
+        );
     }
 
     #[test]

@@ -375,37 +375,37 @@ impl InterfaceState {
             ("Gigabit Ethernet", "10/100/1000BaseTX", 10)
         };
 
-        format!(
-            "{name} is {status}, line protocol is {protocol}\n\
-  Hardware is {hw_type}, address is {mac} (bia {mac})\n\
+        format!("\
+{name} is {status}, line protocol is {protocol}\n  \
+Hardware is {hw_type}, address is {mac} (bia {mac})\n\
 {desc_line}\
-{ip_line}\
-  MTU {mtu} bytes, BW {bw} Kbit/sec, DLY {dly} usec, \n\
-     reliability 255/255, txload 1/255, rxload 1/255\n\
-  Encapsulation ARPA, loopback not set\n\
-  Keepalive set (10 sec)\n\
-  {duplex}, {speed}, media type is {media_type}\n\
-  input flow-control is off, output flow-control is unsupported \n\
-  ARP type: ARPA, ARP Timeout 04:00:00\n\
-  Last input never, output never, output hang never\n\
-  Last clearing of \"show interface\" counters never\n\
-  Input queue: 0/75/0/0 (size/max/drops/flushes); Total output drops: 0\n\
-  Queueing strategy: fifo\n\
-  Output queue: 0/40 (size/max)\n\
-  5 minute input rate 0 bits/sec, 0 packets/sec\n\
-  5 minute output rate 0 bits/sec, 0 packets/sec\n\
-     {in_pkts} packets input, {in_bytes} bytes, 0 no buffer\n\
-     Received 0 broadcasts (0 multicasts)\n\
-     0 runts, 0 giants, 0 throttles \n\
-     {in_err} input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored\n\
-     0 watchdog, 0 multicast, 0 pause input\n\
-     0 input packets with dribble condition detected\n\
-     {out_pkts} packets output, {out_bytes} bytes, 0 underruns\n\
-     {out_err} output errors, 0 collisions, 1 interface resets\n\
-     0 unknown protocol drops\n\
-     0 babbles, 0 late collision, 0 deferred\n\
-     0 lost carrier, 0 no carrier, 0 pause output\n\
-     0 output buffer failures, 0 output buffers swapped out\n",
+{ip_line}  \
+MTU {mtu} bytes, BW {bw} Kbit/sec, DLY {dly} usec, \n     \
+reliability 255/255, txload 1/255, rxload 1/255\n  \
+Encapsulation ARPA, loopback not set\n  \
+Keepalive set (10 sec)\n  \
+{duplex}, {speed}, media type is {media_type}\n  \
+input flow-control is off, output flow-control is unsupported \n  \
+ARP type: ARPA, ARP Timeout 04:00:00\n  \
+Last input never, output never, output hang never\n  \
+Last clearing of \"show interface\" counters never\n  \
+Input queue: 0/75/0/0 (size/max/drops/flushes); Total output drops: 0\n  \
+Queueing strategy: fifo\n  \
+Output queue: 0/40 (size/max)\n  \
+30 second input rate 0 bits/sec, 0 packets/sec\n  \
+30 second output rate 0 bits/sec, 0 packets/sec\n     \
+{in_pkts} packets input, {in_bytes} bytes, 0 no buffer\n     \
+Received 0 broadcasts (0 multicasts)\n     \
+0 runts, 0 giants, 0 throttles \n     \
+{in_err} input errors, 0 CRC, 0 frame, 0 overrun, 0 ignored\n     \
+0 watchdog, 0 multicast, 0 pause input\n     \
+0 input packets with dribble condition detected\n     \
+{out_pkts} packets output, {out_bytes} bytes, 0 underruns\n     \
+{out_err} output errors, 0 collisions, 1 interface resets\n     \
+0 unknown protocol drops\n     \
+0 babbles, 0 late collision, 0 deferred\n     \
+0 lost carrier, 0 no carrier, 0 pause output\n     \
+0 output buffer failures, 0 output buffers swapped out\n",
             name = self.name,
             status = status,
             protocol = protocol,
@@ -712,7 +712,7 @@ impl DeviceState {
     pub fn generate_show_vlan_brief(&self) -> String {
         let header = "VLAN Name                             Status    Ports\n\
 ---- -------------------------------- --------- -------------------------------";
-        let mut lines = vec![header.to_string()];
+        let mut lines = vec![String::new(), header.to_string()];
         for vlan in &self.vlans {
             let status = if vlan.unsupported {
                 "act/unsup"
@@ -1299,7 +1299,7 @@ MD5 digest                        : 0x29 0xC9 0x2A 0x5B 0x43 0xE3 0xB7 0x78
     /// Generate `show interfaces status` output matching real IOS format.
     pub fn generate_show_interfaces_status(&self) -> String {
         let header = "Port      Name               Status       Vlan       Duplex  Speed Type";
-        let mut lines = vec![header.to_string()];
+        let mut lines = vec![String::new(), header.to_string()];
 
         for iface in &self.interfaces {
             // Skip Vlan (SVI) interfaces — they don't appear in this output
@@ -2859,8 +2859,11 @@ mod tests {
         let state = DeviceState::new("Switch1");
         let output = state.generate_show_interfaces_status();
 
-        // Header must match real IOS exactly
-        let header = output.lines().next().unwrap();
+        // Real IOS has a blank line before the header
+        assert!(output.starts_with('\n'), "Output should start with blank line: {:?}", &output[..output.len().min(50)]);
+
+        // Header must match real IOS exactly (second line, after the leading blank)
+        let header = output.lines().find(|l| !l.is_empty()).unwrap();
         assert_eq!(
             header,
             "Port      Name               Status       Vlan       Duplex  Speed Type",

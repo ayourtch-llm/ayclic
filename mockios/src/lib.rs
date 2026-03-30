@@ -1545,7 +1545,7 @@ impl MockIosDevice {
 
 
     pub fn handle_dir_command(&mut self, _line: &str) {
-        let mut output = String::from("Directory of flash:/\n\n");
+        let mut output = String::from("\nDirectory of flash:/\n\n");
         let mut used: u64 = 0;
         for (name, content) in &self.flash_files {
             output.push_str(&format!(
@@ -4701,8 +4701,54 @@ mod tests {
             "Should show interface status, got: {:?}",
             &output[..output.len().min(200)]
         );
-        assert!(output.contains("MTU"), "Should show MTU");
-        assert!(output.contains("packets input"), "Should show counters");
+        // First content line (after the echoed command) must NOT be indented
+        let first_line = output.lines()
+            .find(|l| l.starts_with("GigabitEthernet") || l.starts_with("TenGigabitEthernet") || l.starts_with("Vlan") || l.starts_with("Loopback"))
+            .unwrap_or("");
+        assert!(
+            first_line.starts_with("GigabitEthernet"),
+            "First line should not be indented, got: {:?}",
+            first_line
+        );
+        // Hardware/MTU/Encapsulation lines must use 2-space indent
+        assert!(
+            output.contains("  Hardware is"),
+            "Hardware line should have 2-space indent"
+        );
+        assert!(output.contains("  MTU"), "MTU line should have 2-space indent");
+        assert!(
+            output.contains("  Encapsulation ARPA"),
+            "Encapsulation line should have 2-space indent"
+        );
+        // reliability continuation line uses 5-space indent
+        assert!(
+            output.contains("     reliability 255/255"),
+            "reliability line should have 5-space indent"
+        );
+        // Rate lines: "30 second" not "5 minute"
+        assert!(
+            output.contains("  30 second input rate"),
+            "Should show '30 second input rate' with 2-space indent"
+        );
+        assert!(
+            output.contains("  30 second output rate"),
+            "Should show '30 second output rate' with 2-space indent"
+        );
+        // Counter lines use 5-space indent
+        assert!(
+            output.contains("     ") && output.contains("packets input"),
+            "Counter lines should have 5-space indent"
+        );
+        // Verify "packets input" line specifically has 5-space indent
+        let packets_input_line = output
+            .lines()
+            .find(|l| l.contains("packets input"))
+            .unwrap_or("");
+        assert!(
+            packets_input_line.starts_with("     "),
+            "packets input line should have 5-space indent, got: {:?}",
+            packets_input_line
+        );
     }
 
     #[tokio::test]

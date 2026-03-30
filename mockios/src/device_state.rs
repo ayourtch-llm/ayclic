@@ -2742,4 +2742,89 @@ mod tests {
         assert!(gi2_block.contains("Access Mode VLAN: 10 (DATA)"),
             "VLAN 10 with name DATA should be shown: {:?}", gi2_block);
     }
+
+    // ── show interfaces counters ──────────────────────────────────────────────
+
+    fn make_counters_state() -> DeviceState {
+        DeviceState::new("Switch")
+    }
+
+    #[test]
+    fn test_show_interfaces_counters_has_two_tables() {
+        let state = make_counters_state();
+        let output = state.generate_show_interfaces_counters();
+        assert!(output.contains("InOctets"), "missing input header");
+        assert!(output.contains("OutOctets"), "missing output header");
+    }
+
+    #[test]
+    fn test_show_interfaces_counters_input_header_columns() {
+        let state = make_counters_state();
+        let output = state.generate_show_interfaces_counters();
+        let first_line = output.lines().next().unwrap();
+        assert!(first_line.contains("InOctets"), "InOctets missing: {first_line}");
+        assert!(first_line.contains("InUcastPkts"), "InUcastPkts missing: {first_line}");
+        assert!(first_line.contains("InMcastPkts"), "InMcastPkts missing: {first_line}");
+        assert!(first_line.contains("InBcastPkts"), "InBcastPkts missing: {first_line}");
+    }
+
+    #[test]
+    fn test_show_interfaces_counters_output_header_columns() {
+        let state = make_counters_state();
+        let output = state.generate_show_interfaces_counters();
+        let out_header = output.lines().find(|l| l.contains("OutOctets")).expect("OutOctets line missing");
+        assert!(out_header.contains("OutUcastPkts"), "OutUcastPkts missing");
+        assert!(out_header.contains("OutMcastPkts"), "OutMcastPkts missing");
+        assert!(out_header.contains("OutBcastPkts"), "OutBcastPkts missing");
+    }
+
+    #[test]
+    fn test_show_interfaces_counters_no_vlan_interfaces() {
+        let state = make_counters_state();
+        let output = state.generate_show_interfaces_counters();
+        // Vlan SVI interfaces should not appear
+        assert!(!output.contains("Vl1"), "SVI Vlan1 should not appear: {output}");
+    }
+
+    #[test]
+    fn test_show_interfaces_counters_physical_interfaces_present() {
+        let state = make_counters_state();
+        let output = state.generate_show_interfaces_counters();
+        // GigabitEthernet1/0/1 should appear as Gi1/0/1
+        assert!(output.contains("Gi1/0/1"), "Gi1/0/1 missing: {output}");
+    }
+
+    #[test]
+    fn test_show_interfaces_counters_zero_values() {
+        let state = make_counters_state();
+        let output = state.generate_show_interfaces_counters();
+        // All counters default to 0
+        for line in output.lines() {
+            if line.starts_with("Gi") || line.starts_with("Te") || line.starts_with("Fa") {
+                assert!(line.contains("0"), "expected zeros in: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_show_interfaces_counters_nonzero_values() {
+        let mut state = make_counters_state();
+        state.interfaces[1].input_packets = 100;
+        state.interfaces[1].input_bytes = 12000;
+        state.interfaces[1].output_packets = 50;
+        state.interfaces[1].output_bytes = 6000;
+        let output = state.generate_show_interfaces_counters();
+        assert!(output.contains("12000"), "input_bytes not shown: {output}");
+        assert!(output.contains("100"), "input_packets not shown: {output}");
+        assert!(output.contains("6000"), "output_bytes not shown: {output}");
+        assert!(output.contains("50"), "output_packets not shown: {output}");
+    }
+
+    #[test]
+    fn test_show_interfaces_counters_blank_line_separates_tables() {
+        let state = make_counters_state();
+        let output = state.generate_show_interfaces_counters();
+        // There should be a blank line between the two tables
+        assert!(output.contains("\n\n"), "no blank line separator between tables: {output}");
+    }
 }

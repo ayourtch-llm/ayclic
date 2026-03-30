@@ -4896,6 +4896,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_show_ip_arp_matches_show_arp() {
+        let mut device = setup_device("R1").await;
+        let arp_output = send_cmd(&mut device, "show arp").await;
+        let ip_arp_output = send_cmd(&mut device, "show ip arp").await;
+        // Strip the echoed command line (first line) so we compare only table content
+        let arp_body: Vec<&str> = arp_output.lines().skip(1).collect();
+        let ip_arp_body: Vec<&str> = ip_arp_output.lines().skip(1).collect();
+        assert_eq!(arp_body, ip_arp_body,
+            "show ip arp should produce the same ARP table as show arp");
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_interface_without_brief() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip interface").await;
+        // Should show interface info (same as brief for now), not an error/stub
+        assert!(output.contains("Interface") || output.contains("Vlan") || output.contains("FastEthernet"),
+            "show ip interface should show interface information, got: {:?}", output);
+    }
+
+    #[tokio::test]
     async fn test_show_mac_address_table() {
         let mut device = setup_device("R1").await;
         let output = send_cmd(&mut device, "show mac address-table").await;

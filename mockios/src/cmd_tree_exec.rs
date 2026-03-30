@@ -85,6 +85,11 @@ pub fn handle_show_ip_interface_brief(d: &mut MockIosDevice, _input: &str) {
     d.handle_show_ip_interface_brief();
 }
 
+pub fn handle_show_ip_interface(d: &mut MockIosDevice, input: &str) {
+    // Full detailed format is complex; reuse brief output for now
+    handle_show_ip_interface_brief(d, input);
+}
+
 pub fn handle_show_ip_route(d: &mut MockIosDevice, _input: &str) {
     d.handle_show_ip_route();
 }
@@ -237,6 +242,12 @@ pub fn handle_show_interfaces_switchport(d: &mut MockIosDevice, _input: &str) {
     let output = d.state.generate_show_interfaces_switchport();
     let p = d.prompt();
     d.queue_output(&format!("{}{}", output, p));
+}
+
+pub fn handle_show_interfaces_counters(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_interfaces_counters();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_flash(d: &mut MockIosDevice, _input: &str) {
@@ -1052,6 +1063,7 @@ fn build_exec_tree() -> Vec<CommandNode> {
                         keyword("igmp", "IGMP information")
                             .handler(handle_show_ip_igmp),
                         keyword("interface", "IP interface status and configuration")
+                            .handler(handle_show_ip_interface as CmdHandler)
                             .children(vec![
                                 keyword("brief", "Brief summary of IP status")
                                     .handler(handle_show_ip_interface_brief),
@@ -1122,6 +1134,8 @@ fn build_exec_tree() -> Vec<CommandNode> {
                             .handler(handle_show_interfaces_trunk),
                         keyword("switchport", "Show interface switchport information")
                             .handler(handle_show_interfaces_switchport),
+                        keyword("counters", "Show interface counters")
+                            .handler(handle_show_interfaces_counters),
                         param("<name>", ParamType::RestOfLine, "Interface name")
                             .handler(handle_show_interfaces),
                     ]),

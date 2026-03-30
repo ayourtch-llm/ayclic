@@ -898,7 +898,7 @@ impl MockIosDevice {
             };
             // Replace the newly queued output with the filtered version.
             self.output_queue.truncate(pre_len);
-            self.output_queue.extend_from_slice(content_and_prompt.as_bytes());
+            self.queue_output(&content_and_prompt);
         } else {
             self.dispatch_exec(base_line);
         }
@@ -6660,6 +6660,33 @@ mod tests {
             "| count reported unreasonably large count: {}",
             reported_count
         );
+    }
+
+    #[tokio::test]
+    async fn test_pipe_filter_output_has_crlf() {
+        // Verify that pipe-filtered output uses \r\n line endings, not bare \n.
+        // The device starts in PrivilegedExec mode after setup_device().
+        let mut device = setup_device("R1").await;
+
+        // Send the pipe-filtered command using \r\n as the line terminator.
+        device.send(b"show run | include interface\r\n").await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Every \n in the output must be preceded by \r.
+        for (i, &b) in data.iter().enumerate() {
+            if b == b'\n' && (i == 0 || data[i - 1] != b'\r') {
+                let raw = String::from_utf8_lossy(&data);
+                panic!(
+                    "Found bare \\n at position {} in pipe-filtered output: {:?}",
+                    i,
+                    &raw[..raw.len().min(200)]
+                );
+            }
+        }
+
+        // The output should contain at least one content line (the filtered result)
+        // as well as the trailing prompt, and must not be empty.
+        assert!(!data.is_empty(), "pipe-filtered output must not be empty");
     }
 
     // --- show ip route static / connected / summary ---

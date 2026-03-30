@@ -893,14 +893,21 @@ impl DeviceState {
             if !iface.description.is_empty() {
                 lines.push(format!(" description {}", iface.description));
             }
-            // Add switchport mode access for Gi/Te interfaces with no IP
+            // Switchport config: real IOS only shows non-default switchport settings.
+            // "switchport mode access" is the default and NOT shown.
+            // "switchport mode trunk" IS shown when explicitly configured.
+            // "switchport access vlan N" only shown when N != 1 (default).
             let is_switchport = (iface.name.starts_with("GigabitEthernet") || iface.name.starts_with("TenGigabitEthernet"))
                 && iface.ip_address.is_none();
             if is_switchport {
-                let mode = iface.switchport_mode.as_deref().unwrap_or("access");
-                lines.push(format!(" switchport mode {}", mode));
+                let mode = iface.switchport_mode.as_deref();
+                if mode == Some("trunk") {
+                    lines.push(" switchport mode trunk".to_string());
+                }
                 if let Some(vlan_id) = iface.vlan {
-                    lines.push(format!(" switchport access vlan {}", vlan_id));
+                    if vlan_id != 1 {
+                        lines.push(format!(" switchport access vlan {}", vlan_id));
+                    }
                 }
             }
             if let Some((addr, mask)) = &iface.ip_address {

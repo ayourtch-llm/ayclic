@@ -220,6 +220,27 @@ pub fn handle_show_vlan_brief(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("{}\n{}", table, p));
 }
 
+pub fn handle_show_vlan(d: &mut MockIosDevice, _input: &str) {
+    let table = d.state.generate_show_vlan();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", table, p));
+}
+
+pub fn handle_show_vlan_id(d: &mut MockIosDevice, input: &str) {
+    // input is the full line, e.g. "show vlan id 10"
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    let p = d.prompt();
+    // tokens: ["show", "vlan", "id", "<N>"]
+    let output = match tokens.get(3).and_then(|s| s.parse::<u16>().ok()) {
+        Some(id) => {
+            let table = d.state.generate_show_vlan_id(id);
+            format!("{}\n{}", table, p)
+        }
+        None => format!("% Invalid VLAN id\n{}", p),
+    };
+    d.queue_output(&output);
+}
+
 pub fn handle_show_interfaces_status(d: &mut MockIosDevice, _input: &str) {
     let table = d.state.generate_show_interfaces_status();
     let p = d.prompt();
@@ -1140,9 +1161,15 @@ fn build_exec_tree() -> Vec<CommandNode> {
                             .handler(handle_show_interfaces),
                     ]),
                 keyword("vlan", "VLAN information")
+                    .handler(handle_show_vlan as CmdHandler)
                     .children(vec![
                         keyword("brief", "VTP all VLAN status in brief")
                             .handler(handle_show_vlan_brief),
+                        keyword("id", "VLAN id")
+                            .children(vec![
+                                param("<vlan-id>", ParamType::Number, "VLAN identifier")
+                                    .handler(handle_show_vlan_id),
+                            ]),
                     ]),
                 keyword("install", "Install information")
                     .mode(priv_only())

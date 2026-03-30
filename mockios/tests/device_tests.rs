@@ -566,3 +566,75 @@ async fn test_verify_md5_nonexistent_file() {
     let output = String::from_utf8_lossy(&data);
     assert!(output.contains("Error"), "Expected error for nonexistent file, got: {}", output);
 }
+
+#[tokio::test]
+async fn test_show_vlan() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show vlan\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    // Should contain the brief table header
+    assert!(output.contains("VLAN Name"), "show vlan missing VLAN Name header, got:\n{}", output);
+    assert!(output.contains("Status"), "show vlan missing Status column, got:\n{}", output);
+    // Should contain the SAID/MTU section header
+    assert!(output.contains("SAID"), "show vlan missing SAID column, got:\n{}", output);
+    assert!(output.contains("MTU"), "show vlan missing MTU column, got:\n{}", output);
+    // VLAN 1 should appear
+    assert!(output.contains("default"), "show vlan missing VLAN 1 'default', got:\n{}", output);
+}
+
+#[tokio::test]
+async fn test_show_vlan_brief() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show vlan brief\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(output.contains("VLAN Name"), "show vlan brief missing header, got:\n{}", output);
+    assert!(output.contains("default"), "show vlan brief missing VLAN 1, got:\n{}", output);
+    // brief should NOT have the SAID section
+    assert!(!output.contains("SAID"), "show vlan brief should not contain SAID section, got:\n{}", output);
+}
+
+#[tokio::test]
+async fn test_show_vlan_id_existing() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show vlan id 1\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(output.contains("VLAN Name"), "show vlan id 1 missing header, got:\n{}", output);
+    assert!(output.contains("default"), "show vlan id 1 missing VLAN name, got:\n{}", output);
+    assert!(output.contains("SAID"), "show vlan id 1 missing SAID section, got:\n{}", output);
+}
+
+#[tokio::test]
+async fn test_show_vlan_id_nonexistent() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show vlan id 999\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("not found") || output.contains("999"),
+        "show vlan id 999 should indicate not found, got:\n{}",
+        output
+    );
+}

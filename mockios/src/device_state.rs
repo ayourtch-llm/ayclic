@@ -1070,6 +1070,36 @@ impl DeviceState {
         self.interfaces.iter().find(|i| i.name == name)
     }
 
+    /// Normalize an interface name from abbreviated to full form.
+    /// Expands short prefixes (e.g. `Gi`, `Te`, `Fa`, `Lo`, `Vl`) to full names.
+    /// If the name matches an existing interface exactly, it is returned as-is.
+    /// If the abbreviated form matches an existing interface, the full name is returned.
+    /// Otherwise the input is returned unchanged.
+    pub fn normalize_interface_name(&self, name: &str) -> String {
+        // Already an exact match — return as-is.
+        if self.interfaces.iter().any(|i| i.name == name) {
+            return name.to_string();
+        }
+        // Try expanding common abbreviations and check against known interfaces.
+        const EXPAND: &[(&str, &str)] = &[
+            ("Te", "TenGigabitEthernet"),
+            ("Gi", "GigabitEthernet"),
+            ("Fa", "FastEthernet"),
+            ("Lo", "Loopback"),
+            ("Vl", "Vlan"),
+        ];
+        for (short, long) in EXPAND {
+            if let Some(suffix) = name.strip_prefix(short) {
+                let full = format!("{}{}", long, suffix);
+                if self.interfaces.iter().any(|i| i.name == full) {
+                    return full;
+                }
+            }
+        }
+        // No match found — return original.
+        name.to_string()
+    }
+
     /// Get or create an interface by name.
     pub fn ensure_interface(&mut self, name: &str) -> &mut InterfaceState {
         if self.interfaces.iter().any(|i| i.name == name) {

@@ -658,6 +658,72 @@ pub fn handle_show_privilege(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("Current privilege level is {}\n{}", level, p));
 }
 
+// ─── show ip stub handlers ─────────────────────────────────────────────────
+
+pub fn handle_show_ip_access_lists(d: &mut MockIosDevice, input: &str) {
+    handle_show_access_lists(d, input);
+}
+
+pub fn handle_show_ip_arp(d: &mut MockIosDevice, input: &str) {
+    handle_show_arp(d, input);
+}
+
+pub fn handle_show_ip_bgp(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_ip_cef(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "IP CEF with switching (Table Version 0)\n  0.0.0.0/0, version 0, epoch 0, cached adjacency 0.0.0.0\n    0 packets, 0 bytes\n    via 0.0.0.0, 0 dependencies, recursive\n    next hop 0.0.0.0");
+}
+
+pub fn handle_show_ip_dhcp_binding(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "Bindings from all pools not associated with VRF:\nIP address          Client-ID/                Lease expiration        Type\n                    Hardware address/\n                    User name");
+}
+
+pub fn handle_show_ip_dhcp_pool(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_ip_dhcp_snooping(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "DHCP snooping is disabled");
+}
+
+pub fn handle_show_ip_dhcp(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_ip_eigrp(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_ip_http(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "HTTP server status: Enabled\nHTTP server port: 80\nHTTP server active supplementary listener ports: 80\nHTTP server authentication method: local\nHTTP server auth-retry 0 time-window 0\nHTTP server digest algorithm: md5\nHTTP server access class: 0\nHTTP server IPv4 access class: None\nHTTP server IPv6 access class: None\nHTTP server base path:\nHTTP server help root:\nMaximum number of concurrent server connections allowed: 300\nMaximum number of secondary server connections allowed: 50\nServer idle time-out: 180 seconds\nServer life time-out: 180 seconds\nServer linger time-out: 60 seconds\nHTTP common access class: 0\nHTTP secure server capability: Present\nHTTP secure server status: Enabled\nHTTP secure server port: 443\nHTTP secure server ciphersuite: 3des-ede-cbc-sha des-cbc-sha rc4-128-md5 rc4-128-sha aes-128-cbc-sha aes-256-cbc-sha dhe-aes-128-cbc-sha dhe-aes-256-cbc-sha");
+}
+
+pub fn handle_show_ip_igmp(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_ip_nat(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_ip_pim(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
+pub fn handle_show_ip_ssh(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "SSH Enabled - version 2.0\nAuthentication timeout: 120 secs; Authentication retries: 3\nMinimum expected Diffie Hellman key size : 1024 bits\nIOS Keys in SECSH format(ssh-rsa, base64 encoded): router_key\n ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC0000000000000000000000000000\n router_key");
+}
+
+pub fn handle_show_ip_traffic(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "IP statistics:\n  Rcvd:  0 total, 0 local destination\n         0 format errors, 0 checksum errors, 0 bad hop count\n         0 unknown protocol, 0 not a gateway\n         0 security failures, 0 bad options, 0 with options\n  Opts:  0 end, 0 nop, 0 basic security, 0 loose source route\n         0 timestamp, 0 extended security, 0 record route\n         0 stream ID, 0 strict source route, 0 alert, 0 cipso, 0 ump\n         0 other\n  Frags: 0 reassembled, 0 timeouts, 0 couldn't reassemble\n         0 fragmented, 0 fragments, 0 couldn't fragment\n  Bcast: 0 received, 0 sent\n  Mcast: 0 received, 0 sent\n  Sent:  0 generated, 0 forwarded\n  Drop:  0 encapsulation failed, 0 unresolved, 0 no adjacency\n         0 no route, 0 unicast RPF, 0 forced drop, 0 unsupported-addr\n         0 options denied, 0 source IP address zero");
+}
+
+pub fn handle_show_ip_vrf(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "");
+}
+
 // ─── Stub handlers ────────────────────────────────────────────────────────────
 
 /// Generic stub handler that outputs a static string and the prompt.
@@ -943,17 +1009,51 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("ip", "IP information")
                     .handler(handle_show_ip_incomplete as CmdHandler)
                     .children(vec![
+                        keyword("access-lists", "List IP access lists")
+                            .handler(handle_show_ip_access_lists),
+                        keyword("arp", "IP ARP table")
+                            .handler(handle_show_ip_arp),
+                        keyword("bgp", "BGP information")
+                            .handler(handle_show_ip_bgp),
+                        keyword("cef", "Cisco Express Forwarding")
+                            .handler(handle_show_ip_cef),
+                        keyword("dhcp", "Show items in the DHCP database")
+                            .handler(handle_show_ip_dhcp as CmdHandler)
+                            .children(vec![
+                                keyword("binding", "DHCP address bindings")
+                                    .handler(handle_show_ip_dhcp_binding),
+                                keyword("pool", "DHCP pools information")
+                                    .handler(handle_show_ip_dhcp_pool),
+                                keyword("snooping", "DHCP snooping information")
+                                    .handler(handle_show_ip_dhcp_snooping),
+                            ]),
+                        keyword("eigrp", "Show IPv4 EIGRP")
+                            .handler(handle_show_ip_eigrp),
+                        keyword("http", "HTTP information")
+                            .handler(handle_show_ip_http),
+                        keyword("igmp", "IGMP information")
+                            .handler(handle_show_ip_igmp),
                         keyword("interface", "IP interface status and configuration")
                             .children(vec![
                                 keyword("brief", "Brief summary of IP status")
                                     .handler(handle_show_ip_interface_brief),
                             ]),
-                        keyword("route", "IP routing table")
-                            .handler(handle_show_ip_route),
+                        keyword("nat", "IP NAT information")
+                            .handler(handle_show_ip_nat),
                         keyword("ospf", "OSPF information")
                             .handler(handle_show_ip_ospf),
+                        keyword("pim", "PIM information")
+                            .handler(handle_show_ip_pim),
                         keyword("protocols", "IP routing protocol process parameters and statistics")
                             .handler(handle_show_ip_protocols),
+                        keyword("route", "IP routing table")
+                            .handler(handle_show_ip_route),
+                        keyword("ssh", "Information on SSH")
+                            .handler(handle_show_ip_ssh),
+                        keyword("traffic", "IP protocol statistics")
+                            .handler(handle_show_ip_traffic),
+                        keyword("vrf", "VPN Routing/Forwarding instance information")
+                            .handler(handle_show_ip_vrf),
                     ]),
                 keyword("ipv6", "IPv6 information")
                     .handler(handle_show_ipv6_incomplete as CmdHandler)
@@ -1789,6 +1889,67 @@ mod tests {
         assert!(
             output.contains("No connections open"),
             "where should output 'No connections open'"
+        );
+    }
+
+    /// Verify `show ip ?` lists all new subcommands in alphabetical order.
+    #[tokio::test]
+    async fn test_show_ip_help_lists_new_subcommands() {
+        use ayclic::raw_transport::RawTransport;
+        use std::time::Duration;
+
+        let mut device = MockIosDevice::new("Router1");
+        // Consume initial prompt
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Type "show ip ?" to trigger help listing for show ip subcommands
+        device.send(b"show ip ?").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+
+        let expected_subcommands = [
+            "access-lists",
+            "arp",
+            "bgp",
+            "cef",
+            "dhcp",
+            "eigrp",
+            "http",
+            "igmp",
+            "interface",
+            "nat",
+            "ospf",
+            "pim",
+            "protocols",
+            "route",
+            "ssh",
+            "traffic",
+            "vrf",
+        ];
+
+        for cmd in &expected_subcommands {
+            assert!(
+                output.contains(cmd),
+                "Expected 'show ip ?' to list '{}', but got:\n{}",
+                cmd,
+                output
+            );
+        }
+
+        // Verify alphabetical order by extracting keywords from help lines
+        // Exclude parameter tokens like <cr> which don't sort with normal keywords
+        let keywords: Vec<&str> = output
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.trim().is_empty())
+            .filter_map(|l| l.trim().split_whitespace().next())
+            .filter(|kw| !kw.starts_with('<'))
+            .collect();
+
+        let mut sorted = keywords.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            keywords, sorted,
+            "show ip ? subcommands should be listed in alphabetical order"
         );
     }
 }

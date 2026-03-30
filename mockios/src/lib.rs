@@ -32,7 +32,7 @@ pub mod device_state;
 
 use device_state::{DeviceState, abbreviate_interface_name};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use tracing::debug;
@@ -159,6 +159,10 @@ pub struct MockIosDevice {
     pub current_interface: Option<String>,
     /// Whether `terminal monitor` has been issued on this VTY session.
     pub terminal_monitor: bool,
+    /// Instant when this device was created (used for dynamic uptime).
+    created_at: Instant,
+    /// SystemTime when this device was created (used to display "System restarted at").
+    created_at_system: SystemTime,
 }
 
 /// Pending interactive prompt state.
@@ -313,6 +317,107 @@ pub fn apply_pipe_filter(output: &str, filter: &PipeFilter) -> String {
     }
 }
 
+/// Format a duration as Cisco IOS-style uptime string.
+///
+/// Examples:
+///   < 1 hour  → "5 minutes"
+///   < 1 day   → "3 hours, 22 minutes"
+///   < 1 week  → "2 days, 4 hours, 11 minutes"
+///   otherwise → "1 week, 3 days, 6 hours, 45 minutes"
+pub fn format_uptime(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    let minutes = (total_secs / 60) % 60;
+    let hours   = (total_secs / 3600) % 24;
+    let days    = (total_secs / 86400) % 7;
+    let weeks   = total_secs / (86400 * 7);
+
+    if weeks > 0 {
+        let w = if weeks == 1 { "1 week".to_string() } else { format!("{} weeks", weeks) };
+        let d = if days == 1 { "1 day".to_string() } else { format!("{} days", days) };
+        let h = if hours == 1 { "1 hour".to_string() } else { format!("{} hours", hours) };
+        let m = if minutes == 1 { "1 minute".to_string() } else { format!("{} minutes", minutes) };
+        format!("{}, {}, {}, {}", w, d, h, m)
+    } else if days > 0 {
+        let d = if days == 1 { "1 day".to_string() } else { format!("{} days", days) };
+        let h = if hours == 1 { "1 hour".to_string() } else { format!("{} hours", hours) };
+        let m = if minutes == 1 { "1 minute".to_string() } else { format!("{} minutes", minutes) };
+        format!("{}, {}, {}", d, h, m)
+    } else if hours > 0 {
+        let h = if hours == 1 { "1 hour".to_string() } else { format!("{} hours", hours) };
+        let m = if minutes == 1 { "1 minute".to_string() } else { format!("{} minutes", minutes) };
+        format!("{}, {}", h, m)
+    } else {
+        let m = if minutes == 1 { "1 minute".to_string() } else { format!("{} minutes", minutes) };
+        m
+    }
+}
+
+/// Format a `SystemTime` as Cisco IOS-style "HH:MM:SS UTC Day Mon DD YYYY".
+pub fn format_system_time_ios(t: SystemTime) -> String {
+    // Compute seconds since Unix epoch
+    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    // Simple calendar decomposition (no external crate needed)
+    let days_since_epoch = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hh = time_of_day / 3600;
+    let mm = (time_of_day % 3600) / 60;
+    let ss = time_of_day % 60;
+
+    // Compute year/month/day from days_since_epoch (Gregorian calendar)
+    let (year, month, day, weekday) = days_to_ymd_weekday(days_since_epoch);
+
+    const MONTHS: [&str; 12] = ["Jan","Feb","Mar","Apr","May","Jun",
+                                 "Jul","Aug","Sep","Oct","Nov","Dec"];
+    const DAYS: [&str; 7] = ["Thu","Fri","Sat","Sun","Mon","Tue","Wed"]; // epoch=Thu
+
+    let month_str = MONTHS[(month - 1) as usize];
+    let day_str   = DAYS[(weekday % 7) as usize];
+
+    format!("{:02}:{:02}:{:02} UTC {} {} {} {}",
+        hh, mm, ss, day_str, month_str, day, year)
+}
+
+/// Convert days since Unix epoch to (year, month, day, weekday_since_epoch_mod7).
+fn days_to_ymd_weekday(mut days: u64) -> (u64, u64, u64, u64) {
+    let weekday = days % 7; // 0=Thu (epoch is a Thursday)
+
+    // 400-year cycles
+    let cycles400 = days / 146097;
+    days %= 146097;
+    let mut year = cycles400 * 400 + 1970;
+
+    // 100-year cycles (at most 3 after removing 400-year)
+    let cycles100 = (days / 36524).min(3);
+    days -= cycles100 * 36524;
+    year += cycles100 * 100;
+
+    // 4-year cycles
+    let cycles4 = days / 1461;
+    days %= 1461;
+    year += cycles4 * 4;
+
+    // remaining years (at most 3)
+    let rem_years = (days / 365).min(3);
+    days -= rem_years * 365;
+    year += rem_years;
+
+    // now `days` is 0-based day-of-year; find month
+    const MONTH_DAYS: [u64; 12] = [31,28,31,30,31,30,31,31,30,31,30,31];
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let mut month = 1u64;
+    for &md in &MONTH_DAYS {
+        let month_len = if month == 2 && is_leap { 29 } else { md };
+        if days < month_len {
+            break;
+        }
+        days -= month_len;
+        month += 1;
+    }
+    let day = days + 1;
+    (year, month, day, weekday)
+}
+
 impl std::fmt::Debug for MockIosDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MockIosDevice")
@@ -354,6 +459,8 @@ impl MockIosDevice {
             state: DeviceState::new(hostname),
             current_interface: None,
             terminal_monitor: false,
+            created_at: Instant::now(),
+            created_at_system: SystemTime::now(),
         };
         device.register_default_commands();
         device
@@ -566,6 +673,8 @@ impl MockIosDevice {
             state: derived_state,
             current_interface: None,
             terminal_monitor: false,
+            created_at: self.created_at,
+            created_at_system: self.created_at_system,
         }
     }
 
@@ -1714,7 +1823,8 @@ install_add: SUCCESS
         let model = &self.state.model;
         let version = eff_version;
         let hostname = &self.hostname;
-        let uptime = &self.state.uptime;
+        let uptime = format_uptime(self.created_at.elapsed());
+        let start_time = format_system_time_ios(self.created_at_system);
         let serial = &self.state.serial_number;
         let config_reg = &self.state.config_register;
         let base_mac = &self.state.base_mac;
@@ -1748,7 +1858,7 @@ BOOTLDR: {family} Boot Loader ({family}-HBOOT-M) Version 15.2(7r)E, RELEASE SOFT
 
 {hostname} uptime is {uptime}
 System returned to ROM by power-on
-System restarted at 14:09:41 UTC Mon Feb 28 2000
+System restarted at {start_time}
 System image file is \"{system_image}\"
 Last reload reason: {last_reload}
 
@@ -1808,6 +1918,7 @@ Configuration register is {config_reg}",
             version = version,
             hostname = hostname,
             uptime = uptime,
+            start_time = start_time,
             system_image = system_image,
             last_reload = last_reload,
             model = model,
@@ -6262,5 +6373,135 @@ mod tests {
             assert!(line.contains("100.00%"), "Row should say 100.00%: {:?}", line);
             assert!(line.contains("0.00%"), "Row should say 0.00%: {:?}", line);
         }
+    }
+}
+
+#[cfg(test)]
+mod ssh_tests {
+    use super::*;
+    use std::time::Duration;
+
+    async fn setup_device(name: &str) -> MockIosDevice {
+        let mut device = MockIosDevice::new(name);
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        device
+    }
+
+    async fn send_cmd(device: &mut MockIosDevice, cmd: &str) -> String {
+        device.send(format!("{}\n", cmd).as_bytes()).await.unwrap();
+        let data = device.receive(Duration::from_secs(1)).await.unwrap();
+        String::from_utf8_lossy(&data).to_string()
+    }
+
+    // --- show ip ssh ---
+
+    #[tokio::test]
+    async fn test_show_ip_ssh_enabled_version() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip ssh").await;
+        assert!(output.contains("SSH Enabled - version 2.0"),
+            "show ip ssh should report SSH Enabled - version 2.0, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_ssh_authentication_methods() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip ssh").await;
+        assert!(output.contains("Authentication methods:"),
+            "show ip ssh should list Authentication methods, got: {:?}", output);
+        assert!(output.contains("password"),
+            "Authentication methods should include password, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_ssh_algorithms() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip ssh").await;
+        assert!(output.contains("Encryption Algorithms:"),
+            "show ip ssh should list Encryption Algorithms, got: {:?}", output);
+        assert!(output.contains("aes128-ctr"),
+            "Encryption Algorithms should include aes128-ctr, got: {:?}", output);
+        assert!(output.contains("MAC Algorithms:"),
+            "show ip ssh should list MAC Algorithms, got: {:?}", output);
+        assert!(output.contains("hmac-sha2-256"),
+            "MAC Algorithms should include hmac-sha2-256, got: {:?}", output);
+        assert!(output.contains("KEX Algorithms:"),
+            "show ip ssh should list KEX Algorithms, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_ssh_hostkey_algorithms() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip ssh").await;
+        assert!(output.contains("Hostkey Algorithms:"),
+            "show ip ssh should list Hostkey Algorithms, got: {:?}", output);
+        assert!(output.contains("ssh-rsa"),
+            "Hostkey Algorithms should include ssh-rsa, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_ssh_timeout_retries() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip ssh").await;
+        assert!(output.contains("Authentication timeout: 120 secs"),
+            "show ip ssh should show timeout, got: {:?}", output);
+        assert!(output.contains("Authentication retries: 3"),
+            "show ip ssh should show retries, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_ssh_dh_key_size() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip ssh").await;
+        assert!(output.contains("Minimum expected Diffie Hellman key size : 1024 bits"),
+            "show ip ssh should show DH key size, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_ssh_ios_keys() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ip ssh").await;
+        assert!(output.contains("IOS Keys in SECSH format(ssh-rsa, 2048 bits):"),
+            "show ip ssh should show IOS Keys header, got: {:?}", output);
+        assert!(output.contains("ssh-rsa AAAA"),
+            "show ip ssh should show base64 key fragment, got: {:?}", output);
+    }
+
+    // --- show ssh ---
+
+    #[tokio::test]
+    async fn test_show_ssh_header() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ssh").await;
+        assert!(output.contains("Connection"),
+            "show ssh should have Connection column header, got: {:?}", output);
+        assert!(output.contains("Version"),
+            "show ssh should have Version column header, got: {:?}", output);
+        assert!(output.contains("Encryption"),
+            "show ssh should have Encryption column header, got: {:?}", output);
+        assert!(output.contains("Username"),
+            "show ssh should have Username column header, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ssh_active_session() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ssh").await;
+        assert!(output.contains("2.0"),
+            "show ssh should show version 2.0 for active session, got: {:?}", output);
+        assert!(output.contains("aes256-ctr"),
+            "show ssh should show aes256-ctr encryption, got: {:?}", output);
+        assert!(output.contains("Session started"),
+            "show ssh should show Session started state, got: {:?}", output);
+        assert!(output.contains("admin"),
+            "show ssh should show admin username, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ssh_no_v1_connections() {
+        let mut device = setup_device("Router1").await;
+        let output = send_cmd(&mut device, "show ssh").await;
+        assert!(output.contains("%No SSHv1 server connections running."),
+            "show ssh should report no SSHv1 connections, got: {:?}", output);
     }
 }

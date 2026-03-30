@@ -1,184 +1,82 @@
-# Cisco IOS 15.2 Running Configuration Format Reference
-## Platform: Catalyst 3560-CX Series Switches
+# Cisco IOS 15.2 Running Configuration Format Reference (C3560CX)
 
 This document describes the exact format and section ordering of `show running-config`
 output on Cisco IOS 15.2 for the Catalyst 3560-CX. Understanding this format is
-critical for implementing a faithful mock CLI.
+critical for parsing, generating, or simulating IOS configurations.
 
 ---
 
-## How `show running-config` Works
-
-The running configuration reflects the current active configuration in RAM.
-It is NOT the saved (startup) configuration unless explicitly copied.
+## 1. Command Invocation and Initial Output
 
 ```
 Switch# show running-config
 Building configuration...
 
-Current configuration : 3456 bytes
+Current configuration : 4821 bytes
 !
-...
-end
 ```
 
-The output begins with:
-1. `Building configuration...` (on its own line)
-2. Blank line
-3. `Current configuration : <N> bytes` (where N is the size in bytes)
-4. `!` (comment/separator line)
-5. Configuration body
-6. `end` (final line, always present)
+### Header Lines
+
+1. `Building configuration...` - A status message printed immediately while IOS collects
+   the running config from memory. This appears before any configuration content.
+   - Followed by a blank line.
+2. `Current configuration : NNNN bytes` - The size of the running configuration in bytes.
+   - Exactly one space before and after the colon.
+   - NNNN is a decimal integer (no commas, no padding).
+   - Followed by a blank line.
+3. `!` - A comment/separator line. Appears after the header.
+
+The `show startup-config` command has a slightly different header:
+```
+Using NNNN out of MMMM bytes
+!
+```
+
+Where NNNN is used bytes and MMMM is total NVRAM available.
 
 ---
 
-## Section Ordering
+## 2. Section Ordering in `show running-config`
 
-The running-config sections appear in a specific order that IOS enforces. This
-order is FIXED and does not depend on the order you entered commands.
+The running-config sections always appear in this order on IOS 15.2 Catalyst switches.
+Not all sections appear in every config; only sections with non-default settings are
+shown (with some exceptions noted below).
 
-### Complete Section Order
-
-```
-version <X.Y>
-service ...
-service ...
-!
-hostname <name>
-!
-boot-start-marker
-boot system flash:<image>
-boot-end-marker
-!
-enable secret 5 <hash>
-enable password <password>
-!
-username <name> privilege <level> secret 5 <hash>
-!
-no aaa new-model        (or aaa configuration)
-!
-clock timezone ...
-clock summer-time ...
-!
-switch 1 provision ...  (switch stacking if applicable)
-!
-ip domain-name ...
-ip name-server ...
-ip cef
-no ip domain-lookup
-!
-ipv6 unicast-routing    (if enabled)
-!
-spanning-tree mode ...
-spanning-tree extend system-id
-spanning-tree vlan ... priority ...
-!
-vlan internal allocation policy ...
-!
-vlan <id>
- name <name>
-!
-ip dhcp excluded-address ...
-!
-ip dhcp pool <name>
- ...
-!
-ip access-list standard <name>
-ip access-list extended <name>
-!
-interface <first physical interface>
- ...
-!
-interface <next physical interface>
- ...
-!
-interface Vlan<id>
- ...
-!
-ip default-gateway <address>   (or)
-ip route ...
-!
-ip http server    / no ip http server
-ip http secure-server    / no ip http secure-server
-!
-snmp-server ...
-!
-radius-server ...
-tacacs-server ...
-!
-logging ...
-!
-ntp ...
-!
-crypto ...
-!
-line con 0
- ...
-line aux 0          (routers only, not on 3560CX)
-line vty 0 4
- ...
-line vty 5 15
- ...
-!
-end
-```
-
----
-
-## Section Details
-
-### 1. Version Line
-
-**Always the first line.**
+### 2.1 Version Line
 
 ```
 version 15.2
 ```
 
-Format: `version <major>.<minor>`
+- Always the very first configuration line.
+- Specifies the IOS major.minor version.
+- No `!` before this line (it follows immediately after the header `!`).
 
-Common values for C3560-CX:
-- `version 15.2` (all 15.2.x releases use just `15.2`)
+### 2.2 Service Commands
 
-### 2. Service Commands
-
-Service configuration lines immediately follow the version. These configure
-fundamental IOS behaviors.
-
-Default (factory reset) lines shown. Lines with `no` prefix mean the feature is
-off by default:
+Appear immediately after the version line. Only non-default service settings appear,
+but some commonly seen lines:
 
 ```
-no service pad
 service timestamps debug datetime msec
 service timestamps log datetime msec
 no service password-encryption
 ```
 
-Common variants when configured:
+Or if password encryption is enabled:
 ```
 service password-encryption
-service timestamps debug datetime msec localtime show-timezone year
-service timestamps log datetime msec localtime show-timezone year
-service compress-config
-no service tcp-small-servers
-no service udp-small-servers
 ```
 
-**Key `service` commands and their defaults:**
+Common service commands in this section:
+- `service timestamps debug ...`
+- `service timestamps log ...`
+- `service password-encryption` (only if explicitly configured)
+- `no service pad` (if explicitly disabled)
+- `service tcp-keepalives-in`
 
-| Command | Default | Appears in config when |
-|---|---|---|
-| `service pad` | OFF | Rarely shown (`no service pad` shown if explicitly disabled) |
-| `service timestamps debug datetime msec` | varies | Always shown if timestamps enabled |
-| `service timestamps log datetime msec` | varies | Always shown |
-| `service password-encryption` | OFF | Shown when enabled |
-| `service compress-config` | OFF | Shown when enabled |
-
-**Note:** `no service pad` only appears in config if it was explicitly set.
-On factory-fresh C3560CX it IS shown (pad is disabled by default on most switches).
-
-### 3. Hostname
+### 2.3 Hostname
 
 ```
 !
@@ -186,9 +84,10 @@ hostname Switch
 !
 ```
 
-Default hostname for a C3560-CX is `Switch`.
+- Always appears, even if it is the default `Switch`.
+- Preceded by `!`.
 
-### 4. Boot Markers
+### 2.4 Boot Markers
 
 ```
 !
@@ -197,1009 +96,768 @@ boot-end-marker
 !
 ```
 
-These are always present. If boot system commands exist:
-```
-!
-boot-start-marker
-boot system flash:c3560cx-universalk9-mz.152-7.E2/c3560cx-universalk9-mz.152-7.E2.bin
-boot-end-marker
-!
-```
+- These two lines ALWAYS appear in every IOS 15.2 running-config on Catalyst switches.
+- They are not actual CLI commands; they are markers placed by IOS to delimit boot
+  commands.
+- If boot commands are configured, they appear between the markers:
+  ```
+  boot-start-marker
+  boot system flash:c3560cx-universalk9-mz.152-7.E2.bin
+  boot-end-marker
+  ```
+- Even with no boot commands configured, both markers still appear with nothing between
+  them.
 
-On factory default, there may be no `boot system` commands between the markers
-(system boots the first image found in flash automatically).
+### 2.5 Enable Secret / Password
 
-### 5. Enable Password / Secret
-
-Appears only if configured:
 ```
 !
 enable secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
 !
 ```
 
-Or if using plaintext (not recommended):
+Or if only enable password (no secret) is configured:
 ```
-!
-enable password cleartext-password
-!
+enable password 7 02050D480809
 ```
 
-With `service password-encryption` enabled, cleartext passwords are type-7 encrypted:
-```
-!
-enable password 7 0822455D0A16
-!
-```
+- `enable secret` uses type 5 (MD5) and always appears encrypted regardless of
+  `service password-encryption`.
+- `enable password` appears with type 7 if `service password-encryption` is active,
+  or cleartext otherwise.
+- If neither is configured, neither line appears.
 
-Both can appear if different levels are configured:
-```
-enable secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
-enable password 7 0822455D0A16
-```
+### 2.6 AAA Configuration
 
-### 6. Username Accounts
-
-```
-!
-username admin privilege 15 secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
-username readonly privilege 1 secret 5 $1$mERr$abcdefghijk1234567890/
-!
-```
-
-If `service password-encryption` is enabled but username uses cleartext password:
-```
-username admin privilege 15 password 7 0822455D0A16
-```
-
-### 7. AAA Configuration
-
-Default (no AAA):
-```
-!
-no aaa new-model
-!
-```
-
-With AAA enabled:
 ```
 !
 aaa new-model
 !
-!
 aaa authentication login default local
-aaa authentication login CONSOLE none
 aaa authorization exec default local
-aaa accounting exec default start-stop group tacacs+
+!
+aaa session-id common
 !
 ```
 
-### 8. System Settings (clock, memory, etc.)
+- `aaa new-model` appears as a single line when AAA is enabled.
+- If AAA is not configured, the line `no aaa new-model` does NOT appear in the
+  running-config (absence of `aaa new-model` implies it is disabled).
+- Individual `aaa authentication`, `aaa authorization`, `aaa accounting` lines follow.
+
+### 2.7 System MTU and Switch Specific Settings
 
 ```
-!
-clock timezone EST -5 0
-clock summer-time EDT recurring
 !
 system mtu routing 1500
 !
 ```
 
-`system mtu` may appear showing the MTU. On switch-only configs, `system mtu routing`
-is relevant.
+On some switch platforms, system-level settings appear here.
 
-### 9. IP Settings (Global)
+### 2.8 IP Settings (Global)
 
 ```
 !
-ip domain-name corp.example.com
+ip domain-name example.com
 ip name-server 8.8.8.8
 ip name-server 8.8.4.4
-ip cef
 !
 ```
 
-No IP routing (L2-only switch, default):
-```
-no ip routing
-ip default-gateway 192.168.1.1
-```
+- `no ip domain-lookup` appears only if DNS lookup has been disabled.
+- `ip routing` appears only if explicitly configured (Layer 3 switches).
+- `ip classless` typically does NOT appear (it is the default and hidden).
 
-With IP routing enabled:
-```
-ip routing
-```
-
-Other common global IP commands:
-```
-no ip domain-lookup
-ip ssh version 2
-ip ssh time-out 120
-ip ssh authentication-retries 5
-```
-
-### 10. IPv6 Settings
-
-If not configured (default), nothing appears. If enabled:
-```
-!
-ipv6 unicast-routing
-!
-```
-
-### 11. Spanning Tree Configuration
+### 2.9 Login Security Settings
 
 ```
 !
-spanning-tree mode pvst
-spanning-tree extend system-id
+login block-for 120 attempts 3 within 60
 !
 ```
 
-Or with RSTP:
+### 2.10 Username Database
+
+```
+!
+username admin privilege 15 secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
+username operator privilege 7 password 7 02050D480809
+!
+```
+
+- Each username gets its own line.
+- Password field: `secret 5` for MD5, `password 7` for type-7, `password` (no number)
+  for cleartext.
+
+### 2.11 VTP (VLAN Trunking Protocol)
+
+```
+!
+vtp domain MyDomain
+vtp mode transparent
+!
+```
+
+- VTP domain and mode only appear if configured.
+- Default VTP mode (server) with no domain typically does not generate lines.
+
+### 2.12 Spanning Tree
+
 ```
 !
 spanning-tree mode rapid-pvst
 spanning-tree extend system-id
 !
-```
-
-With custom priority:
-```
-spanning-tree mode rapid-pvst
-spanning-tree extend system-id
 spanning-tree vlan 1 priority 4096
-spanning-tree vlan 10,20 priority 8192
-```
-
-Additional global STP settings:
-```
-spanning-tree portfast default
-spanning-tree portfast bpduguard default
-spanning-tree loopguard default
-```
-
-### 12. VLAN Internal Allocation Policy
-
-Appears on Layer 3 switches:
-```
-!
-vlan internal allocation policy ascending
 !
 ```
 
-### 13. VLAN Definitions
+- `spanning-tree extend system-id` always appears on Catalyst switches (part of MST
+  and extended system ID feature, enabled by default).
+- Spanning-tree mode appears only if changed from default (but `rapid-pvst` is the
+  default on IOS 15.2, so it may appear to explicitly document the mode).
+- Per-VLAN priority lines appear only if modified from the default (32768).
 
-VLANs appear in numerical order:
-```
-!
-vlan 10
- name Engineering
-!
-vlan 20
- name Marketing
-!
-vlan 30
- name Servers
-!
-```
-
-Notes:
-- VLAN 1 (default) NEVER appears in running-config (it's always active)
-- Only VLANs with non-default names appear here
-- VLANs 1002-1005 (legacy) do not appear in running-config unless modified
-- A VLAN with default name but custom settings may appear
-
-### 14. DHCP Configuration
+### 2.13 Interface Configurations
 
 ```
 !
-ip dhcp excluded-address 192.168.1.1 192.168.1.10
-ip dhcp excluded-address 10.0.0.1
+interface GigabitEthernet1/0/1
+ description Uplink to Router
+ switchport trunk encapsulation dot1q
+ switchport mode trunk
+ spanning-tree portfast trunk
 !
-ip dhcp pool VLAN1_POOL
- network 192.168.1.0 255.255.255.0
- default-router 192.168.1.1
- dns-server 8.8.8.8 8.8.4.4
- domain-name corp.example.com
- lease 7
-!
-```
-
-DHCP pool sub-commands are indented with ONE space.
-
-### 15. Access Lists
-
-Named ACLs:
-```
-!
-ip access-list standard MGMT_HOSTS
- permit 192.168.1.0 0.0.0.255
- deny   any
-!
-ip access-list extended VLAN10_IN
- permit tcp 10.0.0.0 0.0.0.255 any eq www
- permit tcp 10.0.0.0 0.0.0.255 any eq 443
- deny   ip any any log
-!
-```
-
-Numbered ACLs appear inline with `access-list` commands:
-```
-access-list 10 permit 192.168.1.0 0.0.0.255
-access-list 10 deny   any
-```
-
-Note: Numbered ACLs do NOT get their own section header; they appear as flat commands.
-
-### 16. Interface Configuration
-
-**This is the largest section.** Interfaces appear in a specific order:
-
-1. Physical interfaces (GigabitEthernet, TenGigabitEthernet, FastEthernet) in order
-2. Virtual interfaces (Port-channel, Tunnel, Loopback)
-3. VLAN interfaces (SVI) in order
-
-**C3560-CX interface numbering:**
-- `interface GigabitEthernet0/1` through `GigabitEthernet0/12` (for 12-port model)
-- `interface TenGigabitEthernet0/1` through `TenGigabitEthernet0/2` (uplink ports)
-- `interface Vlan1` (management VLAN SVI, always present)
-- Additional VLANs: `interface Vlan10`, `interface Vlan20`, etc.
-
-**Default (unconfigured) interface NOT shown:**
-- Interfaces with only default settings do not appear at all
-
-OR they appear as empty (just the interface declaration):
-```
-!
-interface GigabitEthernet0/3
-!
-```
-
-**This behavior varies:** In some IOS versions, truly-default interfaces are
-completely omitted. In others, they appear with no sub-commands.
-The C3560-CX typically shows interfaces that have ANY non-default configuration.
-
-#### Access Port Interface Example
-
-```
-!
-interface GigabitEthernet0/2
- description Server-1-eth0
+interface GigabitEthernet1/0/2
  switchport access vlan 10
  switchport mode access
  spanning-tree portfast
 !
 ```
 
-#### Trunk Port Interface Example
+Interface sections appear in this order:
+1. Physical switchport interfaces in numerical order (GigabitEthernet1/0/1,
+   GigabitEthernet1/0/2, ...).
+2. Uplink/SFP ports (GigabitEthernet and TenGigabitEthernet).
+3. Port-channel interfaces (Port-channel1, Port-channel2, ...).
+4. VLAN interfaces / SVIs (interface Vlan1, Vlan10, ...) in numerical order.
+5. Loopback interfaces (if any).
+
+Interface ordering notes:
+- Physical interfaces appear even if no commands have been explicitly configured
+  (they show with just the interface header and no subcommands if they are at defaults).
+- Actually: on IOS 15.2, interfaces that are completely at defaults (no description,
+  default VLAN, no manual speed/duplex, etc.) typically appear in the running-config
+  with just their interface line and no sub-commands.
+
+#### Default Interface Lines (What Does NOT Appear)
+
+The following are default settings and do NOT generate lines in the running-config:
+- `switchport mode dynamic auto` (the default mode on many ports - may not appear)
+- `duplex auto` (default - not shown)
+- `speed auto` (default - not shown)
+- `no shutdown` (default for most ports - not shown; `shutdown` appears when an
+  interface IS shut down)
+- `spanning-tree portfast disable` (default - not shown)
+- `switchport access vlan 1` (VLAN 1 is default - not shown unless explicitly set)
+
+Lines that DO appear even for default/common configurations:
+- `shutdown` when the interface is administratively down (this is notable because
+  shutdown is the default state for many IOS router interfaces but NOT for Catalyst
+  switch access ports).
+- On Catalyst switches, physical ports default to `no shutdown` (enabled). Shutdown
+  appears in the config only when explicitly configured.
+
+#### Interface Sub-Command Order within an Interface Block
+
+When multiple subcommands are configured on an interface, they appear in this order:
 
 ```
-!
-interface GigabitEthernet0/1
- description Uplink-to-CoreSwitch
- switchport trunk native vlan 1
- switchport trunk allowed vlan 1,10,20,30
+interface GigabitEthernet1/0/1
+ description LINK TO CORE
+ switchport trunk encapsulation dot1q
+ switchport trunk native vlan 100
+ switchport trunk allowed vlan 1,10,20,100
  switchport mode trunk
-!
-```
-
-#### Port With Port Security
-
-```
-!
-interface GigabitEthernet0/5
- description Secure-Port
- switchport access vlan 20
- switchport mode access
- switchport port-security maximum 2
- switchport port-security
- switchport port-security violation restrict
+ switchport nonegotiate
+ ip address 192.168.1.1 255.255.255.0    (only on routed ports)
+ ip helper-address 10.0.0.1
+ ip ospf 1 area 0
+ channel-group 1 mode active
  spanning-tree portfast
-!
-```
-
-#### Port in EtherChannel
-
-```
-!
-interface GigabitEthernet0/7
- channel-group 1 mode active
-!
-interface GigabitEthernet0/8
- channel-group 1 mode active
-!
-interface Port-channel1
- switchport trunk native vlan 1
- switchport trunk allowed vlan 1,10,20
- switchport mode trunk
-!
-```
-
-#### Shutdown Interface
-
-```
-!
-interface GigabitEthernet0/4
+ spanning-tree bpduguard enable
+ no cdp enable
+ storm-control broadcast level 20
  shutdown
-!
 ```
 
-OR (if default state is already shutdown, only non-defaults shown):
-On switches, physical interfaces default to `no shutdown` state but many
-internal/management interfaces default to `shutdown`. Typically `shutdown` appears
-explicitly in the config when set.
-
-#### SVI (VLAN Interface) Example
-
-```
-!
-interface Vlan1
- ip address 192.168.1.10 255.255.255.0
- no shutdown
-!
-interface Vlan10
- ip address 10.0.0.1 255.255.255.0
- no shutdown
-!
-```
-
-Notes:
-- `no shutdown` appears explicitly for SVIs that are up (because their default is shutdown)
-- An SVI with no IP address and shutdown might appear as:
-  ```
-  interface Vlan1
-   no ip address
-   shutdown
-  ```
-- The management SVI (Vlan1 by default) is always present in config
-
-#### Interface Sub-commands Order (within an interface block)
-
-Sub-commands within an interface section follow this approximate order:
+The ordering IOS uses within an interface block follows a consistent internal priority:
 1. `description`
-2. `shutdown` / `no shutdown` (usually omitted if default)
-3. Layer 2:
-   - `switchport mode`
-   - `switchport access vlan`
-   - `switchport trunk ...` (if trunk)
-   - `switchport voice vlan`
-   - `switchport port-security ...`
-4. Layer 3:
-   - `ip address`
-   - `ip helper-address`
-   - `ipv6 address`
-5. `duplex` (if non-default)
-6. `speed` (if non-default)
-7. `mtu` (if non-default)
-8. `storm-control`
-9. `spanning-tree ...`
-10. `channel-group` (for EtherChannel members)
-11. `ip access-group`
-12. `service-policy`
-13. `ip ospf ...`
+2. `switchport` commands (encapsulation, then native vlan, then allowed vlan, then mode,
+   then nonegotiate, then other switchport commands)
+3. IP addressing commands (`ip address`, secondary addresses)
+4. IP service commands (`ip helper-address`, `ip access-group`, `ip ospf`, etc.)
+5. Routing protocol interface commands
+6. EtherChannel (`channel-group`)
+7. Spanning-tree commands
+8. CDP/LLDP commands
+9. Storm-control
+10. `shutdown` (always last if present)
 
-**Indentation:** All sub-commands are indented with exactly ONE space.
-
-### 17. IP Routing Configuration
-
-Static routes:
-```
-!
-ip classless
-ip route 0.0.0.0 0.0.0.0 192.168.1.1
-ip route 10.0.0.0 255.0.0.0 192.168.1.2
-!
-```
-
-Default gateway (no routing mode):
-```
-!
-ip default-gateway 192.168.1.1
-!
-```
-
-### 18. OSPF / Routing Protocol Configuration
+### 2.14 IP Routing Protocols
 
 ```
 !
 router ospf 1
- router-id 1.1.1.1
  log-adjacency-changes
  network 192.168.1.0 0.0.0.255 area 0
- network 10.0.0.0 0.0.0.255 area 0
- default-information originate
 !
 ```
 
-### 19. HTTP Server
+- Each routing protocol (`router ospf N`, `router eigrp N`, `router bgp N`) gets its
+  own section.
+- The section begins with the `router` line, followed by indented subcommands.
+- `log-adjacency-changes` is often shown as it is the default enabled state; it may
+  appear by default.
+
+### 2.15 IP Access Lists (ACLs)
+
+Named ACLs appear in their own sections:
 
 ```
 !
-no ip http server
-no ip http secure-server
+ip access-list standard MGMT-HOSTS
+ permit 10.0.0.0 0.255.255.255
+ deny   any
+!
+ip access-list extended DENY-TELNET
+ deny   tcp any any eq 23
+ permit ip any any
 !
 ```
 
-Or if enabled:
+Numbered ACLs appear as:
 ```
 !
-ip http server
-ip http secure-server
-ip http authentication local
+access-list 10 permit 10.0.0.0 0.255.255.255
+access-list 10 deny   any
 !
 ```
 
-### 20. SNMP Server
+Note the spacing: numbered ACL lines have variable-width spacing between `permit`/`deny`
+and the address (IOS aligns the address arguments).
+
+### 2.16 SNMP Configuration
 
 ```
 !
 snmp-server community public RO
 snmp-server community private RW
-snmp-server location "Building A"
+snmp-server location "Server Room"
 snmp-server contact admin@example.com
-snmp-server host 192.168.1.100 version 2c public
-snmp-server enable traps
 !
 ```
 
-### 21. Logging
+### 2.17 Logging Configuration
 
 ```
 !
-logging buffered 8192
+logging buffered 16384
+logging 192.168.1.100
 logging trap informational
-logging host 192.168.1.100
 !
 ```
 
-### 22. NTP
+### 2.18 NTP Configuration
 
 ```
 !
-ntp server 192.168.1.100 prefer
-ntp server pool.ntp.org
+ntp server 192.168.1.1
+ntp server 192.168.1.2 prefer
 !
 ```
 
-### 23. RADIUS / TACACS+
+### 2.19 Banner Configuration
+
+Banners appear as a block:
 
 ```
 !
-radius-server host 192.168.1.200 auth-port 1812 acct-port 1813
-radius-server key 7 0822455D0A16
+banner motd ^C
+*************************************
+* WARNING: Authorized access only! *
+*************************************
+^C
+!
+banner login ^C
+Authenticate yourself.
+^C
 !
 ```
 
-Or new-style (IOS 15.x preferred):
-```
-!
-radius server RADIUS_SERVER
- address ipv4 192.168.1.200 auth-port 1812 acct-port 1813
- key 7 0822455D0A16
-!
-```
+Notes:
+- The delimiter in the saved config is typically `^C` (Control-C character, displayed
+  as `^C`).
+- The banner text can span multiple lines.
+- Each banner type (motd, login, exec, incoming) appears separately.
 
-### 24. Line Configuration
+### 2.20 Line Configuration
 
-Lines appear at the end of the configuration. Order is:
-1. `line con 0` (console)
-2. `line aux 0` (auxiliary, not present on 3560-CX switches typically)
-3. `line vty 0 4`
-4. `line vty 5 15` (if configured separately)
+Line sections appear in this order: `line con 0`, `line aux 0` (if present), then
+`line vty 0 4`, `line vty 5 15` (or whatever ranges are configured).
 
-**Console (line con 0):**
 ```
 !
 line con 0
- exec-timeout 0 0
- password 7 0822455D0A16
- login
+ exec-timeout 5 0
  logging synchronous
- stopbits 1
+ login local
 !
-```
-
-Note: `stopbits 1` may appear on some versions as a default. On others it's omitted.
-
-**VTY Lines:**
-```
+line aux 0
 !
 line vty 0 4
- access-class 10 in
- exec-timeout 10 0
- password 7 0822455D0A16
+ access-class MGMT-HOSTS in
+ exec-timeout 15 0
+ logging synchronous
  login local
  transport input ssh
- transport output ssh
 !
 line vty 5 15
- exec-timeout 10 0
+ access-class MGMT-HOSTS in
+ exec-timeout 15 0
+ logging synchronous
  login local
  transport input ssh
 !
 ```
 
-If VTY lines 5-15 have identical config to 0-4, they may share the same block:
-```
-line vty 0 15
- exec-timeout 10 0
- login local
- transport input ssh
-```
+#### Default Line Settings (What Does NOT Appear)
 
-**Default VTY (no configuration):**
-```
-line vty 0 4
- login
-```
-The `login` command is ALWAYS present (can be `login`, `login local`, or `no login`).
-The default is `no login` on most IOS versions (no password required), but best
-practice requires at minimum `login` with a password, so a fresh switch may show:
-```
-line vty 0 4
- login
-```
+- `transport input telnet` may or may not appear (it is a legacy default that varies
+  by IOS version; in hardened configs it is explicit).
+- `no exec-timeout` does not appear; to show no timeout it shows as `exec-timeout 0 0`.
+- `privilege level 1` (default level for vty) does not appear.
+- `history size 10` (default) does not appear.
 
-### 25. Final `end` Statement
+#### Line Sub-Command Order
 
-**The last line of running-config is always `end`.**
+Within a line block, commands appear in this typical order:
+1. `exec-timeout`
+2. `absolute-timeout`
+3. `password` (if configured)
+4. `login` / `login local`
+5. `privilege level`
+6. `logging synchronous`
+7. `history size`
+8. `transport input`
+9. `transport output`
+10. `access-class`
+11. `length` / `width`
+
+### 2.21 End Marker
 
 ```
 !
 end
 ```
 
+- The very last line of the configuration.
+- Preceded by `!`.
+- Followed by a newline (the prompt appears on the next line).
+
 ---
 
-## Complete Example: Factory Default C3560-CX Configuration
+## 3. Full Annotated Example
 
-A factory-reset C3560-CX running IOS 15.2 would show something like this:
+Here is a representative `show running-config` output for a minimally configured
+C3560CX switch:
 
 ```
 Building configuration...
 
-Current configuration : 1743 bytes
-!
-! Last configuration change at 00:01:23 UTC Mon Mar 1 1993
+Current configuration : 3142 bytes
 !
 version 15.2
-no service pad
 service timestamps debug datetime msec
 service timestamps log datetime msec
 no service password-encryption
 !
-hostname Switch
+hostname SW1
 !
 boot-start-marker
 boot-end-marker
 !
-!
-no aaa new-model
-!
-!
-!
-!
-!
-!
-!
-no ip domain-lookup
-ip cef
-no ipv6 cef
-!
-!
-!
-spanning-tree mode pvst
-spanning-tree extend system-id
-!
-vlan internal allocation policy ascending
-!
-!
-!
-!
-!
-!
-!
-!
-!
-!
-!
-!
-!
-interface GigabitEthernet0/1
-!
-interface GigabitEthernet0/2
-!
-interface GigabitEthernet0/3
-!
-interface GigabitEthernet0/4
-!
-interface GigabitEthernet0/5
-!
-interface GigabitEthernet0/6
-!
-interface GigabitEthernet0/7
-!
-interface GigabitEthernet0/8
-!
-interface GigabitEthernet0/9
-!
-interface GigabitEthernet0/10
-!
-interface GigabitEthernet0/11
-!
-interface GigabitEthernet0/12
-!
-interface TenGigabitEthernet0/1
-!
-interface TenGigabitEthernet0/2
-!
-interface Vlan1
- no ip address
- shutdown
-!
-ip default-gateway 192.168.1.1
-ip classless
-!
-ip http server
-ip http secure-server
-!
-!
-!
-!
-!
-!
-line con 0
-line vty 0 4
- login
-line vty 5 15
- login
-!
-end
-```
-
-Note: The multiple `!` lines (blank sections) represent empty sections that
-IOS outputs. The exact number of blank `!` lines varies by version and configured features.
-
----
-
-## Realistic Configured Example
-
-```
-Building configuration...
-
-Current configuration : 4218 bytes
-!
-version 15.2
-no service pad
-service timestamps debug datetime msec
-service timestamps log datetime msec
-service password-encryption
-!
-hostname Corp-Access-01
-!
-boot-start-marker
-boot-end-marker
 !
 enable secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
 !
-username admin privilege 15 secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
+username admin privilege 15 secret 5 $1$abc1$Kj0sQbXKH7mPNoS8rVt3m1
 !
-no aaa new-model
 !
-clock timezone EST -5 0
-clock summer-time EDT recurring
 !
-no ip domain-lookup
-ip domain-name corp.example.com
+ip domain-name example.com
 ip name-server 8.8.8.8
-ip cef
-no ipv6 cef
+!
+!
 !
 spanning-tree mode rapid-pvst
 spanning-tree extend system-id
-spanning-tree portfast default
-spanning-tree portfast bpduguard default
-!
-vlan internal allocation policy ascending
-!
-vlan 10
- name Engineering
-!
-vlan 20
- name Marketing
-!
-vlan 30
- name Servers
 !
 !
 !
-interface GigabitEthernet0/1
- description Uplink-to-Distribution
- switchport trunk native vlan 1
- switchport trunk allowed vlan 1,10,20,30
+!
+!
+interface GigabitEthernet1/0/1
+ description To-Router
+ switchport mode access
+ switchport access vlan 10
+ spanning-tree portfast
+!
+interface GigabitEthernet1/0/2
+!
+interface GigabitEthernet1/0/3
+ shutdown
+!
+interface GigabitEthernet1/0/4
+ switchport trunk encapsulation dot1q
  switchport mode trunk
- spanning-tree portfast trunk
-!
-interface GigabitEthernet0/2
- description Server-1
- switchport access vlan 30
- switchport mode access
-!
-interface GigabitEthernet0/3
- description Engineer-Desk
- switchport access vlan 10
- switchport mode access
- spanning-tree portfast
-!
-interface GigabitEthernet0/4
- description Marketing-Desk
- switchport access vlan 20
- switchport mode access
- spanning-tree portfast
-!
-interface GigabitEthernet0/5
- description Phone+PC
- switchport access vlan 10
- switchport mode access
- switchport voice vlan 100
- spanning-tree portfast
-!
-interface GigabitEthernet0/6
-!
-interface GigabitEthernet0/7
-!
-interface GigabitEthernet0/8
-!
-interface GigabitEthernet0/9
-!
-interface GigabitEthernet0/10
-!
-interface GigabitEthernet0/11
-!
-interface GigabitEthernet0/12
-!
-interface TenGigabitEthernet0/1
-!
-interface TenGigabitEthernet0/2
 !
 interface Vlan1
- ip address 192.168.1.10 255.255.255.0
+ ip address 192.168.1.1 255.255.255.0
  no shutdown
 !
 interface Vlan10
- ip address 10.10.0.1 255.255.255.0
+ ip address 10.10.10.1 255.255.255.0
 !
-interface Vlan20
- ip address 10.20.0.1 255.255.255.0
 !
-interface Vlan30
- ip address 10.30.0.1 255.255.255.0
+ip default-gateway 192.168.1.254
 !
-ip default-gateway 192.168.1.1
-ip classless
+!
+!
+!
 !
 no ip http server
-no ip http secure-server
 !
-snmp-server community public RO 10
-snmp-server location "Server Room A"
-snmp-server contact admin@corp.example.com
 !
-logging buffered 8192
-logging trap informational
-logging host 192.168.1.100
 !
-ntp server 192.168.1.100 prefer
 !
 !
 !
 line con 0
- exec-timeout 0 0
- password 7 0822455D0A16
- login
+ exec-timeout 5 0
  logging synchronous
+ login local
+!
+line aux 0
 !
 line vty 0 4
- access-class 10 in
- exec-timeout 10 0
+ exec-timeout 15 0
+ logging synchronous
  login local
  transport input ssh
 !
 line vty 5 15
- access-class 10 in
- exec-timeout 10 0
+ exec-timeout 15 0
+ logging synchronous
  login local
  transport input ssh
+!
 !
 end
 ```
 
 ---
 
-## Rules: What Appears vs. What Doesn't
+## 4. Password Encryption Formats
 
-### Commands That ALWAYS Appear (even at default)
+### Type 5 (MD5 Hash)
 
-| Command | Notes |
-|---|---|
-| `version 15.2` | Always first line |
-| `service timestamps debug ...` | If timestamps configured |
-| `service timestamps log ...` | If timestamps configured |
-| `hostname <name>` | Always present |
-| `boot-start-marker` | Always present |
-| `boot-end-marker` | Always present |
-| `no aaa new-model` | When AAA not configured |
-| `spanning-tree mode pvst/rapid-pvst` | The mode is always shown |
-| `spanning-tree extend system-id` | Always shown on switches |
-| `vlan internal allocation policy ascending` | Always shown |
-| `interface Vlan1` | The management VLAN SVI is always present |
-| `line con 0` | Always present |
-| `line vty 0 4` | Always present |
-| `end` | Always last line |
+Used by `enable secret` and `username NAME secret`. Always hashed, never cleartext.
 
-### Commands That Only Appear When Changed From Default
+Format:
+```
+enable secret 5 $1$SALT$HASHHASHHASHHASHHASHHASH
+```
 
-| Command | Default | Appears when |
-|---|---|---|
-| `enable secret` | No password | Configured |
-| `enable password` | No password | Configured |
-| `username` | None | Configured |
-| `no ip domain-lookup` | lookup enabled | disabled |
-| `ip domain-name` | None | Configured |
-| `ip name-server` | None | Configured |
-| `clock timezone` | UTC | Configured |
-| `vlan <id>` with `name` | VLANs 2-4094 have numeric default names | When name changed |
-| `spanning-tree portfast default` | Disabled | Enabled |
-| `no ip routing` | ON for L3 switches | When disabled |
-| `ip routing` | Depends on SDM template | When enabled on L2 switch |
-| `ip default-gateway` | None | Configured (L2-only switch) |
-| `ip route` | None | Configured |
-| `no ip http server` | Usually on | When disabled |
-| `ntp server` | None | Configured |
-| `snmp-server` | None | Configured |
-| `logging` | Console only | When changed |
-| `shutdown` (interface) | Up | When disabled |
-| `description` | None | Configured |
-| `switchport mode` | `access` or `dynamic auto` | Configured |
-| `spanning-tree portfast` | Off | Enabled |
-| `spanning-tree bpduguard enable` | Off (unless global default) | Enabled |
+- `5` is the encryption type indicator.
+- The hash is in the format `$1$SALT$MD5HASH` (standard Unix MD5 crypt format).
+- The salt is 4 characters; the hash is 22 characters (Base64-encoded).
+- This cannot be reversed to get the plaintext password.
 
-### The `!` Separator Lines
+Example:
+```
+enable secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
+```
 
-`!` lines in running-config are NOT stored configuration - they are generated output.
-They serve as visual separators. IOS generates them:
-- After the version line
-- After service commands
-- After hostname
-- After boot markers
-- After each major section (aaa, crypto, interface, line, etc.)
-- Between interface sections
+### Type 7 (Vigenere Cipher / Weak Encryption)
 
-An empty section (no commands in that area) may generate multiple consecutive `!` lines.
+Used by `enable password`, `line password`, and `username NAME password` when
+`service password-encryption` is active.
 
-### `no` Commands in Running-Config
+Format:
+```
+enable password 7 13061E010803
+```
 
-Commands explicitly set to their "off" state appear as `no ...` in the config:
-- `no service pad`
-- `no aaa new-model`
-- `no ip domain-lookup`
-- `no ip routing`
-- `no ip http server`
-- `no ip http secure-server`
-- `no ipv6 cef`
-- `no shutdown` (on SVIs that are admin up)
-- `no ip address` (interface with no IP configured)
+- `7` is the encryption type indicator.
+- The encrypted value is a hexadecimal string.
+- This is easily reversible and should not be considered secure.
 
-These represent commands where the feature was explicitly disabled (the opposite
-of the compiled-in default). IOS uses "no" commands to show explicitly-set negative states.
+### Cleartext (Type 0)
 
----
-
-## `show running-config all` vs `show running-config`
-
-`show running-config` shows only non-default configuration.
-`show running-config all` shows EVERY parameter including defaults.
-
-For the mock, standard `show running-config` behavior is appropriate.
-
-`show running-config all` would show thousands of additional lines with all the
-compiled-in defaults that are normally hidden.
-
----
-
-## Interface Sections: Default vs. Configured
-
-### Interface with NO configuration at all
-
-On older IOS, an interface with absolutely no configuration may not appear.
-On C3560-CX with IOS 15.2, all physical interfaces appear but may be empty:
+When `service password-encryption` is NOT configured:
 
 ```
-interface GigabitEthernet0/6
+enable password MyPassword
+```
+
+or explicitly:
+
+```
+enable password 0 MyPassword
+```
+
+- No type number, or type `0`, means plaintext.
+
+### Type 8 (PBKDF2-SHA256) and Type 9 (SCRYPT)
+
+Available in newer IOS 15.2 releases and IOS-XE:
+
+```
+enable secret 9 $9$SALT/HASH
+username admin secret 8 $8$salt$hashhash...
+```
+
+- Type 8 uses PBKDF2 with SHA-256.
+- Type 9 uses SCRYPT.
+- These are the recommended strong hashing algorithms.
+
+### How Passwords Appear per Context
+
+| Config Context | `service password-encryption` OFF | `service password-encryption` ON |
+|---------------|----------------------------------|----------------------------------|
+| `enable secret` | Type 5 hash (always) | Type 5 hash (unchanged) |
+| `enable password` | Cleartext | Type 7 |
+| `line password` | Cleartext | Type 7 |
+| `username ... password` | Cleartext | Type 7 |
+| `username ... secret` | Type 5 hash (always) | Type 5 hash (unchanged) |
+| Community strings (SNMP) | Cleartext | Type 7 |
+| BGP neighbor passwords | Cleartext | Type 7 |
+
+---
+
+## 5. What Appears by Default vs. Only When Changed
+
+### Always Appears (Present Even at Default)
+
+- `version X.X`
+- `hostname SWITCH` (even if it is the default `Switch`)
+- `boot-start-marker` and `boot-end-marker`
+- `spanning-tree extend system-id`
+- Interface sections for all physical ports (at minimum the interface header line)
+- `line con 0`, `line aux 0` (even if empty)
+- `line vty 0 4` and `line vty 5 15` sections
+- `end`
+
+### Never Appears at Default (Only Shown When Configured)
+
+- `service password-encryption` - only when explicitly enabled
+- `enable secret` / `enable password` - only when set
+- `aaa new-model` - only when enabled
+- `ip routing` - only when enabled (Layer 3 switch mode)
+- `ip domain-name` - only when set
+- `ip name-server` - only when set
+- `username` entries - only when created
+- `interface Vlan N` (except possibly Vlan1) - only when configured
+- `router ospf N` section - only when OSPF is configured
+- ACL sections - only when ACLs are defined
+- `banner motd` etc. - only when banners are set
+- `snmp-server` lines - only when SNMP is configured
+- `logging` lines (beyond defaults) - only when configured
+- `ntp server` - only when NTP is configured
+- `vtp domain` / `vtp mode` - only when VTP is explicitly configured
+
+### Appears When Explicitly Disabled (Negated Commands)
+
+Some default-ON features generate `no` lines when disabled:
+
+- `no ip domain-lookup` - when DNS lookup is disabled
+- `no cdp run` - when CDP is globally disabled
+- `no ip http server` - when HTTP server is disabled (common hardening step)
+- `no logging console` - when console logging is disabled
+- `no service pad` - when PAD is disabled
+
+---
+
+## 6. Indentation Format
+
+IOS uses a single space (` `) to indent subcommands within a section (interface, line,
+router, etc.). This is consistent across all IOS versions.
+
+```
+interface GigabitEthernet1/0/1
+ description My Interface        <- one space indent
+ switchport mode access          <- one space indent
+ spanning-tree portfast          <- one space indent
 !
 ```
 
-The `!` after the interface name means no sub-commands (the interface section is empty).
+There are NO tabs in Cisco IOS running-config output; all indentation is a single space.
 
-### Interface with only `shutdown`
+---
+
+## 7. Comment Lines (`!`)
+
+Exclamation marks (`!`) serve as section separators/comments. They are inserted:
+- After the initial header.
+- Between most top-level configuration blocks.
+- Before and after major sections.
+- At the end of each interface/line/router block (the `!` on its own line after the
+  block's last command).
+- Before the final `end`.
+
+IOS sometimes inserts multiple consecutive `!` lines between sections. The number of
+`!` lines can vary; parsers should treat any number of consecutive `!` lines as a
+section separator.
+
+Example of multiple `!` lines (common after the boot-end-marker section):
+```
+boot-end-marker
+!
+!
+enable secret 5 $1$...
+```
+
+---
+
+## 8. Interface Section Details
+
+### Physical Ports at Default
+
+A switch port with no explicit configuration appears as:
 
 ```
-interface GigabitEthernet0/6
+!
+interface GigabitEthernet1/0/2
+!
+```
+
+Just the interface name followed by an exclamation mark (empty section). The port is
+in its default state: switchport, VLAN 1, dynamic auto mode, auto speed/duplex, no
+description, administratively up.
+
+### Shutdown Port
+
+```
+!
+interface GigabitEthernet1/0/3
  shutdown
 !
 ```
 
-### Typical Access Port (minimally configured)
+The word `shutdown` is the only line, indented one space.
+
+### Routed Port (no switchport)
 
 ```
-interface GigabitEthernet0/3
- switchport access vlan 10
- switchport mode access
+!
+interface GigabitEthernet1/0/10
+ no switchport
+ ip address 10.0.0.1 255.255.255.252
+ no shutdown
 !
 ```
 
-Note: `no shutdown` is NOT shown for physical interfaces that are up (that's the default).
-`no shutdown` IS shown for SVIs (VLAN interfaces) that are up (because their default is shutdown).
+Note: `no shutdown` appears explicitly on SVIs because they default to shutdown when
+first created. Physical ports may not show `no shutdown` since they default to enabled.
+
+### SVI (interface Vlan N)
+
+```
+!
+interface Vlan1
+ ip address 192.168.1.1 255.255.255.0
+!
+interface Vlan10
+ description Management
+ ip address 10.0.0.1 255.255.255.0
+ no shutdown
+!
+```
+
+SVIs default to shutdown state when created, so `no shutdown` appears when they are
+enabled.
 
 ---
 
-## Encryption in Running-Config
+## 9. VLAN Database and running-config
 
-### Type 5 (MD5 hash) - enable secret, username secret
-```
-enable secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
-username admin privilege 15 secret 5 $1$mERr$hx5rVt7rPNoS4wqbXKX7m0
-```
+For VLANs 1-1005, the VLAN configuration (names, states) is stored in `vlan.dat` on
+flash, NOT in the running-config. Therefore:
 
-The format is: `5 $1$<salt>$<hash>`
-- `$1$` = MD5 algorithm indicator
-- `<salt>` = 4-character random salt
-- `<hash>` = 22-character base64 hash
-
-### Type 7 (weak obfuscation) - password with encryption
-When `service password-encryption` is enabled:
-```
-enable password 7 0822455D0A16
-username admin password 7 045802150C2E
-line vty 0 4
- password 7 070C285F4D06
-```
-
-Type 7 can be decoded - it is NOT secure.
-
-### Type 0 (cleartext)
-```
-enable password cleartext
-username admin password cleartext
-```
-
-### Key ordering in config
-`enable secret` takes precedence over `enable password`. Both can coexist
-in the configuration, but the secret is always used if present.
+- `show running-config` does NOT show VLAN name assignments for VLANs 1-1005.
+- VLAN information for those VLANs is seen with `show vlan brief` or `show vlan`.
+- Extended range VLANs (1006-4094) in VTP transparent mode ARE stored in running-config:
+  ```
+  vlan 2000
+   name Extended-Vlan
+  !
+  ```
 
 ---
 
-## The `Current configuration` Header
+## 10. `show running-config` Variants
 
-The first line after `Building configuration...` shows config size:
-```
-Current configuration : 4218 bytes
-```
-
-This byte count changes with every `show running-config` call if the config
-was changed. The size includes all characters in the configuration including
-newlines.
+| Command | Description |
+|---------|-------------|
+| `show running-config` | Display the current running configuration (non-default settings). |
+| `show running-config all` | Show all settings including defaults (very long output). |
+| `show running-config interface GigabitEthernet1/0/1` | Show only the config for one interface. |
+| `show running-config | section interface` | Show all interface sections. |
+| `show running-config | include hostname` | Show only lines containing "hostname". |
+| `show running-config | begin router` | Show from the first line containing "router". |
+| `show startup-config` | Show the saved configuration from NVRAM. |
+| `write terminal` | Legacy equivalent of `show running-config`. |
 
 ---
 
-## Comment Lines (`!`) and Structure
+## 11. `show startup-config` Header Difference
 
-Comments (`!`) in running-config:
-- Are NOT actual stored commands
-- Are generated dynamically during `show running-config`
-- Serve as section separators
-- Cannot be entered by the user as "comments" in standard IOS 15.2
+```
+Switch# show startup-config
+Using 3142 out of 524288 bytes
+!
+version 15.2
+...
+```
 
-Some IOS versions do support `remark` commands in ACLs and route-maps, which
-appear as `remark <text>` in config, not as `!` lines.
+- Header is `Using NNNN out of MMMM bytes` (no "Building configuration..." line).
+- The rest of the format is identical to running-config.
+- If NVRAM is empty (factory default or after `erase startup-config`):
+  ```
+  startup-config is not present
+  ```
+
+---
+
+## 12. Configuration Size Byte Count
+
+The byte count in `Current configuration : NNNN bytes` reflects the exact number of
+bytes in the text representation of the running configuration (including newlines).
+This count:
+- Increases when commands are added.
+- Decreases when commands are removed.
+- Changes when the configuration is modified.
+- Is recalculated each time `show running-config` is run.
+
+The byte count does NOT include the header lines themselves ("Building configuration...",
+"Current configuration : N bytes").
+
+---
+
+*Sources:*
+- *Cisco Consolidated Platform Configuration Guide, IOS Release 15.2(5)E, Catalyst 3560-CX*
+- *Cisco IOS Password Encryption documentation*
+- *Cisco Learning Network: boot-start-marker and boot-end-marker explanation*
+- *Cisco IOS Configuration Fundamentals Command Reference*
+- *show running-config - Cisco E-Learning Command Reference*

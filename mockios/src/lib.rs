@@ -3967,6 +3967,79 @@ mod tests {
         assert!(output.contains("Cisco IOS"), "Should get show version output");
     }
 
+    /// Regression test: command text must appear exactly once in the raw output.
+    ///
+    /// When run_cmd() sends `cmd` and `\n` as two separate transport.send() calls,
+    /// the echoed command plus the newline echo plus the command output are returned.
+    /// The command text itself should appear exactly once (from the character-by-character
+    /// echo), NOT twice.
+    #[tokio::test]
+    async fn test_no_double_echo_two_part_send() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // initial prompt
+
+        // Simulate run_cmd: send text and \n as two separate calls (as generic_conn does)
+        device.send(b"show version").await.unwrap();
+        let echo_out = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"\n").await.unwrap();
+        let cmd_out = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        // Combine all output (as the SSH server would accumulate it)
+        let mut all_output = echo_out.clone();
+        all_output.extend_from_slice(&cmd_out);
+        let output = String::from_utf8_lossy(&all_output);
+
+        // "show version" should appear exactly once (from the echo), not twice
+        let count = output.matches("show version").count();
+        assert_eq!(
+            count, 1,
+            "Command 'show version' should appear exactly once in output, got {} times. Output: {:?}",
+            count,
+            &output[..output.len().min(300)]
+        );
+
+        // The command output should also be present
+        assert!(output.contains("Cisco IOS"),
+            "Command output should be present. Output: {:?}", &output[..output.len().min(300)]);
+    }
+
+    /// Regression test: sending \r\n as separate calls should not double-process the line.
+    ///
+    /// When Telnet sends \r then (later, as a separate send) \n, the line must be
+    /// processed only once. If receive() drains the output_queue between the two sends,
+    /// the \n condition must still correctly skip the already-processed newline.
+    #[tokio::test]
+    async fn test_no_double_process_on_crlf_separate_sends() {
+        let mut device = MockIosDevice::new("R1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // initial prompt
+
+        // Type the command
+        device.send(b"show version").await.unwrap();
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap(); // drain echo
+
+        // Send \r — line is processed, output queued
+        device.send(b"\r").await.unwrap();
+        let cr_out = device.receive(Duration::from_secs(1)).await.unwrap(); // drain output
+
+        // Now send \n — this should be silently ignored (line already processed)
+        device.send(b"\n").await.unwrap();
+        let lf_out = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        let cr_str = String::from_utf8_lossy(&cr_out);
+        let lf_str = String::from_utf8_lossy(&lf_out);
+
+        // The \r should have produced the full command response
+        assert!(cr_str.contains("Cisco IOS"),
+            "\\r should have triggered command output. Got: {:?}", &cr_str[..cr_str.len().min(300)]);
+
+        // The \n (after receive drained the queue) should produce nothing or just a prompt
+        // It must NOT produce a second copy of the command output
+        assert!(!lf_str.contains("Cisco IOS"),
+            "\\n after drained \\r should NOT produce command output again. Got: {:?}",
+            &lf_str[..lf_str.len().min(300)]);
+    }
+
     #[tokio::test]
     async fn test_question_mark_help() {
         let mut device = MockIosDevice::new("R1");

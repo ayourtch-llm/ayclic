@@ -954,7 +954,21 @@ pub fn handle_show_license(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_lldp(d: &mut MockIosDevice, _input: &str) {
     show_stub(
         d,
-        "Global LLDP Information:\n    Status: ACTIVE\n    LLDP advertisements are sent every 30 seconds\n    LLDP hold time advertised is 120 seconds\n    LLDP interface reinitialisation delay is 2 seconds",
+        "Global LLDP Information:\n    Status: ACTIVE\n    LLDP advertisements are sent every 30 seconds\n    LLDP hold time advertised is 120 seconds\n    LLDP interface reinitialisation delay is 2 seconds\n    LLDP tlv-select: enabled\n    LLDP management-address: enabled\n    LLDP port-description: enabled\n    LLDP system-capabilities: enabled\n    LLDP system-description: enabled\n    LLDP system-name: enabled",
+    );
+}
+
+pub fn handle_show_lldp_neighbors(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "Capability codes:\n    (R) Router, (B) Bridge, (T) Telephone, (C) DOCSIS Cable Device\n    (W) WLAN Access Point, (P) Repeater, (S) Station, (O) Other\n\nDevice ID          Local Intf     Hold-time  Capability      Port ID\n\nTotal entries displayed: 0",
+    );
+}
+
+pub fn handle_show_lldp_neighbors_detail(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "Total entries displayed: 0",
     );
 }
 
@@ -1406,7 +1420,15 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("license", "Show license information")
                     .handler(handle_show_license),
                 keyword("lldp", "LLDP information")
-                    .handler(handle_show_lldp),
+                    .handler(handle_show_lldp as CmdHandler)
+                    .children(vec![
+                        keyword("neighbors", "LLDP neighbor table")
+                            .handler(handle_show_lldp_neighbors as CmdHandler)
+                            .children(vec![
+                                keyword("detail", "Show detailed information")
+                                    .handler(handle_show_lldp_neighbors_detail),
+                            ]),
+                    ]),
                 keyword("module", "Module information")
                     .handler(handle_show_module),
                 keyword("platform", "Platform specific commands")
@@ -2343,6 +2365,155 @@ mod tests {
             output.contains("summary"),
             "Expected 'summary' in 'show etherchannel ?' help, got: {:?}",
             output
+        );
+    }
+
+    // ─── terminal monitor tests ───────────────────────────────────────────────
+
+    /// `terminal monitor` parses successfully in privileged exec mode.
+    #[test]
+    fn test_terminal_monitor_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("terminal monitor", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "terminal monitor should parse in privileged exec"
+        );
+    }
+
+    /// `terminal no monitor` parses successfully.
+    #[test]
+    fn test_terminal_no_monitor_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("terminal no monitor", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "terminal no monitor should parse"
+        );
+    }
+
+    /// `terminal monitor` sets the `terminal_monitor` flag to true.
+    #[test]
+    fn test_terminal_monitor_sets_flag() {
+        let mut device = make_device();
+        assert!(!device.terminal_monitor, "terminal_monitor should default to false");
+        handle_terminal_monitor(&mut device, "terminal monitor");
+        assert!(device.terminal_monitor, "terminal_monitor should be true after terminal monitor");
+    }
+
+    /// `terminal no monitor` clears the `terminal_monitor` flag.
+    #[test]
+    fn test_terminal_no_monitor_clears_flag() {
+        let mut device = make_device();
+        device.terminal_monitor = true;
+        handle_terminal_no_monitor(&mut device, "terminal no monitor");
+        assert!(!device.terminal_monitor, "terminal_monitor should be false after terminal no monitor");
+    }
+
+    /// `terminal monitor` produces only the prompt (no informational message).
+    #[test]
+    fn test_terminal_monitor_output_is_prompt_only() {
+        let mut device = make_device();
+        let _ = device.drain_output();
+        handle_terminal_monitor(&mut device, "terminal monitor");
+        let output = device.drain_output();
+        assert!(
+            output.contains("Router1#") || output.contains("Router1>"),
+            "terminal monitor output should contain the prompt, got: {:?}",
+            output
+        );
+        assert!(
+            !output.contains("enabled") && !output.contains("Monitor"),
+            "terminal monitor should produce only the prompt, got: {:?}",
+            output
+        );
+    }
+
+    /// `terminal no monitor` produces only the prompt.
+    #[test]
+    fn test_terminal_no_monitor_output_is_prompt_only() {
+        let mut device = make_device();
+        device.terminal_monitor = true;
+        let _ = device.drain_output();
+        handle_terminal_no_monitor(&mut device, "terminal no monitor");
+        let output = device.drain_output();
+        assert!(
+            output.contains("Router1#") || output.contains("Router1>"),
+            "terminal no monitor output should contain the prompt, got: {:?}",
+            output
+        );
+    }
+
+    /// `term mon` abbreviation also parses.
+    #[test]
+    fn test_terminal_monitor_abbreviation_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("term mon", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "term mon should match terminal monitor"
+        );
+    }
+
+    // ─── show ip protocols tests ──────────────────────────────────────────────
+
+    /// `show ip protocols` parses successfully.
+    #[test]
+    fn test_show_ip_protocols_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show ip protocols", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "show ip protocols should parse"
+        );
+    }
+
+    /// `show ip protocols` output contains key sections from real IOS.
+    #[test]
+    fn test_show_ip_protocols_output() {
+        let mut device = make_device();
+        handle_show_ip_protocols(&mut device, "show ip protocols");
+        let output = device.drain_output();
+        assert!(
+            output.contains("Routing Protocol is \"application\""),
+            "show ip protocols should contain application protocol section, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Maximum path: 32"),
+            "show ip protocols should contain Maximum path, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Distance: (default is 4)"),
+            "show ip protocols should contain Distance line, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Routing Information Sources:"),
+            "show ip protocols should contain Routing Information Sources, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Gateway         Distance      Last Update"),
+            "show ip protocols should contain column headers, got: {:?}",
+            output
+        );
+    }
+
+    /// `sh ip pro` abbreviation also parses.
+    #[test]
+    fn test_show_ip_protocols_abbreviation_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("sh ip pro", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "sh ip pro should match show ip protocols"
         );
     }
 }

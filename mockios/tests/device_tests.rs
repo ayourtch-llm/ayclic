@@ -638,3 +638,107 @@ async fn test_show_vlan_id_nonexistent() {
         output
     );
 }
+
+#[tokio::test]
+async fn test_show_lldp() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show lldp\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Global LLDP Information"),
+        "show lldp missing 'Global LLDP Information', got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Status: ACTIVE"),
+        "show lldp missing 'Status: ACTIVE', got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("30 seconds"),
+        "show lldp missing advertisement interval, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("120 seconds"),
+        "show lldp missing hold time, got:\n{}",
+        output
+    );
+}
+
+#[tokio::test]
+async fn test_show_lldp_neighbors() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show lldp neighbors\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Capability codes"),
+        "show lldp neighbors missing capability codes header, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("(R) Router"),
+        "show lldp neighbors missing Router capability, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Device ID"),
+        "show lldp neighbors missing Device ID column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Local Intf"),
+        "show lldp neighbors missing Local Intf column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Hold-time"),
+        "show lldp neighbors missing Hold-time column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Capability"),
+        "show lldp neighbors missing Capability column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Port ID"),
+        "show lldp neighbors missing Port ID column, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Total entries displayed: 0"),
+        "show lldp neighbors missing total entries line, got:\n{}",
+        output
+    );
+}
+
+#[tokio::test]
+async fn test_show_lldp_neighbors_detail() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show lldp neighbors detail\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Total entries displayed: 0"),
+        "show lldp neighbors detail missing total entries line, got:\n{}",
+        output
+    );
+}

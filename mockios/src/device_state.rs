@@ -541,11 +541,12 @@ impl DeviceState {
             iface
         }).collect();
 
-        // TenGigabitEthernet1/0/1 and 1/0/2: shutdown (unconnected)
+        // TenGigabitEthernet1/0/1 and 1/0/2: admin up, no link (no SFP inserted)
+        // Real IOS shows "notconnect" for Te ports without SFP, not "disabled".
         // Speed/duplex are already set to 10000/full by InterfaceState::new for Te ports.
         let te_interfaces: Vec<InterfaceState> = (1..=2).map(|n| {
             let mut iface = InterfaceState::new(&format!("TenGigabitEthernet1/0/{}", n));
-            iface.admin_up = false;
+            // admin_up=true (default), link_up=false (no SFP) → notconnect
             iface
         }).collect();
 
@@ -1717,11 +1718,13 @@ mod tests {
         assert!(!gi13.admin_up, "Gi1/0/13 should be admin down (shutdown)");
         let gi16 = state.interfaces.iter().find(|i| i.name == "GigabitEthernet1/0/16").unwrap();
         assert!(!gi16.admin_up, "Gi1/0/16 should be admin down (shutdown)");
-        // Te1/0/1 and Te1/0/2 should be shutdown
+        // Te1/0/1 and Te1/0/2 should be admin up (no SFP → notconnect, not disabled)
         let te1 = state.interfaces.iter().find(|i| i.name == "TenGigabitEthernet1/0/1").unwrap();
-        assert!(!te1.admin_up, "Te1/0/1 should be admin down (shutdown)");
+        assert!(te1.admin_up, "Te1/0/1 should be admin up (notconnect, no SFP)");
+        assert!(!te1.link_up, "Te1/0/1 should be link down (no SFP)");
         let te2 = state.interfaces.iter().find(|i| i.name == "TenGigabitEthernet1/0/2").unwrap();
-        assert!(!te2.admin_up, "Te1/0/2 should be admin down (shutdown)");
+        assert!(te2.admin_up, "Te1/0/2 should be admin up (notconnect, no SFP)");
+        assert!(!te2.link_up, "Te1/0/2 should be link down (no SFP)");
         // Vlan1 should be admin up
         let vlan1 = state.interfaces.iter().find(|i| i.name == "Vlan1").unwrap();
         assert!(vlan1.admin_up, "Vlan1 should be admin up");
@@ -1889,7 +1892,8 @@ mod tests {
 
         // Shutdown interfaces should NOT appear
         assert!(!output.contains("Gi1/0/5"), "Gi1/0/5 is shutdown, should not appear");
-        assert!(!output.contains("Te1/0/1"), "Te1/0/1 is shutdown, should not appear");
+        // Te1/0/1 is admin-up (no SFP → notconnect), so it SHOULD appear
+        assert!(output.contains("Te1/0/1"), "Te1/0/1 is admin-up, should appear");
 
         // VLAN column for physical interfaces should be 1
         // Find a Gi1/0/1 line and check it starts with "   1"
@@ -1902,10 +1906,10 @@ mod tests {
         let state = DeviceState::new("Switch1");
         let output = state.generate_show_mac_address_table();
 
-        // admin_up interfaces: Vlan1 (1) + Gi1/0/1..4 (4) = 5 total
+        // admin_up interfaces: Vlan1 (1) + Gi1/0/1..4 (4) + Te1/0/1..2 (2) = 7 total
         assert!(
-            output.contains("Total Mac Addresses for this criterion: 5"),
-            "Should count 5 admin-up interfaces, got output: {:?}",
+            output.contains("Total Mac Addresses for this criterion: 7"),
+            "Should count 7 admin-up interfaces, got output: {:?}",
             output
         );
     }

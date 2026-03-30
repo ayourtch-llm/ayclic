@@ -411,6 +411,20 @@ pub fn handle_write_memory(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("Building configuration...\n[OK]\n{}", p));
 }
 
+pub fn handle_write_terminal(d: &mut MockIosDevice, input: &str) {
+    handle_show_running_config(d, input);
+}
+
+pub fn handle_write_erase(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("[OK]\n{}", p));
+}
+
+pub fn handle_write_network(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    d.queue_output(&format!("%% Not implemented\n{}", p));
+}
+
 pub fn handle_install_add(d: &mut MockIosDevice, input: &str) {
     d.handle_install_add(input);
 }
@@ -833,7 +847,28 @@ pub fn handle_show_ip_dhcp_pool(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_ip_dhcp_snooping(d: &mut MockIosDevice, _input: &str) {
-    show_stub(d, "DHCP snooping is disabled");
+    show_stub(d, "Switch DHCP snooping is enabled
+Switch DHCP gleaning is disabled
+DHCP snooping is configured on following VLANs:
+1
+DHCP snooping is operational on following VLANs:
+1
+Insertion of option 82 is enabled
+   circuit-id default format: vlan-mod-port
+   remote-id: 0000.0000.0000 (MAC)
+Option 82 on untrusted port is not allowed
+Verification of hwaddr field is enabled
+Verification of giaddr field is enabled
+DHCP snooping trust/rate is configured on the following Interfaces:
+
+Interface                  Trusted    Allow option    Rate limit (pps)
+-----------------------    -------    ------------    ----------------");
+}
+
+pub fn handle_show_ip_dhcp_snooping_binding(d: &mut MockIosDevice, _input: &str) {
+    show_stub(d, "MacAddress          IpAddress        Lease(sec)  Type           VLAN  Interface
+------------------  ---------------  ----------  -------------  ----  --------------------
+Total number of bindings: 0");
 }
 
 pub fn handle_show_ip_dhcp(d: &mut MockIosDevice, _input: &str) {
@@ -1597,8 +1632,14 @@ fn build_exec_tree() -> Vec<CommandNode> {
             .mode(priv_only())
             .handler(handle_write_memory as CmdHandler)
             .children(vec![
+                keyword("erase", "Erase non-volatile memory")
+                    .handler(handle_write_erase),
                 keyword("memory", "Write to NV memory")
                     .handler(handle_write_memory),
+                keyword("network", "Write to network TFTP server")
+                    .handler(handle_write_network),
+                keyword("terminal", "Write to terminal")
+                    .handler(handle_write_terminal),
             ]),
 
         // install [priv only]
@@ -2134,6 +2175,91 @@ mod tests {
             "Write running configuration to memory, network, or terminal",
             "write help text should match real IOS"
         );
+    }
+
+    /// `write terminal` should parse successfully in privileged exec mode.
+    #[test]
+    fn test_exec_write_terminal_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("write terminal", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "write terminal should parse as Execute"
+        );
+    }
+
+    /// `write terminal` should produce output equivalent to `show running-config`.
+    #[test]
+    fn test_write_terminal_output_matches_show_running_config() {
+        let mut device = make_device();
+        let mut device2 = make_device();
+        handle_write_terminal(&mut device, "write terminal");
+        handle_show_running_config(&mut device2, "show running-config");
+        let out1 = device.drain_output();
+        let out2 = device2.drain_output();
+        assert_eq!(out1, out2, "write terminal output should match show running-config");
+    }
+
+    /// `write erase` should parse successfully in privileged exec mode.
+    #[test]
+    fn test_exec_write_erase_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("write erase", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "write erase should parse as Execute"
+        );
+    }
+
+    /// `write erase` should output [OK].
+    #[test]
+    fn test_write_erase_output() {
+        let mut device = make_device();
+        handle_write_erase(&mut device, "write erase");
+        let output = device.drain_output();
+        assert!(output.contains("[OK]"), "write erase should output [OK]");
+    }
+
+    /// `write network` should parse successfully in privileged exec mode.
+    #[test]
+    fn test_exec_write_network_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("write network", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "write network should parse as Execute"
+        );
+    }
+
+    /// `write network` stub should produce some output without panicking.
+    #[test]
+    fn test_write_network_output() {
+        let mut device = make_device();
+        handle_write_network(&mut device, "write network");
+        let _output = device.drain_output();
+        // stub: just verify it doesn't panic
+    }
+
+    /// The `write` subcommand list should contain erase, memory, network, terminal.
+    #[test]
+    fn test_write_children_match_real_ios() {
+        use crate::cmd_tree::TokenMatcher;
+        let tree = exec_tree();
+        let write_node = tree.iter().find(|n| {
+            matches!(&n.matcher, TokenMatcher::Keyword(kw) if kw == "write")
+        }).expect("write node must exist");
+        let child_keywords: Vec<&str> = write_node.children.iter().filter_map(|c| {
+            if let TokenMatcher::Keyword(kw) = &c.matcher { Some(kw.as_str()) } else { None }
+        }).collect();
+        for expected in &["erase", "memory", "network", "terminal"] {
+            assert!(
+                child_keywords.contains(expected),
+                "write should have '{}' subcommand, found: {:?}", expected, child_keywords
+            );
+        }
     }
 
     /// Verify pwd outputs "flash:/"

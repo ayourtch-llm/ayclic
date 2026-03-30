@@ -3208,6 +3208,73 @@ mod tests {
             "'do show version' in config-if mode should work, got: {:?}", output);
     }
 
+    #[tokio::test]
+    async fn test_do_show_version_in_config_mode() {
+        // Real IOS: "do show version" from config mode executes the exec command
+        // and returns output while remaining in config mode.
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        assert_eq!(device.mode, CliMode::Config);
+
+        let output = send_cmd(&mut device, "do show version").await;
+        assert!(
+            output.contains("Cisco IOS"),
+            "'do show version' in config mode should output version info, got: {:?}",
+            output
+        );
+        // Output should end with the config prompt, not the exec prompt.
+        assert!(
+            output.contains("(config)#"),
+            "Output should contain config mode prompt, got: {:?}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_do_show_ip_route_in_config_mode() {
+        // "do show ip route" from config mode should execute and return routing info.
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        assert_eq!(device.mode, CliMode::Config);
+
+        let output = send_cmd(&mut device, "do show ip route").await;
+        // Should not produce an "Invalid input" error.
+        assert!(
+            !output.contains("Invalid input"),
+            "'do show ip route' should not produce invalid input error, got: {:?}",
+            output
+        );
+        // Should end with config prompt.
+        assert!(
+            output.contains("(config)#"),
+            "Output should contain config mode prompt after 'do show ip route', got: {:?}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_do_preserves_config_mode() {
+        // After executing "do show version", the device should remain in Config mode.
+        let mut device = setup_device("Router1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        assert_eq!(device.mode, CliMode::Config);
+
+        let _ = send_cmd(&mut device, "do show version").await;
+        assert_eq!(
+            device.mode,
+            CliMode::Config,
+            "Mode should still be Config after 'do show version'"
+        );
+
+        // Verify we can still issue config commands after a 'do' command.
+        let output = send_cmd(&mut device, "hostname TestRouter").await;
+        assert!(
+            output.contains("TestRouter(config)#"),
+            "Should still be in config mode and reflect hostname change, got: {:?}",
+            output
+        );
+    }
+
     // --- "configure" alone (without "terminal") ---
 
     #[tokio::test]

@@ -798,3 +798,66 @@ async fn test_show_ip_dhcp_snooping_binding() {
         output
     );
 }
+
+#[tokio::test]
+async fn test_show_power_inline() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show power inline\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Available:240.0(w)"),
+        "show power inline missing Available line, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Used:0.0(w)"),
+        "show power inline missing Used field, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Remaining:240.0(w)"),
+        "show power inline missing Remaining field, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Interface Admin  Oper"),
+        "show power inline missing table header, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("(Watts)"),
+        "show power inline missing Watts column, got:\n{}",
+        output
+    );
+    // All 12 PoE ports should appear
+    for port in 1..=12 {
+        let iface = format!("Gi1/0/{}", port);
+        assert!(
+            output.contains(&iface),
+            "show power inline missing port {}, got:\n{}",
+            iface, output
+        );
+    }
+    // Each port should show auto/off/0.0/n/a/30.0
+    assert!(
+        output.contains("auto   off        0.0"),
+        "show power inline missing auto/off/0.0 status, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("30.0"),
+        "show power inline missing max power 30.0, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Totals:"),
+        "show power inline missing Totals line, got:\n{}",
+        output
+    );
+}

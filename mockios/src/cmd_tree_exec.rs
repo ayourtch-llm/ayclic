@@ -1032,11 +1032,87 @@ pub fn handle_show_policy_map(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_port_security(d: &mut MockIosDevice, _input: &str) {
-    show_stub(d, "");
+    let p = d.prompt();
+    let output = "\
+Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action\n\
+                (Count)       (Count)          (Count)\n\
+-----------  -------------  -----------  -----------------  ---------------\n";
+    d.queue_output(&format!("{}{}", output, p));
+}
+
+pub fn handle_show_port_security_interface(d: &mut MockIosDevice, input: &str) {
+    // Extract optional interface name argument: "show port-security interface [<name>]"
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    // tokens: ["show", "port-security", "interface", [<name>]]
+    let iface_name = tokens.get(3).copied();
+    let p = d.prompt();
+    match iface_name {
+        None => {
+            // No interface specified — show empty table (same as base command)
+            let output = "\
+Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action\n\
+                (Count)       (Count)          (Count)\n\
+-----------  -------------  -----------  -----------------  ---------------\n";
+            d.queue_output(&format!("{}{}", output, p));
+        }
+        Some(name) => {
+            // Per-interface detail — IOS 15.2 format
+            let output = format!("\
+Port Security              : Disabled\n\
+Port Status                : Secure-down\n\
+Violation Mode             : Shutdown\n\
+Aging Time                 : 0 mins\n\
+Aging Type                 : Absolute\n\
+SecureStatic Address Aging : Disabled\n\
+Maximum MAC Addresses      : 1\n\
+Total MAC Addresses        : 0\n\
+Configured MAC Addresses   : 0\n\
+Sticky MAC Addresses       : 0\n\
+Last Source Address:Vlan   : 0000.0000.0000:0\n\
+Security Violation Count   : 0\n\
+");
+            d.queue_output(&format!(
+                "Port Security for interface {}:\n{}{}",
+                name, output, p
+            ));
+        }
+    }
+}
+
+pub fn handle_show_port_security_address(d: &mut MockIosDevice, _input: &str) {
+    let p = d.prompt();
+    let output = "\
+               Secure Mac Address Table\n\
+-----------------------------------------------------------------------------\n\
+Vlan    Mac Address       Type                          Ports   Remaining Age\n\
+                                                                   (mins)\n\
+----    -----------       ----                          -----   -------------\n\
+-----------------------------------------------------------------------------\n\
+Total Addresses in System (excluding one mac per port)     : 0\n\
+Max Addresses limit in System (excluding one mac per port) : 1024\n";
+    d.queue_output(&format!("{}{}", output, p));
 }
 
 pub fn handle_show_power(d: &mut MockIosDevice, _input: &str) {
     show_stub(d, "");
+}
+
+pub fn handle_show_power_inline(d: &mut MockIosDevice, _input: &str) {
+    let mut output = String::new();
+    output.push_str("Available:240.0(w)  Used:0.0(w)  Remaining:240.0(w)\n");
+    output.push_str("\n");
+    output.push_str("Interface Admin  Oper       Power   Device              Class Max\n");
+    output.push_str("                            (Watts)                    \n");
+    output.push_str("--------- ------ ---------- ------- ------------------- ----- ----\n");
+    for port in 1..=12 {
+        output.push_str(&format!(
+            "Gi1/0/{:<2}  auto   off        0.0     n/a                 n/a   30.0 \n",
+            port
+        ));
+    }
+    output.push_str("\n");
+    output.push_str("Totals:            0.0\n");
+    show_stub(d, output.trim_end_matches('\n'));
 }
 
 pub fn handle_show_protocols(d: &mut MockIosDevice, _input: &str) {
@@ -1489,7 +1565,11 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("port-security", "Show secure port information")
                     .handler(handle_show_port_security),
                 keyword("power", "Switch Power")
-                    .handler(handle_show_power),
+                    .handler(handle_show_power as CmdHandler)
+                    .children(vec![
+                        keyword("inline", "Show inline power information")
+                            .handler(handle_show_power_inline),
+                    ]),
                 keyword("protocols", "Active network routing protocols")
                     .handler(handle_show_protocols),
                 keyword("sessions", "Telnet connections")

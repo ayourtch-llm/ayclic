@@ -1065,21 +1065,53 @@ impl DeviceState {
 
         // Access lists
         for acl in &self.access_lists {
-            for entry in &acl.entries {
-                let mut line = format!("access-list {} {} {}", acl.name, entry.action, entry.protocol);
-                if !entry.source.is_empty() {
-                    line.push_str(&format!(" {}", entry.source));
+            let is_named = acl.name.parse::<u64>().is_err();
+            if is_named {
+                // Named ACL: use block format
+                let type_kw = if acl.acl_type == "Standard" { "standard" } else { "extended" };
+                lines.push(format!("ip access-list {} {}", type_kw, acl.name));
+                for entry in &acl.entries {
+                    if entry.action == "remark" {
+                        let mut line = format!(" remark {}", entry.source);
+                        if !entry.extra.is_empty() {
+                            line.push_str(&format!(" {}", entry.extra));
+                        }
+                        lines.push(line);
+                    } else {
+                        let mut line = format!(" {} {}", entry.action, entry.protocol);
+                        if !entry.source.is_empty() {
+                            line.push_str(&format!(" {}", entry.source));
+                        }
+                        if !entry.destination.is_empty() {
+                            line.push_str(&format!(" {}", entry.destination));
+                        }
+                        if !entry.extra.is_empty() {
+                            line.push_str(&format!(" {}", entry.extra));
+                        }
+                        lines.push(line);
+                    }
                 }
-                if !entry.destination.is_empty() {
-                    line.push_str(&format!(" {}", entry.destination));
+                lines.push("!".to_string());
+            } else {
+                // Numbered ACL: flat format
+                for entry in &acl.entries {
+                    let mut line = format!("access-list {} {} {}", acl.name, entry.action, entry.protocol);
+                    if !entry.source.is_empty() {
+                        line.push_str(&format!(" {}", entry.source));
+                    }
+                    if !entry.destination.is_empty() {
+                        line.push_str(&format!(" {}", entry.destination));
+                    }
+                    if !entry.extra.is_empty() {
+                        line.push_str(&format!(" {}", entry.extra));
+                    }
+                    lines.push(line);
                 }
-                if !entry.extra.is_empty() {
-                    line.push_str(&format!(" {}", entry.extra));
-                }
-                lines.push(line);
             }
         }
-        if !self.access_lists.is_empty() {
+        // Separator after numbered ACLs (if any exist and last was numbered)
+        let has_numbered = self.access_lists.iter().any(|a| a.name.parse::<u64>().is_ok());
+        if has_numbered {
             lines.push("!".to_string());
         }
 

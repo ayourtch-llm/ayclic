@@ -21,6 +21,8 @@ pub enum ParamType {
     Word,
     /// An integer.
     Number,
+    /// An integer within an inclusive range [min, max].
+    NumberRange(i64, i64),
     /// Rest of line (greedy — consumes all remaining tokens).
     RestOfLine,
 }
@@ -30,6 +32,10 @@ impl ParamType {
         match self {
             ParamType::Word => !token.is_empty(),
             ParamType::Number => token.parse::<i64>().is_ok(),
+            ParamType::NumberRange(min, max) => token
+                .parse::<i64>()
+                .map(|n| n >= *min && n <= *max)
+                .unwrap_or(false),
             ParamType::RestOfLine => !token.is_empty(),
         }
     }

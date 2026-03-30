@@ -158,6 +158,8 @@ pub struct MockIosDevice {
     pub state: DeviceState,
     /// Current interface being configured in config-if mode.
     pub current_interface: Option<String>,
+    /// Current named ACL being configured in config-ext-nacl / config-std-nacl mode.
+    pub current_acl_name: Option<String>,
     /// Whether `terminal monitor` has been issued on this VTY session.
     pub terminal_monitor: bool,
     /// Whether the device should echo characters back to the client.
@@ -471,6 +473,7 @@ impl MockIosDevice {
             install_state: None,
             state: DeviceState::new(hostname),
             current_interface: None,
+            current_acl_name: None,
             terminal_monitor: false,
             local_echo: true,
             created_at: Instant::now(),
@@ -701,6 +704,7 @@ impl MockIosDevice {
             install_state: self.install_state.clone(),
             state: derived_state,
             current_interface: None,
+            current_acl_name: None,
             terminal_monitor: false,
             local_echo: self.local_echo,
             created_at: self.created_at,

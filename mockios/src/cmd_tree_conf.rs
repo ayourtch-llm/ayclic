@@ -26,6 +26,8 @@ pub fn config_sub_tree(sub_mode: &str) -> &'static Vec<CommandNode> {
         "config-if" => config_if_tree(),
         "config-router" => config_router_tree(),
         "config-line" => config_line_tree(),
+        "config-ext-nacl" => config_ext_nacl_tree(),
+        "config-std-nacl" => config_std_nacl_tree(),
         _ => conf_tree(), // unknown sub-modes fall back to full conf tree
     }
 }
@@ -734,6 +736,44 @@ pub fn handle_description(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("{}", p));
 }
 
+pub fn handle_speed(d: &mut MockIosDevice, input: &str) {
+    let negated = input.trim().starts_with("no");
+    if let Some(ref iface_name) = d.current_interface.clone() {
+        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+            if negated {
+                iface.speed = "auto".to_string();
+            } else {
+                // Input is like "speed 100" or "speed auto" or "speed 1000"
+                let parts: Vec<&str> = input.trim().split_whitespace().collect();
+                if let Some(&val) = parts.get(1) {
+                    iface.speed = val.to_string();
+                }
+            }
+        }
+    }
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_duplex(d: &mut MockIosDevice, input: &str) {
+    let negated = input.trim().starts_with("no");
+    if let Some(ref iface_name) = d.current_interface.clone() {
+        if let Some(iface) = d.state.get_interface_mut(iface_name) {
+            if negated {
+                iface.duplex = "auto".to_string();
+            } else {
+                // Input is like "duplex full" or "duplex half" or "duplex auto"
+                let parts: Vec<&str> = input.trim().split_whitespace().collect();
+                if let Some(&val) = parts.get(1) {
+                    iface.duplex = val.to_string();
+                }
+            }
+        }
+    }
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
 pub fn handle_switchport_mode(d: &mut MockIosDevice, input: &str) {
     let negated = input.trim().starts_with("no");
     if let Some(ref iface_name) = d.current_interface.clone() {
@@ -866,12 +906,140 @@ pub fn handle_access_list(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("{}", p));
 }
 
+/// Handler: `ip access-list extended|standard <name>` — create/enter named ACL.
+pub fn handle_ip_access_list(d: &mut MockIosDevice, input: &str) {
+    // input: "ip access-list extended|standard <name>"
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    // parts[0]="ip", parts[1]="access-list", parts[2]=type, parts[3]=name
+    let (acl_type, sub_mode_name, acl_name) = match (parts.get(2), parts.get(3)) {
+        (Some(&"extended"), Some(name)) => ("Extended", "config-ext-nacl", *name),
+        (Some(&"standard"), Some(name)) => ("Standard", "config-std-nacl", *name),
+        _ => {
+            let p = d.prompt();
+            d.queue_output(&format!("% Incomplete command.\n{}", p));
+            return;
+        }
+    };
+
+    let acl_name_owned = acl_name.to_string();
+
+    // Create the ACL if it doesn't already exist.
+    if !d.state.access_lists.iter().any(|a| a.name == acl_name_owned) {
+        d.state.access_lists.push(AccessList {
+            name: acl_name_owned.clone(),
+            acl_type: acl_type.to_string(),
+            entries: vec![],
+        });
+    }
+
+    d.current_acl_name = Some(acl_name_owned);
+    d.mode = CliMode::ConfigSub(sub_mode_name.to_string());
+
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+/// Handler: `no ip access-list extended|standard <name>` — remove named ACL.
+pub fn handle_no_ip_access_list(d: &mut MockIosDevice, input: &str) {
+    // input: "no ip access-list extended|standard <name>"
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    // parts: ["no", "ip", "access-list", "extended"|"standard", "<name>"]
+    if let Some(name) = parts.get(4) {
+        let name_owned = name.to_string();
+        d.state.access_lists.retain(|a| a.name != name_owned);
+    }
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+/// Handler: `permit <rest>` / `deny <rest>` / `remark <rest>` inside a named ACL sub-mode.
+pub fn handle_nacl_entry(d: &mut MockIosDevice, input: &str) {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let action = match parts.first() {
+        Some(&"permit") => "permit",
+        Some(&"deny") => "deny",
+        Some(&"remark") => "remark",
+        _ => {
+            let p = d.prompt();
+            d.queue_output(&format!("% Invalid input.\n{}", p));
+            return;
+        }
+    };
+
+    // Determine if this is a standard or extended ACL from the current mode.
+    let is_extended = matches!(&d.mode, CliMode::ConfigSub(s) if s == "config-ext-nacl");
+
+    let protocol;
+    let source;
+    let destination;
+    let extra;
+
+    if action == "remark" {
+        protocol = "remark".to_string();
+        source = parts.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+        destination = String::new();
+        extra = String::new();
+    } else if is_extended {
+        // Extended: permit/deny <protocol> <source> <dest> [extra...]
+        protocol = parts.get(1).unwrap_or(&"ip").to_string();
+        source = parts.get(2).unwrap_or(&"any").to_string();
+        destination = parts.get(3).unwrap_or(&"any").to_string();
+        extra = parts.get(4..).map(|s| s.join(" ")).unwrap_or_default();
+    } else {
+        // Standard: permit/deny <source> [extra...]
+        protocol = String::new();
+        source = parts.get(1).unwrap_or(&"any").to_string();
+        destination = String::new();
+        extra = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
+    }
+
+    let entry = AccessListEntry {
+        action: action.to_string(),
+        protocol,
+        source,
+        destination,
+        extra,
+    };
+
+    if let Some(ref acl_name) = d.current_acl_name.clone() {
+        if let Some(acl) = d.state.access_lists.iter_mut().find(|a| &a.name == acl_name) {
+            acl.entries.push(entry);
+        }
+    }
+
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
 /// Generic handler for config-router and config-line commands that stores
 /// the raw line as unmodeled config.
 pub fn handle_config_sub_rest(d: &mut MockIosDevice, input: &str) {
     d.state.unmodeled_config.push(format!(" {}", input.trim()));
     let p = d.prompt();
     d.queue_output(&format!("{}", p));
+}
+
+// ─── ACL helpers ─────────────────────────────────────────────────────────────
+
+/// Returns the standard permit/deny/remark sub-tree used by all numeric ACL entries.
+fn acl_permit_deny_remark(handler: CmdHandler) -> Vec<CommandNode> {
+    vec![
+        keyword("deny", "Specify packets to reject")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Access list entry")
+                    .handler(handler),
+            ]),
+        keyword("permit", "Specify packets to forward")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Access list entry")
+                    .handler(handler),
+            ]),
+        keyword("remark", "Access list entry comment")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Comment text")
+                    .handler(handler),
+            ]),
+    ]
 }
 
 // ─── Tree ─────────────────────────────────────────────────────────────────────
@@ -980,12 +1148,29 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     ]),
             ]),
 
-        // access-list <number|name> <permit|deny> ... [config only]
+        // access-list <number> <permit|deny|remark> ... [config only]
         keyword("access-list", "Add an access list entry")
             .mode(config_only())
             .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Access list parameters")
-                    .handler(handle_access_list),
+                param("<1-99>", ParamType::NumberRange(1, 99), "IP standard access list")
+                    .children(acl_permit_deny_remark(handle_access_list)),
+                param("<100-199>", ParamType::NumberRange(100, 199), "IP extended access list")
+                    .children(acl_permit_deny_remark(handle_access_list)),
+                param("<1100-1199>", ParamType::NumberRange(1100, 1199), "Extended 48-bit MAC address access list")
+                    .children(acl_permit_deny_remark(handle_access_list)),
+                param("<1300-1999>", ParamType::NumberRange(1300, 1999), "IP standard access list (expanded range)")
+                    .children(acl_permit_deny_remark(handle_access_list)),
+                param("<200-299>", ParamType::NumberRange(200, 299), "Protocol type-code access list")
+                    .children(acl_permit_deny_remark(handle_access_list)),
+                param("<2000-2699>", ParamType::NumberRange(2000, 2699), "IP extended access list (expanded range)")
+                    .children(acl_permit_deny_remark(handle_access_list)),
+                param("<700-799>", ParamType::NumberRange(700, 799), "48-bit MAC address access list")
+                    .children(acl_permit_deny_remark(handle_access_list)),
+                keyword("rate-limit", "Simple rate-limit specific access list")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "Rate-limit access list parameters")
+                            .handler(handle_access_list),
+                    ]),
             ]),
 
         // ip ...
@@ -1027,6 +1212,22 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     .children(vec![
                         param("<ip>", ParamType::Word, "Name server address")
                             .handler(handle_ip_name_server),
+                    ]),
+                // ip access-list extended|standard <name>  [config only]
+                keyword("access-list", "Named access-list")
+                    .mode(config_only())
+                    .no_handler(handle_no_ip_access_list)
+                    .children(vec![
+                        keyword("extended", "Extended Access List")
+                            .children(vec![
+                                param("<name>", ParamType::Word, "Access-list name")
+                                    .handler(handle_ip_access_list),
+                            ]),
+                        keyword("standard", "Standard Access List")
+                            .children(vec![
+                                param("<name>", ParamType::Word, "Access-list name")
+                                    .handler(handle_ip_access_list),
+                            ]),
                     ]),
             ]),
 
@@ -1595,18 +1796,21 @@ fn build_config_if_tree() -> Vec<CommandNode> {
                     .handler(handle_config_sub_rest),
             ]),
 
-        // speed <rest>
         keyword("speed", "Configure speed operation of the interface")
+            .handler(handle_speed)  // for "no speed"
             .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Speed value")
-                    .handler(handle_config_sub_rest),
+                keyword("10", "Force 10 Mbps operation").handler(handle_speed),
+                keyword("100", "Force 100 Mbps operation").handler(handle_speed),
+                keyword("1000", "Force 1000 Mbps operation").handler(handle_speed),
+                keyword("auto", "Enable AUTO speed configuration").handler(handle_speed),
             ]),
 
-        // duplex <rest>
         keyword("duplex", "Configure duplex operation")
+            .handler(handle_duplex)  // for "no duplex"
             .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Duplex mode")
-                    .handler(handle_config_sub_rest),
+                keyword("auto", "Enable AUTO duplex configuration").handler(handle_duplex),
+                keyword("full", "Force full duplex operation").handler(handle_duplex),
+                keyword("half", "Force half duplex operation").handler(handle_duplex),
             ]),
 
         // storm-control <rest>
@@ -1881,6 +2085,62 @@ fn build_config_line_tree() -> Vec<CommandNode> {
             .children(vec![
                 param("<rest>", ParamType::RestOfLine, "Password")
                     .handler(handle_config_sub_rest),
+            ]),
+    ];
+
+    main_commands.push(
+        keyword("no", "Negate a command or set its defaults"),
+    );
+    main_commands.push(
+        keyword("help", "Description of the interactive help system")
+            .handler(crate::cmd_tree_exec::handle_help_command),
+    );
+    main_commands.push(
+        keyword("exit", "Exit from current mode")
+            .handler(handle_config_exit),
+    );
+    main_commands.push(
+        keyword("end", "Exit to privileged EXEC mode")
+            .handler(handle_config_end),
+    );
+
+    main_commands
+}
+
+static CONFIG_EXT_NACL_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
+static CONFIG_STD_NACL_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
+
+/// Command tree for config-ext-nacl sub-mode (extended named ACL configuration).
+pub fn config_ext_nacl_tree() -> &'static Vec<CommandNode> {
+    CONFIG_EXT_NACL_TREE.get_or_init(build_config_nacl_tree)
+}
+
+/// Command tree for config-std-nacl sub-mode (standard named ACL configuration).
+pub fn config_std_nacl_tree() -> &'static Vec<CommandNode> {
+    CONFIG_STD_NACL_TREE.get_or_init(build_config_nacl_tree)
+}
+
+fn build_config_nacl_tree() -> Vec<CommandNode> {
+    let mut main_commands: Vec<CommandNode> = vec![
+        // permit <rest>
+        keyword("permit", "Specify packets to forward")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Permit conditions")
+                    .handler(handle_nacl_entry),
+            ]),
+
+        // deny <rest>
+        keyword("deny", "Specify packets to reject")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Deny conditions")
+                    .handler(handle_nacl_entry),
+            ]),
+
+        // remark <rest>
+        keyword("remark", "Access list entry comment")
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Comment text")
+                    .handler(handle_nacl_entry),
             ]),
     ];
 
@@ -2395,4 +2655,366 @@ mod tests {
             );
         }
     }
+
+    /// Verify that `access-list ?` shows numbered range params, not `<rest>`.
+    #[test]
+    fn test_access_list_help_shows_ranges_not_rest() {
+        use crate::cmd_tree::{help, HelpResult};
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let result = help("access-list ", tree, &mode);
+        let names: Vec<String> = match result {
+            HelpResult::Subcommands(subs) => subs.into_iter().map(|(name, _)| name).collect(),
+            other => panic!("Expected Subcommands for 'access-list ', got {:?}", other),
+        };
+
+        // Must include the numeric range params
+        for &expected in &["<1-99>", "<100-199>", "<1300-1999>", "<2000-2699>", "rate-limit"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "access-list ? should include '{}', got: {:?}",
+                expected,
+                names,
+            );
+        }
+
+        // Must NOT include the old catch-all <rest>
+        assert!(
+            !names.iter().any(|n| n == "<rest>"),
+            "access-list ? must not show '<rest>', got: {:?}",
+            names,
+        );
+    }
+
+    /// Verify that `access-list 1 ?` shows permit/deny/remark.
+    #[test]
+    fn test_access_list_number_help_shows_actions() {
+        use crate::cmd_tree::{help, HelpResult};
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let result = help("access-list 1 ", tree, &mode);
+        let names: Vec<String> = match result {
+            HelpResult::Subcommands(subs) => subs.into_iter().map(|(name, _)| name).collect(),
+            other => panic!("Expected Subcommands for 'access-list 1 ', got {:?}", other),
+        };
+
+        for &expected in &["deny", "permit", "remark"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "access-list 1 ? should include '{}', got: {:?}",
+                expected,
+                names,
+            );
+        }
+    }
+
+    /// Verify that `access-list 10 permit any` executes correctly.
+    #[test]
+    fn test_access_list_standard_permit_parses() {
+        use crate::cmd_tree::parse;
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let result = parse("access-list 10 permit any", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "access-list 10 permit any should parse as Execute",
+        );
+    }
+
+    /// Verify that `access-list 100 permit ip any any` executes correctly.
+    #[test]
+    fn test_access_list_extended_permit_parses() {
+        use crate::cmd_tree::parse;
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let result = parse("access-list 100 permit ip any any", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "access-list 100 permit ip any any should parse as Execute",
+        );
+    }
+
+    // --- speed / duplex handler tests ---
+
+    /// Helper: set up a device in config-if mode on GigabitEthernet1/0/1.
+    fn make_device_on_gi1() -> MockIosDevice {
+        let mut d = make_device();
+        handle_interface(&mut d, "interface GigabitEthernet1/0/1");
+        d
+    }
+
+    #[test]
+    fn test_speed_100_sets_interface_speed() {
+        let mut d = make_device_on_gi1();
+        handle_speed(&mut d, "speed 100");
+        let iface = d.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        assert_eq!(iface.speed, "100", "speed should be 100 after speed 100");
+    }
+
+    #[test]
+    fn test_speed_1000_sets_interface_speed() {
+        let mut d = make_device_on_gi1();
+        handle_speed(&mut d, "speed 1000");
+        let iface = d.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        assert_eq!(iface.speed, "1000");
+    }
+
+    #[test]
+    fn test_duplex_full_sets_interface_duplex() {
+        let mut d = make_device_on_gi1();
+        handle_duplex(&mut d, "duplex full");
+        let iface = d.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        assert_eq!(iface.duplex, "full", "duplex should be full after duplex full");
+    }
+
+    #[test]
+    fn test_duplex_half_sets_interface_duplex() {
+        let mut d = make_device_on_gi1();
+        handle_duplex(&mut d, "duplex half");
+        let iface = d.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        assert_eq!(iface.duplex, "half");
+    }
+
+    #[test]
+    fn test_no_speed_resets_to_auto() {
+        let mut d = make_device_on_gi1();
+        handle_speed(&mut d, "speed 100");
+        handle_speed(&mut d, "no speed");
+        let iface = d.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        assert_eq!(iface.speed, "auto", "no speed should reset to auto");
+    }
+
+    #[test]
+    fn test_no_duplex_resets_to_auto() {
+        let mut d = make_device_on_gi1();
+        handle_duplex(&mut d, "duplex full");
+        handle_duplex(&mut d, "no duplex");
+        let iface = d.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        assert_eq!(iface.duplex, "auto", "no duplex should reset to auto");
+    }
+
+    #[test]
+    fn test_speed_values_appear_in_show_interfaces() {
+        let mut d = make_device_on_gi1();
+        handle_speed(&mut d, "speed 100");
+        handle_duplex(&mut d, "duplex full");
+        let iface = d.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        let output = iface.generate_show_interface();
+        assert!(output.contains("100Mb/s"), "show interfaces should show 100Mb/s, got: {}", output);
+        assert!(output.contains("Full-duplex"), "show interfaces should show Full-duplex, got: {}", output);
+    }
+
+    #[test]
+    fn test_auto_speed_duplex_appear_in_show_interfaces() {
+        let mut d = make_device_on_gi1();
+        handle_speed(&mut d, "no speed");
+        handle_duplex(&mut d, "no duplex");
+        let iface = d.state.get_interface("GigabitEthernet1/0/1").unwrap();
+        let output = iface.generate_show_interface();
+        assert!(output.contains("Auto-speed"), "show interfaces should show Auto-speed, got: {}", output);
+        assert!(output.contains("Auto-duplex"), "show interfaces should show Auto-duplex, got: {}", output);
+    }
+
+    #[test]
+    fn test_speed_tree_parses_in_config_if() {
+        let tree = config_if_tree();
+        let mode = CliMode::ConfigSub("config-if".to_string());
+        for cmd in &["speed 10", "speed 100", "speed 1000", "speed auto"] {
+            let result = parse(cmd, tree, &mode);
+            assert!(
+                matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+                "{} should parse as Execute in config-if", cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_duplex_tree_parses_in_config_if() {
+        let tree = config_if_tree();
+        let mode = CliMode::ConfigSub("config-if".to_string());
+        for cmd in &["duplex auto", "duplex full", "duplex half"] {
+            let result = parse(cmd, tree, &mode);
+            assert!(
+                matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+                "{} should parse as Execute in config-if", cmd
+            );
+        }
+    }
+
+    // ─── Named ACL tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ip_access_list_extended_parses() {
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+        let result = parse("ip access-list extended MY_ACL", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "ip access-list extended MY_ACL should parse as Execute"
+        );
+    }
+
+    #[test]
+    fn test_ip_access_list_standard_parses() {
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+        let result = parse("ip access-list standard MY_STD_ACL", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "ip access-list standard MY_STD_ACL should parse as Execute"
+        );
+    }
+
+    #[test]
+    fn test_ip_access_list_extended_enters_ext_nacl_mode() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list extended MY_ACL");
+        assert!(
+            matches!(&device.mode, CliMode::ConfigSub(s) if s == "config-ext-nacl"),
+            "Should enter config-ext-nacl mode, got {:?}", device.mode
+        );
+        assert_eq!(device.current_acl_name, Some("MY_ACL".to_string()));
+    }
+
+    #[test]
+    fn test_ip_access_list_standard_enters_std_nacl_mode() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list standard MY_STD");
+        assert!(
+            matches!(&device.mode, CliMode::ConfigSub(s) if s == "config-std-nacl"),
+            "Should enter config-std-nacl mode, got {:?}", device.mode
+        );
+        assert_eq!(device.current_acl_name, Some("MY_STD".to_string()));
+    }
+
+    #[test]
+    fn test_ip_access_list_creates_acl_in_state() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list extended MY_ACL");
+        assert!(
+            device.state.access_lists.iter().any(|a| a.name == "MY_ACL" && a.acl_type == "Extended"),
+            "ACL MY_ACL should be created in state"
+        );
+    }
+
+    #[test]
+    fn test_nacl_permit_entry_added() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list extended MY_ACL");
+        handle_nacl_entry(&mut device, "permit ip any any");
+        let acl = device.state.access_lists.iter().find(|a| a.name == "MY_ACL").expect("ACL not found");
+        assert_eq!(acl.entries.len(), 1);
+        assert_eq!(acl.entries[0].action, "permit");
+        assert_eq!(acl.entries[0].protocol, "ip");
+        assert_eq!(acl.entries[0].source, "any");
+        assert_eq!(acl.entries[0].destination, "any");
+    }
+
+    #[test]
+    fn test_nacl_deny_entry_added() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list extended MY_ACL");
+        handle_nacl_entry(&mut device, "deny tcp host 1.2.3.4 any");
+        let acl = device.state.access_lists.iter().find(|a| a.name == "MY_ACL").expect("ACL not found");
+        assert_eq!(acl.entries.len(), 1);
+        assert_eq!(acl.entries[0].action, "deny");
+        assert_eq!(acl.entries[0].protocol, "tcp");
+        assert_eq!(acl.entries[0].source, "host");
+        assert_eq!(acl.entries[0].destination, "1.2.3.4");
+    }
+
+    #[test]
+    fn test_nacl_remark_entry_added() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list extended MY_ACL");
+        handle_nacl_entry(&mut device, "remark This is a test");
+        let acl = device.state.access_lists.iter().find(|a| a.name == "MY_ACL").expect("ACL not found");
+        assert_eq!(acl.entries.len(), 1);
+        assert_eq!(acl.entries[0].action, "remark");
+    }
+
+    #[test]
+    fn test_nacl_exit_returns_to_config() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list extended MY_ACL");
+        assert!(matches!(&device.mode, CliMode::ConfigSub(_)));
+        handle_config_exit(&mut device, "exit");
+        assert_eq!(device.mode, CliMode::Config);
+    }
+
+    #[test]
+    fn test_no_ip_access_list_removes_acl() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list extended MY_ACL");
+        handle_nacl_entry(&mut device, "permit ip any any");
+        handle_config_exit(&mut device, "exit");
+        assert!(device.state.access_lists.iter().any(|a| a.name == "MY_ACL"));
+        handle_no_ip_access_list(&mut device, "no ip access-list extended MY_ACL");
+        assert!(
+            !device.state.access_lists.iter().any(|a| a.name == "MY_ACL"),
+            "ACL should be removed after 'no ip access-list extended MY_ACL'"
+        );
+    }
+
+    #[test]
+    fn test_nacl_permit_parses_in_ext_nacl_mode() {
+        let tree = config_ext_nacl_tree();
+        let mode = CliMode::ConfigSub("config-ext-nacl".to_string());
+        let result = parse("permit ip any any", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "permit ip any any should parse in config-ext-nacl mode"
+        );
+    }
+
+    #[test]
+    fn test_nacl_deny_parses_in_ext_nacl_mode() {
+        let tree = config_ext_nacl_tree();
+        let mode = CliMode::ConfigSub("config-ext-nacl".to_string());
+        let result = parse("deny tcp host 1.2.3.4 any eq 80", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "deny should parse in config-ext-nacl mode"
+        );
+    }
+
+    #[test]
+    fn test_nacl_permit_parses_in_std_nacl_mode() {
+        let tree = config_std_nacl_tree();
+        let mode = CliMode::ConfigSub("config-std-nacl".to_string());
+        let result = parse("permit 10.0.0.0 0.0.0.255", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "permit should parse in config-std-nacl mode"
+        );
+    }
+
+    #[test]
+    fn test_named_acl_in_running_config() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_ip_access_list(&mut device, "ip access-list extended MY_ACL");
+        handle_nacl_entry(&mut device, "permit ip any any");
+        handle_config_exit(&mut device, "exit");
+        let rc = device.state.generate_running_config();
+        assert!(rc.contains("ip access-list extended MY_ACL"), "running-config should contain named ACL header");
+        assert!(rc.contains(" permit ip any any"), "running-config should contain permit entry");
+    }
+
 }

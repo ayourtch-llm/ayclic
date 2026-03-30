@@ -742,3 +742,59 @@ async fn test_show_lldp_neighbors_detail() {
         output
     );
 }
+
+#[tokio::test]
+async fn test_show_ip_dhcp_snooping() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show ip dhcp snooping\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("Switch DHCP snooping is enabled"),
+        "show ip dhcp snooping missing enabled line, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("DHCP snooping is configured on following VLANs:"),
+        "show ip dhcp snooping missing configured VLANs line, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("DHCP snooping is operational on following VLANs:"),
+        "show ip dhcp snooping missing operational VLANs line, got:\n{}",
+        output
+    );
+}
+
+#[tokio::test]
+async fn test_show_ip_dhcp_snooping_binding() {
+    use ayclic::raw_transport::RawTransport;
+
+    let mut device = mockios::MockIosDevice::new("Switch1");
+    let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+    device.send(b"show ip dhcp snooping binding\n").await.unwrap();
+    let data = device.receive(Duration::from_secs(1)).await.unwrap();
+    let output = String::from_utf8_lossy(&data);
+
+    assert!(
+        output.contains("MacAddress"),
+        "show ip dhcp snooping binding missing MacAddress header, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("IpAddress"),
+        "show ip dhcp snooping binding missing IpAddress header, got:\n{}",
+        output
+    );
+    assert!(
+        output.contains("Total number of bindings: 0"),
+        "show ip dhcp snooping binding missing total bindings line, got:\n{}",
+        output
+    );
+}

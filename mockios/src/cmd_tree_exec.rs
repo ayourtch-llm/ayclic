@@ -1262,7 +1262,11 @@ fn build_exec_tree() -> Vec<CommandNode> {
                                 keyword("pool", "DHCP pools information")
                                     .handler(handle_show_ip_dhcp_pool),
                                 keyword("snooping", "DHCP snooping information")
-                                    .handler(handle_show_ip_dhcp_snooping),
+                                    .handler(handle_show_ip_dhcp_snooping as CmdHandler)
+                                    .children(vec![
+                                        keyword("binding", "DHCP snooping binding table")
+                                            .handler(handle_show_ip_dhcp_snooping_binding),
+                                    ]),
                             ]),
                         keyword("eigrp", "Show IPv4 EIGRP")
                             .handler(handle_show_ip_eigrp),

@@ -2353,7 +2353,7 @@ impl RawTransport for MockIosDevice {
                                 out.push_str(&header);
                             }
                             for (name, desc) in subs {
-                                out.push_str(&format!("  {:<17}  {}\r\n", name, desc));
+                                out.push_str(&format!("  {:<15}  {}\r\n", name, desc));
                             }
                         }
                         HelpResult::PrefixMatches(names) => {

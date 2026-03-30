@@ -198,19 +198,45 @@ pub fn handle_show_boot(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_interfaces(d: &mut MockIosDevice, input: &str) {
-    // Extract optional interface name argument: "show interfaces [<name>]"
+    // Extract optional interface name argument: "show interfaces [<name>] [<subcommand>]"
     let tokens: Vec<&str> = input.split_whitespace().collect();
-    // tokens[0] = "show", tokens[1] = "interfaces", tokens[2..] = optional name
-    let iface_name: Option<String> = if tokens.len() > 2 {
-        // The rest of the line after "show interfaces " is the interface name.
-        // Handle abbreviated or full form — collect everything from index 2.
+    // tokens[0] = "show", tokens[1] = "interfaces", tokens[2..] = optional name and subcommand
+
+    // Known trailing subcommands that may follow an interface name
+    const TRAILING_KEYWORDS: &[&str] = &["switchport", "status", "trunk", "counters", "description"];
+
+    // Check if the last token is a known subcommand following an interface name
+    let (iface_name, trailing_keyword): (Option<String>, Option<&str>) = if tokens.len() > 3 {
+        let last = tokens[tokens.len() - 1];
+        if TRAILING_KEYWORDS.contains(&last) {
+            let raw = tokens[2..tokens.len() - 1].join(" ");
+            (Some(crate::cmd_tree_conf::normalize_interface_name(&raw)), Some(last))
+        } else {
+            let raw = tokens[2..].join(" ");
+            (Some(crate::cmd_tree_conf::normalize_interface_name(&raw)), None)
+        }
+    } else if tokens.len() > 2 {
         let raw = tokens[2..].join(" ");
-        Some(crate::cmd_tree_conf::normalize_interface_name(&raw))
+        (Some(crate::cmd_tree_conf::normalize_interface_name(&raw)), None)
     } else {
-        None
+        (None, None)
     };
 
     let p = d.prompt();
+
+    if let Some(keyword) = trailing_keyword {
+        // Delegate to specific subcommand handler for the named interface
+        let name = iface_name.as_deref().unwrap_or("");
+        let output_text = match keyword {
+            "switchport" => d.state.generate_show_interfaces_switchport_for(name),
+            _ => format!(
+                "% Invalid input detected at '^' marker.\n% Subcommand '{}' not supported per-interface\n",
+                keyword
+            ),
+        };
+        d.queue_output(&format!("{}{}", output_text, p));
+        return;
+    }
 
     match iface_name {
         Some(name) => {

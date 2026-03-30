@@ -6706,4 +6706,39 @@ mod ssh_tests {
         assert!(output.contains("%No SSHv1 server connections running."),
             "show ssh should report no SSHv1 connections, got: {:?}", output);
     }
+
+    // --- show interfaces <name> switchport tests ---
+
+    #[tokio::test]
+    async fn test_show_interfaces_specific_switchport_full_name() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show interfaces GigabitEthernet1/0/1 switchport").await;
+        // Should contain info for just GigabitEthernet1/0/1
+        assert!(output.contains("Name: Gi1/0/1"),
+            "show interfaces GigabitEthernet1/0/1 switchport should show Gi1/0/1 block, got: {:?}", output);
+        // Should NOT contain other interfaces
+        assert!(!output.contains("Name: Gi1/0/2"),
+            "show interfaces GigabitEthernet1/0/1 switchport should NOT show Gi1/0/2, got: {:?}", output);
+        assert!(output.contains("Switchport: Enabled"),
+            "should contain Switchport: Enabled, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_interfaces_specific_switchport_abbreviated_name() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show interfaces Gi1/0/1 switchport").await;
+        // Abbreviated form should work the same as full name
+        assert!(output.contains("Name: Gi1/0/1"),
+            "show interfaces Gi1/0/1 switchport should show Gi1/0/1 block, got: {:?}", output);
+        assert!(!output.contains("Name: Gi1/0/2"),
+            "show interfaces Gi1/0/1 switchport should NOT show Gi1/0/2, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_interfaces_specific_switchport_not_found() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show interfaces GigabitEthernet99/99 switchport").await;
+        assert!(output.contains("Invalid") || output.contains("not found") || output.contains("No"),
+            "show interfaces for nonexistent interface switchport should report error, got: {:?}", output);
+    }
 }

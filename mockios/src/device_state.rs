@@ -1537,6 +1537,106 @@ Appliance trust: none\n",
         output
     }
 
+    /// Generate `show interfaces <name> switchport` output for a single interface.
+    ///
+    /// Returns the switchport block for the named interface, or an error string if not found.
+    pub fn generate_show_interfaces_switchport_for(&self, name: &str) -> String {
+        // Try to find the interface by exact name; fall back to prefix match.
+        let iface = if let Some(i) = self.interfaces.iter().find(|i| i.name == name) {
+            i
+        } else {
+            let name_lower = name.to_lowercase();
+            if let Some(i) = self.interfaces.iter().find(|i| i.name.to_lowercase().starts_with(&name_lower)) {
+                i
+            } else {
+                return format!(
+                    "% Invalid input detected at '^' marker.\n% No interface {} found\n",
+                    name
+                );
+            }
+        };
+
+        // Only physical Ethernet interfaces support switchport.
+        if iface.name.starts_with("Vlan") || iface.name.starts_with("Loopback") {
+            return format!(
+                "% Invalid input detected at '^' marker.\n% Interface {} is not a switchport\n",
+                iface.name
+            );
+        }
+        if !iface.name.starts_with("GigabitEthernet")
+            && !iface.name.starts_with("TenGigabitEthernet")
+            && !iface.name.starts_with("FastEthernet")
+        {
+            return format!(
+                "% Invalid input detected at '^' marker.\n% Interface {} is not a switchport\n",
+                iface.name
+            );
+        }
+
+        let short = short_interface_name(&iface.name);
+        let is_trunk = iface.switchport_mode.as_deref() == Some("trunk");
+        let oper_mode = if is_trunk && iface.link_up { "trunk" } else { "down" };
+        let admin_mode = if is_trunk { "trunk" } else { "dynamic auto" };
+        let access_vlan = iface.vlan.unwrap_or(1);
+        let native_vlan = iface.vlan.unwrap_or(1);
+
+        let access_vlan_name: String = if access_vlan == 1 {
+            "default".to_string()
+        } else {
+            self.vlans.iter()
+                .find(|v| v.id == access_vlan)
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| format!("VLAN{:04}", access_vlan))
+        };
+
+        let native_vlan_name: String = if native_vlan == 1 {
+            "default".to_string()
+        } else {
+            self.vlans.iter()
+                .find(|v| v.id == native_vlan)
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| format!("VLAN{:04}", native_vlan))
+        };
+
+        format!(
+            "Name: {short}\n\
+Switchport: Enabled\n\
+Administrative Mode: {admin_mode}\n\
+Operational Mode: {oper_mode}\n\
+Administrative Trunking Encapsulation: dot1q\n\
+Negotiation of Trunking: On\n\
+Access Mode VLAN: {access_vlan} ({access_vlan_name})\n\
+Trunking Native Mode VLAN: {native_vlan} ({native_vlan_name})\n\
+Administrative Native VLAN tagging: disabled\n\
+Voice VLAN: none\n\
+Administrative private-vlan host-association: none\n\
+Administrative private-vlan mapping: none\n\
+Administrative private-vlan trunk native VLAN: none\n\
+Administrative private-vlan trunk Native VLAN tagging: enabled\n\
+Administrative private-vlan trunk encapsulation: dot1q\n\
+Administrative private-vlan trunk normal VLANs: none\n\
+Administrative private-vlan trunk associations: none\n\
+Administrative private-vlan trunk mappings: none\n\
+Operational private-vlan: none\n\
+Trunking VLANs Enabled: ALL\n\
+Pruning VLANs Enabled: 2-1001\n\
+Capture Mode Disabled\n\
+Capture VLANs Allowed: ALL\n\
+\n\
+Protected: false\n\
+Unknown unicast blocked: disabled\n\
+Unknown multicast blocked: disabled\n\
+Appliance trust: none\n",
+            short = short,
+            admin_mode = admin_mode,
+            oper_mode = oper_mode,
+            access_vlan = access_vlan,
+            access_vlan_name = access_vlan_name,
+            native_vlan = native_vlan,
+            native_vlan_name = native_vlan_name,
+        )
+    }
+
     /// Compress a list of VLAN ID strings into range notation (e.g., "1-15,100-101,127")
     fn compress_vlan_ranges(vlan_strs: &[String]) -> String {
         let mut ids: Vec<u16> = vlan_strs.iter()

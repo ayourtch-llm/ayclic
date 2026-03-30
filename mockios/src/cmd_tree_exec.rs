@@ -56,9 +56,10 @@ pub fn handle_show_running_config_interface(d: &mut MockIosDevice, input: &str) 
     if section_lines.is_empty() {
         d.queue_output(&format!("% Invalid input interface\n{}", p));
     } else {
-        let header = "Building configuration...\n\nCurrent configuration:\n!\n";
-        let footer = "\nend\n";
-        d.queue_output(&format!("{}{}{}{}", header, section_lines.join("\n"), footer, p));
+        let body = format!("!\n{}\nend", section_lines.join("\n"));
+        let byte_count = body.len();
+        let header = format!("Building configuration...\n\nCurrent configuration : {} bytes\n", byte_count);
+        d.queue_output(&format!("{}{}\n{}", header, body, p));
     }
 }
 
@@ -315,6 +316,17 @@ pub fn handle_show_interfaces_trunk(d: &mut MockIosDevice, _input: &str) {
 
 pub fn handle_show_interfaces_switchport(d: &mut MockIosDevice, _input: &str) {
     let output = d.state.generate_show_interfaces_switchport();
+    let p = d.prompt();
+    d.queue_output(&format!("{}{}", output, p));
+}
+
+pub fn handle_show_interfaces_name_switchport(d: &mut MockIosDevice, input: &str) {
+    // Extract interface name from "show interfaces <name> switchport"
+    // tokens[0] = "show", tokens[1] = "interfaces", tokens[2] = interface name
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    let raw_name = if tokens.len() > 2 { tokens[2] } else { "" };
+    let name = crate::cmd_tree_conf::normalize_interface_name(raw_name);
+    let output = d.state.generate_show_interfaces_switchport_for(&name);
     let p = d.prompt();
     d.queue_output(&format!("{}{}", output, p));
 }
@@ -1541,8 +1553,12 @@ fn build_exec_tree() -> Vec<CommandNode> {
                             .handler(handle_show_interfaces_switchport),
                         keyword("counters", "Show interface counters")
                             .handler(handle_show_interfaces_counters),
-                        param("<name>", ParamType::RestOfLine, "Interface name")
-                            .handler(handle_show_interfaces),
+                        param("<name>", ParamType::Word, "Interface name")
+                            .handler(handle_show_interfaces)
+                            .children(vec![
+                                keyword("switchport", "Show interface switchport information")
+                                    .handler(handle_show_interfaces_name_switchport),
+                            ]),
                     ]),
                 keyword("vlan", "VLAN information")
                     .handler(handle_show_vlan as CmdHandler)
@@ -2962,6 +2978,155 @@ mod tests {
         assert!(
             matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
             "show errdisable should parse as Execute"
+        );
+    }
+
+    // --- show running-config interface tests ---
+
+    /// `show running-config interface GigabitEthernet1/0/1` should parse as Execute.
+    #[test]
+    fn test_show_running_config_interface_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show running-config interface GigabitEthernet1/0/1", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "show running-config interface GigabitEthernet1/0/1 should parse as Execute"
+        );
+    }
+
+    /// `show run int Gi1/0/1` abbreviated form should parse as Execute.
+    #[test]
+    fn test_show_running_config_interface_abbreviated_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show run int Gi1/0/1", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "show run int Gi1/0/1 should parse as Execute"
+        );
+    }
+
+    /// Output for existing interface should contain "Building configuration..." header.
+    #[test]
+    fn test_show_running_config_interface_header() {
+        let mut device = MockIosDevice::new("Switch1");
+        handle_show_running_config_interface(
+            &mut device,
+            "show running-config interface GigabitEthernet1/0/1",
+        );
+        let output = device.drain_output();
+        assert!(
+            output.contains("Building configuration..."),
+            "output should contain 'Building configuration...', got: {:?}",
+            output
+        );
+    }
+
+    /// Output for existing interface should include byte count in header.
+    #[test]
+    fn test_show_running_config_interface_byte_count() {
+        let mut device = MockIosDevice::new("Switch1");
+        handle_show_running_config_interface(
+            &mut device,
+            "show running-config interface GigabitEthernet1/0/1",
+        );
+        let output = device.drain_output();
+        assert!(
+            output.contains("Current configuration :") && output.contains("bytes"),
+            "output should contain 'Current configuration : N bytes', got: {:?}",
+            output
+        );
+    }
+
+    /// Output for existing interface should show only that interface's block.
+    #[test]
+    fn test_show_running_config_interface_correct_interface() {
+        let mut device = MockIosDevice::new("Switch1");
+        handle_show_running_config_interface(
+            &mut device,
+            "show running-config interface GigabitEthernet1/0/1",
+        );
+        let output = device.drain_output();
+        assert!(
+            output.contains("interface GigabitEthernet1/0/1"),
+            "output should contain 'interface GigabitEthernet1/0/1', got: {:?}",
+            output
+        );
+        // Should NOT contain other interfaces
+        assert!(
+            !output.contains("interface GigabitEthernet1/0/2"),
+            "output should NOT contain other interfaces, got: {:?}",
+            output
+        );
+    }
+
+    /// Output for existing interface should end with '!' and 'end'.
+    #[test]
+    fn test_show_running_config_interface_footer() {
+        let mut device = MockIosDevice::new("Switch1");
+        handle_show_running_config_interface(
+            &mut device,
+            "show running-config interface GigabitEthernet1/0/1",
+        );
+        let output = device.drain_output();
+        // Must contain "end" in the output
+        assert!(
+            output.contains("\nend\n") || output.contains("\nend\r"),
+            "output should contain 'end', got: {:?}",
+            output
+        );
+    }
+
+    /// Using abbreviated name `Gi1/0/1` should return the same interface block as the full name.
+    #[test]
+    fn test_show_running_config_interface_abbreviated_name() {
+        let mut device1 = MockIosDevice::new("Switch1");
+        let mut device2 = MockIosDevice::new("Switch1");
+        handle_show_running_config_interface(
+            &mut device1,
+            "show running-config interface GigabitEthernet1/0/1",
+        );
+        handle_show_running_config_interface(
+            &mut device2,
+            "show running-config interface Gi1/0/1",
+        );
+        let out_full = device1.drain_output();
+        let out_abbrev = device2.drain_output();
+        // Both should show the same interface
+        assert!(
+            out_abbrev.contains("interface GigabitEthernet1/0/1"),
+            "abbreviated name should resolve to full interface name, got: {:?}",
+            out_abbrev
+        );
+        // Byte count may differ due to prompt length variance; compare interface block presence
+        assert!(
+            out_full.contains("interface GigabitEthernet1/0/1")
+                && out_abbrev.contains("interface GigabitEthernet1/0/1"),
+            "Both forms should show the same interface block"
+        );
+    }
+
+    /// Non-existent interface should return an error message.
+    #[test]
+    fn test_show_running_config_interface_not_found() {
+        let mut device = MockIosDevice::new("Switch1");
+        handle_show_running_config_interface(
+            &mut device,
+            "show running-config interface GigabitEthernet99/99",
+        );
+        let output = device.drain_output();
+        // Should not show a config block
+        assert!(
+            !output.contains("interface GigabitEthernet99/99"),
+            "non-existent interface should not appear as a config block, got: {:?}",
+            output
+        );
+        // Should produce some kind of error or empty indicator
+        assert!(
+            output.contains("%") || output.contains("Invalid") || output.contains("not found"),
+            "should indicate error for missing interface, got: {:?}",
+            output
         );
     }
 }

@@ -35,12 +35,14 @@ You are continuing an autonomous improvement cycle to make the `mockios` crate (
 - **`no` at dispatch level**: The `no` prefix is handled in `dispatch_config()` via `parse_for_no()`, NOT by cloning the command tree. Don't add `no` nodes to the tree.
 - **`short_interface_name()`** always abbreviates (Gi1/0/1), **`abbreviate_interface_name()`** only abbreviates if > 23 chars
 - **`wrap_comma_list()`** for port list wrapping with configurable width
-- **Pipe filtering**: Already implemented in lib.rs (`PipeFilter` enum, `apply_pipe_filter`)
+- **Pipe filtering**: Implemented in lib.rs (`PipeFilter` enum, `apply_pipe_filter`) using `regex` crate — supports OR patterns, case-sensitive matching
+- **`local_echo` flag**: MockIosDevice echoes characters by default (for telnet/SSH). Interactive stdin mode uses `.with_local_echo(false)` to avoid double-echo with the terminal pty.
+- **Rust `\` line continuation eats leading whitespace**: When building format strings with indentation, put the indent spaces BEFORE the `\` (e.g., `\n  \` then `Hardware is...`), not after it (e.g., `\n\  Hardware` would lose the spaces).
+- **Flash filesystem**: Per-device `FlashFile` entries on `DeviceState`, populated from model+version. IOS image filename derived via `version_to_dotted()` + `ios_image_filename()`.
 
 ## Current state (session ended with)
 
-- **56 commits, 517 mockios tests, 768 total workspace tests, all passing**
-- Previous session ended at 499/750, this session added +18/+18 tests and 5 commits
+- **57 commits, 517 mockios tests, 768 total workspace tests, all passing**
 - 8 reference docs in `docs/cisco-docs/` (exec commands, show commands, config commands, CLI behavior, running-config format, interfaces, routes, interface types)
 - Gap analysis in `docs/cisco-docs/gap-analysis.md` and show-run diff in `docs/cisco-docs/show-run-diff-analysis.md`
 - Convergence plan in `docs/plans/mockios-convergence-plan.md`
@@ -61,7 +63,7 @@ You are continuing an autonomous improvement cycle to make the `mockios` crate (
 - `<cr>` glitch fixed via no_handler
 
 ### Phase 2 — Command completeness (MOSTLY COMPLETE)
-- 21 exec command stubs, 13+ show ip subcommands, 13+ config mode commands
+- 21 exec command stubs, 13+ show ip subcommands, 38 config mode commands
 - show interfaces (detail/status/trunk/description/switchport/counters)
 - show vlan / show vlan id, show ip arp/interface/route filtering
 - show cdp/lldp (neighbors/detail), show spanning-tree (vlan/summary)
@@ -79,31 +81,61 @@ You are continuing an autonomous improvement cycle to make the `mockios` crate (
 - ip forward-protocol nd
 - Dynamic byte count
 
-### Phase 4 — Behavioral fidelity (MOSTLY COMPLETE)
-- Pipe filtering (include/exclude/begin/section/count) — now uses regex (OR patterns work)
+### Phase 4 — Behavioral fidelity (COMPLETE)
+- Pipe filtering (include/exclude/begin/section/count) using regex crate
 - Pipe filters are case-sensitive (matching real IOS behavior)
+- Regex OR patterns work (e.g., `| include uptime|Version`)
 - `do` command in config mode
-- show interfaces detail with proper counters/DLY/hardware types and 2-space/5-space indentation
+- show interfaces detail with proper 2-space/5-space indentation
 - "30 second" input/output rate labels (matching real IOS)
 - Dynamic uptime in show version
 - `no` handled at dispatch level (no tree cloning)
 - No double-echo in interactive (stdin) mode via `local_echo` flag
+- Tab completion works correctly (verified side-by-side with real IOS)
+- Blank line before headers in show interfaces status, show vlan brief, show flash:
 
-### Phase 5 — Realism improvements (NEW)
+### Phase 5 — Realism improvements (COMPLETE)
 - 38 config mode commands (was 25) — added aaa, arp, class-map, clock, default, dot1x, lldp, monitor, policy-map, port-channel, power, privilege, tacacs-server
 - Per-device flash filesystem model (FlashFile struct, IOS image filename derived from model+version)
-- Blank line before headers in show interfaces status, show vlan brief, show flash:
+- show flash: shows realistic files (IOS image, vlan.dat, config.text, private-config.text) with correct sizes and dates
+- S* default route alignment at column 6, sub-routes at column 9
+
+## Commands verified pixel-identical with real IOS
+
+These commands have been compared side-by-side with the real device at 192.168.0.112 and produce matching output format:
+- `show version` (tab completion also verified: `sh[TAB]ver[TAB]`)
+- `show ip interface brief` (column alignment matches)
+- `show interfaces GigabitEthernet1/0/1` (2-space/5-space indentation, "30 second" rate)
+- `show interfaces status` (blank line before header)
+- `show vlan brief` (blank line before header, port wrapping)
+- `show ip route` (S* at column 6, sub-routes at column 9, supernet grouping)
+- `show ip arp` (column alignment)
+- `show ntp status` (format matches)
+- `show privilege` (identical output)
+- `show processes cpu` (format matches)
+- `show cdp neighbors` (format matches, empty neighbor table)
+- `show mac address-table` (format matches)
+- `show running-config | section line` (section filtering correct)
+- `show running-config | include hostname` (include filtering correct)
+- `show version | include uptime|Version` (regex OR works)
+- `show flash:` (realistic files, dates, sizes)
+- `show logging` (format matches)
+- `configure terminal` → `?` (38 commands shown)
+- `interface gi1/0/1` → `?` (30 interface config commands)
+- `show environment` (mockios has it but real WS-C3560CX doesn't — minor)
 
 ## What still needs work
 
 ### High priority
-- **More config mode commands**: The `show running-config` still has many sections simpler than real IOS (interface-level: switchport nonegotiate, load-interval, udld, spanning-tree portfast; also logging, snmp-server, ntp, event-manager)
+- **More running-config sections**: Many sections still simpler than real IOS (interface-level: switchport nonegotiate, load-interval, udld, spanning-tree portfast; global: logging, snmp-server, ntp, event-manager)
+- **show flash: column alignment**: Size field should be right-aligned in 8-char field to match real IOS exactly (currently slightly different alignment)
 
 ### Medium priority
-- **--More-- paging**: `terminal length` should trigger paging
+- **--More-- paging**: `terminal length` should trigger paging (currently all output is sent at once)
 - **Config persistence**: `write memory` / `copy run start` should update startup-config
-- **show flash: column alignment**: Size field should be right-aligned in 8-char field to match real IOS exactly
-- **show spanning-tree summary**: Missing VLAN table, missing "PVST Simulation Default" and "Bridge Assurance" lines, column alignment differs
+- **show spanning-tree summary**: Missing VLAN table at the bottom, missing "PVST Simulation Default" and "Bridge Assurance" lines, column alignment differs from real IOS
+- **Error handling**: Unknown exec commands should attempt DNS resolution (like real IOS with `ip domain-lookup`) instead of showing `^` marker
+- **show version**: "Virtual Ethernet interfaces" count should match VLAN count (currently always 1, real device shows 3)
 
 ### Lower priority
 - **ACL configuration**: Support `ip access-list extended` in config mode
@@ -122,10 +154,13 @@ show version
 show running-config
 show ip interface brief
 show interfaces status
+show interfaces GigabitEthernet1/0/1
 show vlan brief
 show ip route
+show flash:
 show ?
 configure terminal → ?
+show version | include uptime|Version
 ```
 
 Focus on making these outputs pixel-identical to real IOS.

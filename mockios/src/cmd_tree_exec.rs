@@ -1165,7 +1165,9 @@ pub fn handle_show_standby(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_storm_control(d: &mut MockIosDevice, _input: &str) {
-    show_stub(d, "");
+    let output = d.state.generate_show_storm_control();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_switch(d: &mut MockIosDevice, _input: &str) {
@@ -1176,10 +1178,15 @@ pub fn handle_show_switch(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_vtp(d: &mut MockIosDevice, _input: &str) {
-    show_stub(
-        d,
-        "VTP Version capable             : 1 to 3\nVTP version running             : 1\nVTP Domain Name                 :\nVTP Pruning Mode                : Disabled\nVTP Traps Generation            : Disabled\nDevice ID                       : 00a3.d14f.2280",
-    );
+    let output = d.state.generate_show_vtp_status();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
+pub fn handle_show_vtp_status(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_vtp_status();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 // ─── New stub handlers ────────────────────────────────────────────────────────
@@ -1611,7 +1618,11 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("switch", "Stack ring information")
                     .handler(handle_show_switch),
                 keyword("vtp", "VTP information")
-                    .handler(handle_show_vtp),
+                    .handler(handle_show_vtp)
+                    .children(vec![
+                        keyword("status", "VTP status")
+                            .handler(handle_show_vtp_status),
+                    ]),
             ]),
 
         // cd [priv only]

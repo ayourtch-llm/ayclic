@@ -1078,6 +1078,42 @@ impl DeviceState {
         }
     }
 
+    /// Generate `show vtp status` output matching real IOS format.
+    pub fn generate_show_vtp_status(&self) -> String {
+        let device_id = mac_to_cisco_format(&self.base_mac);
+        let domain = if self.vtp_domain.is_empty() {
+            String::new()
+        } else {
+            self.vtp_domain.clone()
+        };
+        let vtp_mode = {
+            let mut s = self.vtp_mode.clone();
+            if let Some(c) = s.get_mut(0..1) {
+                c.make_ascii_uppercase();
+            }
+            s
+        };
+        let n_vlans = self.vlans.iter().filter(|v| v.active).count();
+        format!(
+"VTP Version capable             : 1 to 3
+VTP version running             : 1
+VTP Domain Name                 : {domain}
+VTP Pruning Mode                : Disabled
+VTP Traps Generation            : Disabled
+Device ID                       : {device_id}
+Configuration last modified by 0.0.0.0 at 0-0-00 00:00:00
+
+Feature VLAN:
+-----------
+VTP Operating Mode                : {vtp_mode}
+Maximum VLANs supported locally   : 1005
+Number of existing VLANs          : {n_vlans}
+Configuration Revision            : 0
+MD5 digest                        : 0x29 0xC9 0x2A 0x5B 0x43 0xE3 0xB7 0x78
+                                    0xE5 0xCA 0x82 0x47 0xCE 0x53 0x57 0x14"
+        )
+    }
+
     /// Generate `show spanning-tree` output matching real IOS format.
     pub fn generate_show_spanning_tree(&self) -> String {
         let protocol = match self.spanning_tree_mode.as_str() {
@@ -1551,6 +1587,41 @@ Appliance trust: none\n",
                 iface.output_packets,
                 0u64,
                 0u64,
+            ));
+        }
+
+        lines.join("\n")
+    }
+
+    /// Generate `show storm-control` output matching real IOS 15.2 on a C3560CX.
+    ///
+    /// Format (physical Ethernet interfaces only, no Vlan/Loopback):
+    /// ```text
+    /// Interface  Filter State   Upper        Lower        Current
+    /// ---------  -------------  -----------  -----------  ----------
+    /// Gi1/0/1    Forwarding     100.00%      100.00%      0.00%
+    /// ```
+    pub fn generate_show_storm_control(&self) -> String {
+        let header = "Interface  Filter State   Upper        Lower        Current   ";
+        let sep    = "---------  -------------  -----------  -----------  ----------";
+        let mut lines = vec![header.to_string(), sep.to_string()];
+
+        for iface in &self.interfaces {
+            // Only physical Ethernet interfaces (Gi / Te / Fa) — skip Vlan, Loopback, etc.
+            if !iface.name.starts_with("GigabitEthernet")
+                && !iface.name.starts_with("TenGigabitEthernet")
+                && !iface.name.starts_with("FastEthernet")
+            {
+                continue;
+            }
+            let port = short_interface_name(&iface.name);
+            lines.push(format!(
+                "{:<10} {:<14} {:<12} {:<12} {:<10}",
+                port,
+                "Forwarding",
+                "100.00%",
+                "100.00%",
+                "0.00%",
             ));
         }
 
@@ -3490,5 +3561,50 @@ mod tests {
         let output = state.generate_show_spanning_tree_summary();
         assert!(output.contains("Switch is in pvst mode"),
             "Should reflect pvst mode, got: {:?}", output);
+    }
+
+    #[test]
+    fn test_generate_show_vtp_status_defaults() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_vtp_status();
+        // Header fields
+        assert!(output.contains("VTP Version capable             : 1 to 3"),
+            "Should show VTP version capable: {:?}", output);
+        assert!(output.contains("VTP version running             : 1"),
+            "Should show VTP version running: {:?}", output);
+        // Domain is empty by default — line ends with ": "
+        assert!(output.contains("VTP Domain Name                 : \n") || output.contains("VTP Domain Name                 : \r"),
+            "Should show empty domain name: {:?}", output);
+        assert!(output.contains("VTP Pruning Mode                : Disabled"),
+            "Should show pruning disabled: {:?}", output);
+        assert!(output.contains("VTP Traps Generation            : Disabled"),
+            "Should show traps disabled: {:?}", output);
+        // Device ID from default base_mac 00:A3:D1:4F:22:80 -> 00a3.d14f.2280
+        assert!(output.contains("Device ID                       : 00a3.d14f.2280"),
+            "Should show Cisco-format MAC: {:?}", output);
+        // Feature VLAN section
+        assert!(output.contains("VTP Operating Mode                : Transparent"),
+            "Should show Transparent mode (title-cased): {:?}", output);
+        assert!(output.contains("Maximum VLANs supported locally   : 1005"),
+            "Should show max VLANs: {:?}", output);
+        // Default state has 5 active VLANs (1, 1002, 1003, 1004, 1005)
+        assert!(output.contains("Number of existing VLANs          : 5"),
+            "Should show 5 active VLANs: {:?}", output);
+        assert!(output.contains("Configuration Revision            : 0"),
+            "Should show revision 0: {:?}", output);
+        assert!(output.contains("MD5 digest"),
+            "Should show MD5 digest: {:?}", output);
+    }
+
+    #[test]
+    fn test_generate_show_vtp_status_custom_domain_and_mode() {
+        let mut state = DeviceState::new("Switch1");
+        state.vtp_domain = "CORP".to_string();
+        state.vtp_mode = "server".to_string();
+        let output = state.generate_show_vtp_status();
+        assert!(output.contains("VTP Domain Name                 : CORP"),
+            "Should show custom domain: {:?}", output);
+        assert!(output.contains("VTP Operating Mode                : Server"),
+            "Should show Server mode title-cased: {:?}", output);
     }
 }

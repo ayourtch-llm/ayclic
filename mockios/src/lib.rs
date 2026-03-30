@@ -6169,4 +6169,98 @@ mod tests {
         assert!(output.contains("static"), "summary should list static row: {:?}", output);
         assert!(output.contains("Total"), "summary should have Total line: {:?}", output);
     }
+
+    // --- show storm-control ---
+
+    #[tokio::test]
+    async fn test_show_storm_control_parses() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show storm-control").await;
+        assert!(!output.contains("Unknown command"),
+            "show storm-control should parse: {:?}", output);
+        assert!(!output.contains("Invalid"),
+            "show storm-control should parse without Invalid: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_storm_control_has_header() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show storm-control").await;
+        assert!(output.contains("Interface"),
+            "show storm-control should contain header 'Interface': {:?}", output);
+        assert!(output.contains("Filter State"),
+            "show storm-control should contain header 'Filter State': {:?}", output);
+        assert!(output.contains("Upper"),
+            "show storm-control should contain header 'Upper': {:?}", output);
+        assert!(output.contains("Lower"),
+            "show storm-control should contain header 'Lower': {:?}", output);
+        assert!(output.contains("Current"),
+            "show storm-control should contain header 'Current': {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_storm_control_lists_gi_interfaces() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show storm-control").await;
+        // Default device has Gi1/0/1 through Gi1/0/16 and Te1/0/1, Te1/0/2
+        assert!(output.contains("Gi1/0/1"),
+            "show storm-control should list Gi1/0/1: {:?}", output);
+        assert!(output.contains("Gi1/0/12"),
+            "show storm-control should list Gi1/0/12: {:?}", output);
+        assert!(output.contains("Te1/0/1"),
+            "show storm-control should list Te1/0/1: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_storm_control_forwarding_state() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show storm-control").await;
+        assert!(output.contains("Forwarding"),
+            "show storm-control should show Forwarding state: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_storm_control_default_levels() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show storm-control").await;
+        assert!(output.contains("100.00%"),
+            "show storm-control should show 100.00% upper/lower by default: {:?}", output);
+        assert!(output.contains("0.00%"),
+            "show storm-control should show 0.00% current by default: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_storm_control_no_vlan_interfaces() {
+        let mut device = setup_device("Switch1").await;
+        let output = send_cmd(&mut device, "show storm-control").await;
+        // Vlan interfaces should NOT appear in storm-control output
+        assert!(!output.contains("Vl1"),
+            "show storm-control should not list Vlan interfaces: {:?}", output);
+        assert!(!output.contains("Vlan1"),
+            "show storm-control should not list Vlan interfaces: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_storm_control_unit_test() {
+        // Unit test against DeviceState directly (no async overhead)
+        use crate::device_state::DeviceState;
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_storm_control();
+        // Should have header + separator + 18 interface lines (16 Gi + 2 Te)
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines.len() >= 20, "Expected header + sep + 18 iface lines, got {} lines", lines.len());
+        // First line is the header
+        assert!(lines[0].contains("Interface") && lines[0].contains("Filter State"),
+            "First line should be header: {:?}", lines[0]);
+        // Second line is the separator
+        assert!(lines[1].starts_with('-'),
+            "Second line should be separator: {:?}", lines[1]);
+        // All data rows should have Forwarding / 100.00% / 0.00%
+        for line in &lines[2..] {
+            if line.is_empty() { continue; }
+            assert!(line.contains("Forwarding"), "Row should say Forwarding: {:?}", line);
+            assert!(line.contains("100.00%"), "Row should say 100.00%: {:?}", line);
+            assert!(line.contains("0.00%"), "Row should say 0.00%: {:?}", line);
+        }
+    }
 }

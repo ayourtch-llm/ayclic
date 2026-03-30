@@ -487,6 +487,119 @@ pub fn handle_rest_of_line(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("{}", p));
 }
 
+// ─── Stub handlers for new global config commands ────────────────────────────
+
+pub fn handle_banner_login(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_banner_exec(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_boot_system(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_cdp_run(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_crypto(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_do_stub(d: &mut MockIosDevice, input: &str) {
+    // "do" is handled as a special prefix in dispatch_config;
+    // this handler is only reached if the keyword is parsed from the tree
+    // (e.g. during tab-completion or help).
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_errdisable(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_event(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_logging_host(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_logging_trap(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_logging_buffered(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_mac(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_ntp_server(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_service_timestamps(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_service_password_encryption(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_service_pad(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_snmp_server(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_username(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
 pub fn handle_banner_motd(d: &mut MockIosDevice, input: &str) {
     if input.trim().starts_with("no") {
         d.state.banner_motd = String::new();
@@ -960,18 +1073,42 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     ]),
             ]),
 
-        // service <rest>
+        // service timestamps/password-encryption/pad
         keyword("service", "Modify use of network based services")
             .mode(config_only())
             .children(vec![
+                keyword("timestamps", "Timestamp debug/log messages")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "Timestamps options")
+                            .handler(handle_service_timestamps),
+                    ]),
+                keyword("password-encryption", "Encrypt system passwords")
+                    .handler(handle_service_password_encryption as CmdHandler),
+                keyword("pad", "PAD commands")
+                    .handler(handle_service_pad as CmdHandler),
                 param("<rest>", ParamType::RestOfLine, "Service parameters")
                     .handler(handle_rest_of_line),
             ]),
 
-        // logging <rest>
+        // logging host/trap/buffered
         keyword("logging", "Modify message logging facilities")
             .mode(config_only())
             .children(vec![
+                keyword("host", "Set syslog server address and parameters")
+                    .children(vec![
+                        param("<hostname-or-ip>", ParamType::Word, "IP address or hostname of the syslog server")
+                            .handler(handle_logging_host),
+                    ]),
+                keyword("trap", "Set syslog server logging level")
+                    .children(vec![
+                        param("<level>", ParamType::Word, "Logging severity level")
+                            .handler(handle_logging_trap),
+                    ]),
+                keyword("buffered", "Set buffered logging parameters")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "Buffered logging parameters")
+                            .handler(handle_logging_buffered),
+                    ]),
                 param("<rest>", ParamType::RestOfLine, "Logging parameters")
                     .handler(handle_rest_of_line),
             ]),
@@ -981,7 +1118,7 @@ fn build_conf_tree() -> Vec<CommandNode> {
             .mode(config_only())
             .children(vec![
                 param("<rest>", ParamType::RestOfLine, "Username parameters")
-                    .handler(handle_rest_of_line),
+                    .handler(handle_username),
             ]),
 
         // shutdown  [config-if only]
@@ -1034,7 +1171,85 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     .handler(handle_vlan),
             ]),
 
-        // banner motd <delim><text><delim>
+        // boot system <rest>
+        keyword("boot", "Modify system boot parameters")
+            .mode(config_only())
+            .children(vec![
+                keyword("system", "Set system image")
+                    .children(vec![
+                        param("<rest>", ParamType::RestOfLine, "Boot image parameters")
+                            .handler(handle_boot_system),
+                    ]),
+            ]),
+
+        // cdp run
+        keyword("cdp", "Global CDP configuration subcommands")
+            .mode(config_only())
+            .children(vec![
+                keyword("run", "Enable CDP")
+                    .handler(handle_cdp_run as CmdHandler),
+            ]),
+
+        // crypto <rest>
+        keyword("crypto", "Encryption module")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Crypto parameters")
+                    .handler(handle_crypto),
+            ]),
+
+        // do <exec-cmd>  — runs exec command from config mode
+        keyword("do", "To run exec commands in config mode")
+            .mode(config_only())
+            .children(vec![
+                param("<exec-cmd>", ParamType::RestOfLine, "Exec command to run")
+                    .handler(handle_do_stub),
+            ]),
+
+        // errdisable <rest>
+        keyword("errdisable", "Error disable")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Errdisable parameters")
+                    .handler(handle_errdisable),
+            ]),
+
+        // event <rest>
+        keyword("event", "Embedded event related commands")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Event parameters")
+                    .handler(handle_event),
+            ]),
+
+        // mac <rest>
+        keyword("mac", "Global MAC configuration subcommands")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "MAC parameters")
+                    .handler(handle_mac),
+            ]),
+
+        // ntp server <address>
+        keyword("ntp", "Configure NTP")
+            .mode(config_only())
+            .children(vec![
+                keyword("server", "Configure NTP server")
+                    .children(vec![
+                        param("<address>", ParamType::Word, "IP address of NTP server")
+                            .handler(handle_ntp_server),
+                    ]),
+            ]),
+
+        // snmp-server <rest>
+        keyword("snmp-server", "Modify SNMP engine parameters")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "SNMP server parameters")
+                    .handler(handle_snmp_server),
+            ]),
+
+        // banner motd/login/exec
         keyword("banner", "Define a login banner")
             .mode(config_only())
             .children(vec![
@@ -1042,6 +1257,16 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     .children(vec![
                         param("<text>", ParamType::RestOfLine, "Banner text (delimiter char + text + delimiter)")
                             .handler(handle_banner_motd),
+                    ]),
+                keyword("login", "Set Login banner")
+                    .children(vec![
+                        param("<text>", ParamType::RestOfLine, "Banner text")
+                            .handler(handle_banner_login),
+                    ]),
+                keyword("exec", "Set EXEC process creation banner")
+                    .children(vec![
+                        param("<text>", ParamType::RestOfLine, "Banner text")
+                            .handler(handle_banner_exec),
                     ]),
             ]),
     ];
@@ -1744,5 +1969,150 @@ mod tests {
     fn test_normalize_case_insensitive() {
         assert_eq!(normalize_interface_name("GIGABITETHERNET1/0/1"), "GigabitEthernet1/0/1");
         assert_eq!(normalize_interface_name("Gi1/0/1"), "GigabitEthernet1/0/1");
+    }
+
+    /// Verify that config mode ? help includes all newly added commands.
+    #[test]
+    fn test_config_mode_help_includes_new_commands() {
+        use crate::cmd_tree::{help, HelpResult};
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        // Get the top-level help (empty input before ?)
+        let result = help("", tree, &mode);
+
+        let keywords: Vec<String> = match result {
+            HelpResult::Subcommands(subs) => subs.into_iter().map(|(name, _)| name).collect(),
+            other => panic!("Expected Subcommands, got {:?}", other),
+        };
+
+        let expected = &[
+            "banner",
+            "boot",
+            "cdp",
+            "crypto",
+            "do",
+            "errdisable",
+            "event",
+            "logging",
+            "mac",
+            "ntp",
+            "service",
+            "snmp-server",
+            "username",
+        ];
+
+        for &cmd in expected {
+            assert!(
+                keywords.iter().any(|k| k == cmd),
+                "Config mode ? should include '{}', but got: {:?}",
+                cmd,
+                keywords,
+            );
+        }
+    }
+
+    /// Verify that the banner command has motd, login, and exec children in help.
+    #[test]
+    fn test_config_banner_help_has_subcommands() {
+        use crate::cmd_tree::{help, HelpResult};
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let result = help("banner ", tree, &mode);
+        let keywords: Vec<String> = match result {
+            HelpResult::Subcommands(subs) => subs.into_iter().map(|(name, _)| name).collect(),
+            other => panic!("Expected Subcommands for 'banner ', got {:?}", other),
+        };
+
+        for &sub in &["motd", "login", "exec"] {
+            assert!(
+                keywords.iter().any(|k| k == sub),
+                "banner ? should include '{}', got: {:?}",
+                sub,
+                keywords,
+            );
+        }
+    }
+
+    /// Verify logging subcommands (host, trap, buffered) appear in help.
+    #[test]
+    fn test_config_logging_help_has_subcommands() {
+        use crate::cmd_tree::{help, HelpResult};
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let result = help("logging ", tree, &mode);
+        let keywords: Vec<String> = match result {
+            HelpResult::Subcommands(subs) => subs.into_iter().map(|(name, _)| name).collect(),
+            other => panic!("Expected Subcommands for 'logging ', got {:?}", other),
+        };
+
+        for &sub in &["host", "trap", "buffered"] {
+            assert!(
+                keywords.iter().any(|k| k == sub),
+                "logging ? should include '{}', got: {:?}",
+                sub,
+                keywords,
+            );
+        }
+    }
+
+    /// Verify service subcommands (timestamps, password-encryption, pad) appear in help.
+    #[test]
+    fn test_config_service_help_has_subcommands() {
+        use crate::cmd_tree::{help, HelpResult};
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let result = help("service ", tree, &mode);
+        let keywords: Vec<String> = match result {
+            HelpResult::Subcommands(subs) => subs.into_iter().map(|(name, _)| name).collect(),
+            other => panic!("Expected Subcommands for 'service ', got {:?}", other),
+        };
+
+        for &sub in &["timestamps", "password-encryption", "pad"] {
+            assert!(
+                keywords.iter().any(|k| k == sub),
+                "service ? should include '{}', got: {:?}",
+                sub,
+                keywords,
+            );
+        }
+    }
+
+    /// Verify that the new stub commands parse correctly in config mode.
+    #[test]
+    fn test_new_config_commands_parse() {
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let commands = &[
+            "boot system flash:c3750-ipservicesk9-mz.122-55.SE10.bin",
+            "cdp run",
+            "crypto key generate rsa",
+            "errdisable recovery cause all",
+            "event manager applet TEST",
+            "logging host 10.1.1.1",
+            "logging trap informational",
+            "logging buffered 64000",
+            "mac address-table aging-time 300",
+            "ntp server 10.0.0.1",
+            "snmp-server community public RO",
+            "username admin privilege 15 secret mypassword",
+        ];
+
+        for &cmd in commands {
+            let result = parse(cmd, tree, &mode);
+            assert!(
+                matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+                "Command '{}' should parse in config mode",
+                cmd,
+            );
+        }
     }
 }

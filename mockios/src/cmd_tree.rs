@@ -103,6 +103,7 @@ pub enum ParseResult {
 }
 
 /// Result of a `?` help query.
+#[derive(Debug)]
 pub enum HelpResult {
     /// List of (keyword/param-name, help_text) for "show ?" (space before ?).
     Subcommands(Vec<(String, String)>),

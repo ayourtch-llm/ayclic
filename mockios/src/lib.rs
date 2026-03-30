@@ -187,6 +187,119 @@ pub enum PendingInteractive {
     ConfigureMethod,
 }
 
+/// Pipe filter modifier for IOS-style `show ... | include/exclude/begin/section/count`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipeFilter {
+    /// Keep only lines containing the pattern (case-insensitive substring match).
+    Include(String),
+    /// Remove lines containing the pattern (case-insensitive substring match).
+    Exclude(String),
+    /// Start output from the first line matching the pattern, show all remaining lines.
+    Begin(String),
+    /// Show complete sections (blocks between blank/`!` delimiters) that contain the pattern.
+    Section(String),
+    /// Show count of lines in the output (no pattern needed).
+    Count,
+}
+
+/// Parse a pipe filter specification string (the part after `|`).
+/// Returns `None` if the filter specification is unrecognized.
+pub fn parse_pipe_filter(filter_str: &str) -> Option<PipeFilter> {
+    let s = filter_str.trim();
+    let lower = s.to_lowercase();
+    if lower == "count" {
+        return Some(PipeFilter::Count);
+    }
+    // Match "verb pattern" — take the first word as verb, rest as pattern.
+    if let Some(space_pos) = s.find(' ') {
+        let verb = &lower[..space_pos];
+        let pattern = s[space_pos + 1..].trim().to_string();
+        if pattern.is_empty() {
+            return None;
+        }
+        match verb {
+            "include" => return Some(PipeFilter::Include(pattern)),
+            "exclude" => return Some(PipeFilter::Exclude(pattern)),
+            "begin" => return Some(PipeFilter::Begin(pattern)),
+            "section" => return Some(PipeFilter::Section(pattern)),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Apply a pipe filter to command output text.
+/// `output` should be the raw command output (without the trailing prompt).
+pub fn apply_pipe_filter(output: &str, filter: &PipeFilter) -> String {
+    match filter {
+        PipeFilter::Include(pattern) => {
+            let pat = pattern.to_lowercase();
+            output
+                .lines()
+                .filter(|line| line.to_lowercase().contains(&pat))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        PipeFilter::Exclude(pattern) => {
+            let pat = pattern.to_lowercase();
+            output
+                .lines()
+                .filter(|line| !line.to_lowercase().contains(&pat))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        PipeFilter::Begin(pattern) => {
+            let pat = pattern.to_lowercase();
+            let mut found = false;
+            let filtered: Vec<&str> = output
+                .lines()
+                .filter(|line| {
+                    if !found && line.to_lowercase().contains(&pat) {
+                        found = true;
+                    }
+                    found
+                })
+                .collect();
+            filtered.join("\n")
+        }
+        PipeFilter::Section(pattern) => {
+            let pat = pattern.to_lowercase();
+            // A "section" is a block of lines separated by blank lines or `!` lines.
+            // We collect each section as a Vec<&str>, then keep sections that contain
+            // the pattern in any of their lines.
+            let mut sections: Vec<Vec<&str>> = Vec::new();
+            let mut current: Vec<&str> = Vec::new();
+            for line in output.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed == "!" {
+                    if !current.is_empty() {
+                        sections.push(std::mem::take(&mut current));
+                    }
+                } else {
+                    current.push(line);
+                }
+            }
+            if !current.is_empty() {
+                sections.push(current);
+            }
+            let matching: Vec<String> = sections
+                .into_iter()
+                .filter(|section| {
+                    section
+                        .iter()
+                        .any(|line| line.to_lowercase().contains(&pat))
+                })
+                .map(|section| section.join("\n"))
+                .collect();
+            matching.join("\n")
+        }
+        PipeFilter::Count => {
+            let count = output.lines().count();
+            format!("{}", count)
+        }
+    }
+}
+
 impl std::fmt::Debug for MockIosDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MockIosDevice")
@@ -542,26 +655,91 @@ impl MockIosDevice {
     }
 
     fn handle_user_exec(&mut self, line: &str) {
-        self.dispatch_exec(line);
+        self.dispatch_exec_with_pipe(line);
     }
 
     fn handle_privileged_exec(&mut self, line: &str) {
-        let cmd = line.to_lowercase();
+        // Split on first ` | ` to detect pipe filter before any custom-command lookup.
+        let (base_line, pipe_filter) = if let Some(pipe_pos) = line.find(" | ") {
+            let base = line[..pipe_pos].trim();
+            let filter_str = &line[pipe_pos + 3..];
+            (base, parse_pipe_filter(filter_str))
+        } else {
+            (line, None)
+        };
+
+        let cmd = base_line.to_lowercase();
 
         // Check custom commands first (exact match or prefix)
         if let Some(response) = self.commands.get(&cmd).cloned() {
-            self.queue_output(&format!("{}\n{}", response, self.prompt()));
+            let filtered = if let Some(ref f) = pipe_filter {
+                apply_pipe_filter(&response, f)
+            } else {
+                response.clone()
+            };
+            self.queue_output(&format!("{}\n{}", filtered, self.prompt()));
             return;
         }
         let custom_response = self.commands.iter()
             .find(|(k, _)| cmd.starts_with(k.as_str()))
             .map(|(_, v)| v.clone());
         if let Some(response) = custom_response {
-            self.queue_output(&format!("{}\n{}", response, self.prompt()));
+            let filtered = if let Some(ref f) = pipe_filter {
+                apply_pipe_filter(&response, f)
+            } else {
+                response.clone()
+            };
+            self.queue_output(&format!("{}\n{}", filtered, self.prompt()));
             return;
         }
 
-        self.dispatch_exec(line);
+        self.dispatch_exec_with_pipe(line);
+    }
+
+    /// Dispatch an exec-mode command, applying any pipe filter (` | include ...` etc.)
+    /// found in the command line.
+    fn dispatch_exec_with_pipe(&mut self, line: &str) {
+        // Detect ` | ` pipe filter suffix.
+        let (base_line, pipe_filter) = if let Some(pipe_pos) = line.find(" | ") {
+            let base = line[..pipe_pos].trim();
+            let filter_str = &line[pipe_pos + 3..];
+            (base, parse_pipe_filter(filter_str))
+        } else {
+            (line, None)
+        };
+
+        if let Some(filter) = pipe_filter {
+            // Save queue length before dispatch so we can extract newly added output.
+            let pre_len = self.output_queue.len();
+            self.dispatch_exec(base_line);
+            // Extract the newly queued bytes.
+            let new_bytes = self.output_queue[pre_len..].to_vec();
+            let new_text = String::from_utf8_lossy(&new_bytes).into_owned();
+            // The prompt is appended at the end by each handler (after \r\n).
+            // Find the last occurrence of the prompt string to split content from prompt.
+            let prompt = self.prompt();
+            // Normalised prompt (queue_output converts \n -> \r\n, prompt has no newlines)
+            let content_and_prompt = if let Some(prompt_start) = new_text.rfind(&prompt) {
+                let content_raw = &new_text[..prompt_start];
+                let prompt_part = &new_text[prompt_start..];
+                // Convert \r\n back to \n for filtering, then re-normalise via queue_output.
+                let content_plain = content_raw.replace("\r\n", "\n").trim_end_matches('\n').to_string();
+                let filtered = apply_pipe_filter(&content_plain, &filter);
+                if filtered.is_empty() {
+                    format!("{}", prompt_part)
+                } else {
+                    format!("{}\n{}", filtered, prompt_part)
+                }
+            } else {
+                // Couldn't find prompt — just return unchanged.
+                new_text
+            };
+            // Replace the newly queued output with the filtered version.
+            self.output_queue.truncate(pre_len);
+            self.output_queue.extend_from_slice(content_and_prompt.as_bytes());
+        } else {
+            self.dispatch_exec(base_line);
+        }
     }
 
     /// Dispatch an exec-mode command using the command tree.
@@ -5519,5 +5697,118 @@ mod tests {
         let lo0 = device.state.get_interface("Loopback0").unwrap();
         assert!(lo0.admin_up, "Loopback should be admin up");
         assert!(lo0.link_up, "Loopback should be link up");
+    }
+
+    // --- pipe filter tests ---
+
+    #[tokio::test]
+    async fn test_pipe_include_filters_output() {
+        let mut device = setup_device("R1").await;
+        // "show ip interface brief" has multiple lines; filter to only lines with "up"
+        let output = send_cmd(&mut device, "show ip interface brief | include up").await;
+        // Every output line (before the prompt) should contain "up" (case-insensitive)
+        // The prompt line does not need to match.
+        let prompt = format!("{}#", device.hostname);
+        for line in output.lines() {
+            if line.trim() == prompt.trim() || line.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                line.to_lowercase().contains("up"),
+                "include 'up' filter: unexpected line {:?} in output {:?}",
+                line,
+                output
+            );
+        }
+        // Should not contain lines that don't have "up" (like the header which has "Interface")
+        // Actually the header contains "Status" and "Protocol" but not "up" — it should be excluded.
+        let header_line = output.lines().find(|l| l.starts_with("Interface"));
+        assert!(
+            header_line.is_none(),
+            "Header line should be excluded by 'include up' filter: {:?}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipe_exclude_filters_output() {
+        let mut device = setup_device("R1").await;
+        // Exclude lines containing "Interface" (the header line)
+        let output = send_cmd(&mut device, "show ip interface brief | exclude Interface").await;
+        let prompt = format!("{}#", device.hostname);
+        // Skip the first line (terminal echo of the typed command) and the prompt line.
+        let mut lines_iter = output.lines();
+        let _ = lines_iter.next(); // skip echo line
+        for line in lines_iter {
+            if line.trim().starts_with(&prompt) || line.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                !line.contains("Interface"),
+                "exclude 'Interface' filter: line {:?} should not appear in output {:?}",
+                line,
+                output
+            );
+        }
+        // "Interface" header line should not appear in the output body
+        let body_contains_header = output
+            .lines()
+            .skip(1) // skip echo
+            .any(|l| l.starts_with("Interface"));
+        assert!(
+            !body_contains_header,
+            "Header 'Interface' line should be excluded: {:?}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipe_begin_filters_output() {
+        let mut device = setup_device("R1").await;
+        // "show version" has many lines. Begin at "Cisco IOS".
+        let output = send_cmd(&mut device, "show version | begin Cisco IOS").await;
+        // The first non-empty, non-prompt line should contain "Cisco IOS"
+        let prompt = format!("{}#", device.hostname);
+        let first_content = output
+            .lines()
+            .find(|l| !l.trim().is_empty() && !l.trim().starts_with(&prompt));
+        assert!(
+            first_content.map(|l| l.contains("Cisco IOS")).unwrap_or(false),
+            "begin 'Cisco IOS': first content line should contain 'Cisco IOS', got: {:?}",
+            output
+        );
+        // Lines before "Cisco IOS" (like config register header) should be gone.
+        // At minimum the output should not be empty.
+        assert!(!output.trim().is_empty(), "begin filter should produce some output");
+    }
+
+    #[tokio::test]
+    async fn test_pipe_count_filters_output() {
+        let mut device = setup_device("R1").await;
+        let count_output = send_cmd(&mut device, "show ip interface brief | count").await;
+        // The output should be a single number line followed by the prompt.
+        // The first line is the terminal echo of the command; skip it.
+        let prompt = format!("{}#", device.hostname);
+        let count_line = count_output
+            .lines()
+            .skip(1) // skip echo line
+            .find(|l| !l.trim().is_empty() && !l.trim().starts_with(&prompt));
+        let count_str = count_line.unwrap_or("").trim();
+        let reported_count: usize = count_str
+            .parse()
+            .unwrap_or_else(|_| panic!("| count output should be a number, got: {:?}", count_output));
+        // Must be a positive count — there's at least the header + one interface line.
+        assert!(
+            reported_count > 0,
+            "| count should report a positive line count, got: {}",
+            reported_count
+        );
+        // Verify | count gives fewer "lines" than the raw show command (since raw has echo etc.)
+        // but mostly just verify it's a valid number that's reasonable (> 0, < 1000).
+        assert!(
+            reported_count < 1000,
+            "| count reported unreasonably large count: {}",
+            reported_count
+        );
     }
 }

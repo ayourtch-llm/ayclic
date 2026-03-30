@@ -157,6 +157,8 @@ pub struct MockIosDevice {
     pub state: DeviceState,
     /// Current interface being configured in config-if mode.
     pub current_interface: Option<String>,
+    /// Whether `terminal monitor` has been issued on this VTY session.
+    pub terminal_monitor: bool,
 }
 
 /// Pending interactive prompt state.
@@ -200,6 +202,17 @@ pub enum PipeFilter {
     Section(String),
     /// Show count of lines in the output (no pattern needed).
     Count,
+}
+
+/// Filter for `show ip route` subcommands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IpRouteFilter {
+    /// Show all routes.
+    All,
+    /// Show only static routes (S and S* entries).
+    Static,
+    /// Show only connected routes (C entries).
+    Connected,
 }
 
 /// Parse a pipe filter specification string (the part after `|`).
@@ -340,6 +353,7 @@ impl MockIosDevice {
             install_state: None,
             state: DeviceState::new(hostname),
             current_interface: None,
+            terminal_monitor: false,
         };
         device.register_default_commands();
         device
@@ -551,6 +565,7 @@ impl MockIosDevice {
             install_state: self.install_state.clone(),
             state: derived_state,
             current_interface: None,
+            terminal_monitor: false,
         }
     }
 
@@ -815,7 +830,67 @@ impl MockIosDevice {
         self.queue_output(&output);
     }
 
+    pub fn handle_show_ip_route_static(&mut self) {
+        self.handle_show_ip_route_filtered(IpRouteFilter::Static);
+    }
+
+    pub fn handle_show_ip_route_connected(&mut self) {
+        self.handle_show_ip_route_filtered(IpRouteFilter::Connected);
+    }
+
+    pub fn handle_show_ip_route_summary(&mut self) {
+        let mut connected_count = 0usize;
+        let mut static_count = 0usize;
+
+        for iface in &self.state.interfaces {
+            if iface.admin_up {
+                if iface.ip_address.is_some() {
+                    connected_count += 1;
+                }
+            }
+        }
+
+        for route in &self.state.static_routes {
+            let is_default = route.prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
+                && route.mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
+            if is_default || route.next_hop.is_some() || route.interface.is_some() {
+                static_count += 1;
+            }
+        }
+
+        let total = connected_count + static_count;
+        let mut output = String::new();
+        output.push_str("IP routing table name is default (0x0)\n");
+        output.push_str("IP routing table maximum-paths is 32\n");
+        output.push_str("Route Source    Networks    Subnets     Replicates  Overhead    Memory (bytes)\n");
+        output.push_str(&format!(
+            "connected       0           {:<12}0           {:<12}{}\n",
+            connected_count,
+            connected_count * 272,
+            connected_count * 272
+        ));
+        output.push_str(&format!(
+            "static          0           {:<12}0           {:<12}{}\n",
+            static_count,
+            static_count * 200,
+            static_count * 200
+        ));
+        output.push_str("Internal        0           0           0           0           0\n");
+        output.push_str(&format!(
+            "Total           0           {:<12}0           {:<12}{}\n",
+            total,
+            (connected_count * 272) + (static_count * 200),
+            (connected_count * 272) + (static_count * 200)
+        ));
+        output.push_str(&self.prompt());
+        self.queue_output(&output);
+    }
+
     pub fn handle_show_ip_route(&mut self) {
+        self.handle_show_ip_route_filtered(IpRouteFilter::All);
+    }
+
+    fn handle_show_ip_route_filtered(&mut self, filter: IpRouteFilter) {
         let codes_header = concat!(
             "Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP\n",
             "       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area \n",
@@ -881,24 +956,26 @@ impl MockIosDevice {
         let mut entries: Vec<RouteEntry> = Vec::new();
 
         // Connected routes from interfaces that are admin_up and have an IP
-        for iface in &self.state.interfaces {
-            if iface.admin_up {
-                if let Some((addr, mask)) = iface.ip_address {
-                    let prefix_len = u32::from(mask).count_ones();
-                    let net = u32::from(addr) & u32::from(mask);
-                    let net_addr = std::net::Ipv4Addr::from(net);
-                    entries.push(RouteEntry {
-                        code: "C".to_string(),
-                        prefix: net_addr,
-                        prefix_len,
-                        description: format!("is directly connected, {}", iface.name),
-                    });
-                    entries.push(RouteEntry {
-                        code: "L".to_string(),
-                        prefix: addr,
-                        prefix_len: 32,
-                        description: format!("is directly connected, {}", iface.name),
-                    });
+        if filter != IpRouteFilter::Static {
+            for iface in &self.state.interfaces {
+                if iface.admin_up {
+                    if let Some((addr, mask)) = iface.ip_address {
+                        let prefix_len = u32::from(mask).count_ones();
+                        let net = u32::from(addr) & u32::from(mask);
+                        let net_addr = std::net::Ipv4Addr::from(net);
+                        entries.push(RouteEntry {
+                            code: "C".to_string(),
+                            prefix: net_addr,
+                            prefix_len,
+                            description: format!("is directly connected, {}", iface.name),
+                        });
+                        entries.push(RouteEntry {
+                            code: "L".to_string(),
+                            prefix: addr,
+                            prefix_len: 32,
+                            description: format!("is directly connected, {}", iface.name),
+                        });
+                    }
                 }
             }
         }
@@ -913,6 +990,9 @@ impl MockIosDevice {
                 && mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
             if is_default {
                 continue; // handled separately below
+            }
+            if filter == IpRouteFilter::Connected {
+                continue; // skip static when showing only connected
             }
             let description = if let Some(nh) = route.next_hop {
                 format!("[{}/0] via {}", dist, nh)
@@ -955,28 +1035,31 @@ impl MockIosDevice {
 
         // Emit default/static routes FIRST (0.0.0.0/0 comes before all others
         // in real IOS, which sorts routes by prefix numerically).
-        for route in &self.state.static_routes {
-            let prefix = route.prefix;
-            let mask = route.mask;
-            let dist = route.admin_distance;
-            let prefix_len = u32::from(mask).count_ones();
-            let is_default = prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
-                && mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
-            if !is_default {
-                continue;
-            }
-            let code = "S*";
-            let prefix_str = format!("{}/{}", prefix, prefix_len);
-            if let Some(nh) = route.next_hop {
-                output.push_str(&format!(
-                    "{:<9}{} [{}/0] via {}\n",
-                    code, prefix_str, dist, nh
-                ));
-            } else if let Some(iface) = &route.interface {
-                output.push_str(&format!(
-                    "{:<9}{} is directly connected, {}\n",
-                    code, prefix_str, iface
-                ));
+        // Skip default route when filtering for connected-only.
+        if filter != IpRouteFilter::Connected {
+            for route in &self.state.static_routes {
+                let prefix = route.prefix;
+                let mask = route.mask;
+                let dist = route.admin_distance;
+                let prefix_len = u32::from(mask).count_ones();
+                let is_default = prefix == std::net::Ipv4Addr::new(0, 0, 0, 0)
+                    && mask == std::net::Ipv4Addr::new(0, 0, 0, 0);
+                if !is_default {
+                    continue;
+                }
+                let code = "S*";
+                let prefix_str = format!("{}/{}", prefix, prefix_len);
+                if let Some(nh) = route.next_hop {
+                    output.push_str(&format!(
+                        "{:<9}{} [{}/0] via {}\n",
+                        code, prefix_str, dist, nh
+                    ));
+                } else if let Some(iface) = &route.interface {
+                    output.push_str(&format!(
+                        "{:<9}{} is directly connected, {}\n",
+                        code, prefix_str, iface
+                    ));
+                }
             }
         }
 
@@ -4959,6 +5042,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_show_spanning_tree_vlan_valid() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show spanning-tree vlan 1").await;
+        assert!(output.contains("VLAN0001"),
+            "show spanning-tree vlan 1 should contain 'VLAN0001', got: {:?}", output);
+        assert!(output.contains("Spanning tree enabled"),
+            "show spanning-tree vlan 1 should contain 'Spanning tree enabled', got: {:?}", output);
+        assert!(!output.contains("VLAN0002"),
+            "show spanning-tree vlan 1 should not contain other VLANs, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_spanning_tree_vlan_nonexistent() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show spanning-tree vlan 999").await;
+        assert!(output.contains("not a spanning tree vlan"),
+            "show spanning-tree vlan 999 should report invalid VLAN, got: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_spanning_tree_summary() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show spanning-tree summary").await;
+        assert!(output.contains("Switch is in rapid-pvst mode"),
+            "show spanning-tree summary should show mode, got: {:?}", output);
+        assert!(output.contains("Root bridge for:"),
+            "show spanning-tree summary should show root bridge, got: {:?}", output);
+        assert!(output.contains("Extended system ID           is enabled"),
+            "show spanning-tree summary should show extended system ID, got: {:?}", output);
+        assert!(output.contains("EtherChannel misconfig guard is enabled"),
+            "show spanning-tree summary should show EtherChannel misconfig guard, got: {:?}", output);
+    }
+
+    #[tokio::test]
     async fn test_access_list_config_and_show() {
         let mut device = setup_device("Router1").await;
         let _ = send_cmd(&mut device, "configure terminal").await;
@@ -5924,5 +6041,104 @@ mod tests {
             "| count reported unreasonably large count: {}",
             reported_count
         );
+    }
+
+    // --- show ip route static / connected / summary ---
+
+    #[tokio::test]
+    async fn test_show_ip_route_static_parses() {
+        // "show ip route static" should be a valid command (not "Unknown command")
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip route static").await;
+        assert!(!output.contains("Unknown command"),
+            "show ip route static should parse: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_route_static_shows_s_entries() {
+        // The default device has a default static route (S* 0.0.0.0/0).
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip route static").await;
+        // Should contain the S* default route
+        assert!(output.contains("S*") || output.contains("0.0.0.0/0"),
+            "show ip route static should show S* default route: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_route_static_no_connected_entries() {
+        // "show ip route static" must NOT contain C (connected) routes.
+        let mut device = setup_device("R1").await;
+        // Configure an interface with IP so there is a connected route
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface Vlan1").await;
+        let _ = send_cmd(&mut device, "ip address 10.1.1.1 255.255.255.0").await;
+        let _ = send_cmd(&mut device, "no shutdown").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ip route static").await;
+        // Should not contain "C " connected entries
+        let has_connected = output.lines().any(|l| l.starts_with("C ") || l.starts_with("C\t"));
+        assert!(!has_connected,
+            "show ip route static should not contain connected routes: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_route_connected_parses() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip route connected").await;
+        assert!(!output.contains("Unknown command"),
+            "show ip route connected should parse: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_route_connected_shows_c_entries() {
+        let mut device = setup_device("R1").await;
+        // Configure Vlan1 with an IP so a connected route exists
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface Vlan1").await;
+        let _ = send_cmd(&mut device, "ip address 192.168.1.1 255.255.255.0").await;
+        let _ = send_cmd(&mut device, "no shutdown").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ip route connected").await;
+        // Must contain a C entry for 192.168.1.0/24
+        assert!(output.contains("192.168.1.0"),
+            "show ip route connected should show 192.168.1.0 network: {:?}", output);
+        let has_c = output.lines().any(|l| l.starts_with("C ") || l.starts_with("C\t"));
+        assert!(has_c, "show ip route connected should contain C entries: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_route_connected_no_static_entries() {
+        let mut device = setup_device("R1").await;
+        let _ = send_cmd(&mut device, "configure terminal").await;
+        let _ = send_cmd(&mut device, "interface Vlan1").await;
+        let _ = send_cmd(&mut device, "ip address 10.0.0.1 255.255.255.0").await;
+        let _ = send_cmd(&mut device, "no shutdown").await;
+        let _ = send_cmd(&mut device, "end").await;
+
+        let output = send_cmd(&mut device, "show ip route connected").await;
+        // Must not contain S* or S entries
+        let has_static = output.lines().any(|l| l.starts_with("S ") || l.starts_with("S*"));
+        assert!(!has_static,
+            "show ip route connected should not contain static routes: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_route_summary_parses() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip route summary").await;
+        assert!(!output.contains("Unknown command"),
+            "show ip route summary should parse: {:?}", output);
+    }
+
+    #[tokio::test]
+    async fn test_show_ip_route_summary_has_counts() {
+        let mut device = setup_device("R1").await;
+        let output = send_cmd(&mut device, "show ip route summary").await;
+        // Should contain "connected" and "static" rows and a "Total" line
+        assert!(output.contains("connected"), "summary should list connected row: {:?}", output);
+        assert!(output.contains("static"), "summary should list static row: {:?}", output);
+        assert!(output.contains("Total"), "summary should have Total line: {:?}", output);
     }
 }

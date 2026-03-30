@@ -95,6 +95,18 @@ pub fn handle_show_ip_route(d: &mut MockIosDevice, _input: &str) {
     d.handle_show_ip_route();
 }
 
+pub fn handle_show_ip_route_static(d: &mut MockIosDevice, _input: &str) {
+    d.handle_show_ip_route_static();
+}
+
+pub fn handle_show_ip_route_connected(d: &mut MockIosDevice, _input: &str) {
+    d.handle_show_ip_route_connected();
+}
+
+pub fn handle_show_ip_route_summary(d: &mut MockIosDevice, _input: &str) {
+    d.handle_show_ip_route_summary();
+}
+
 pub fn handle_show_ip_incomplete(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
     d.queue_output(&format!("% Incomplete command.\n{}", p));
@@ -702,6 +714,27 @@ pub fn handle_show_spanning_tree(d: &mut MockIosDevice, _input: &str) {
     d.queue_output(&format!("{}\n{}", output, p));
 }
 
+pub fn handle_show_spanning_tree_vlan(d: &mut MockIosDevice, input: &str) {
+    // input e.g. "show spanning-tree vlan 10"
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    let p = d.prompt();
+    // tokens: ["show", "spanning-tree", "vlan", "<N>"]
+    let output = match tokens.get(3).and_then(|s| s.parse::<u16>().ok()) {
+        Some(id) => {
+            let block = d.state.generate_show_spanning_tree_vlan(id);
+            format!("{}\n{}", block, p)
+        }
+        None => format!("% Invalid input detected\n{}", p),
+    };
+    d.queue_output(&output);
+}
+
+pub fn handle_show_spanning_tree_summary(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_spanning_tree_summary();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
+}
+
 pub fn handle_show_ntp_status(d: &mut MockIosDevice, _input: &str) {
     let output = "\
 Clock is unsynchronized, stratum 16, no reference clock
@@ -877,6 +910,31 @@ pub fn handle_show_errdisable(d: &mut MockIosDevice, _input: &str) {
 
 pub fn handle_show_etherchannel(d: &mut MockIosDevice, _input: &str) {
     show_stub(d, "");
+}
+
+pub fn handle_show_etherchannel_summary(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "Flags:  D - down        P - bundled in port-channel\n\
+        I - stand-alone s - suspended\n\
+        H - Hot-standby (LACP only)\n\
+        R - Layer3      S - Layer2\n\
+        U - in use      N - not in use, no aggregation\n\
+        f - failed to allocate aggregator\n\
+\n\
+        M - not in use, minimum links not met\n\
+        m - not in use, port not aggregated due to minimum links not met\n\
+        u - unsuitable for bundling\n\
+        w - waiting to be aggregated\n\
+        d - default port\n\
+        A - formed by Auto LAG\n\
+\n\
+Number of channel-groups in use: 0\n\
+Number of aggregators:           0\n\
+\n\
+Group  Port-channel  Protocol    Ports\n\
+------+-------------+-----------+-----------------------------------------------",
+    );
 }
 
 pub fn handle_show_hosts(d: &mut MockIosDevice, _input: &str) {
@@ -1170,7 +1228,15 @@ fn build_exec_tree() -> Vec<CommandNode> {
                         keyword("protocols", "IP routing protocol process parameters and statistics")
                             .handler(handle_show_ip_protocols),
                         keyword("route", "IP routing table")
-                            .handler(handle_show_ip_route),
+                            .handler(handle_show_ip_route)
+                            .children(vec![
+                                keyword("connected", "Connected routes")
+                                    .handler(handle_show_ip_route_connected),
+                                keyword("static", "Static routes")
+                                    .handler(handle_show_ip_route_static),
+                                keyword("summary", "Summary of all routes")
+                                    .handler(handle_show_ip_route_summary),
+                            ]),
                         keyword("ssh", "Information on SSH")
                             .handler(handle_show_ip_ssh),
                         keyword("traffic", "IP protocol statistics")
@@ -1275,7 +1341,16 @@ fn build_exec_tree() -> Vec<CommandNode> {
                             .handler(handle_show_mac_address_table),
                     ]),
                 keyword("spanning-tree", "Spanning tree topology")
-                    .handler(handle_show_spanning_tree),
+                    .handler(handle_show_spanning_tree as CmdHandler)
+                    .children(vec![
+                        keyword("vlan", "Spanning tree per VLAN")
+                            .children(vec![
+                                param("<vlan-id>", ParamType::Number, "VLAN identifier")
+                                    .handler(handle_show_spanning_tree_vlan),
+                            ]),
+                        keyword("summary", "Spanning tree summary status")
+                            .handler(handle_show_spanning_tree_summary),
+                    ]),
                 keyword("processes", "Active process statistics")
                     .children(vec![
                         keyword("cpu", "Show CPU use per process")
@@ -1321,7 +1396,11 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("errdisable", "Error disable")
                     .handler(handle_show_errdisable),
                 keyword("etherchannel", "EtherChannel information")
-                    .handler(handle_show_etherchannel),
+                    .handler(handle_show_etherchannel as CmdHandler)
+                    .children(vec![
+                        keyword("summary", "One summary line per channel-group")
+                            .handler(handle_show_etherchannel_summary),
+                    ]),
                 keyword("hosts", "IP domain-name, lookup style")
                     .handler(handle_show_hosts),
                 keyword("license", "Show license information")
@@ -1788,6 +1867,30 @@ mod tests {
     }
 
     #[test]
+    fn test_exec_show_ip_route_static_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show ip route static", tree, &mode);
+        assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }));
+    }
+
+    #[test]
+    fn test_exec_show_ip_route_connected_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show ip route connected", tree, &mode);
+        assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }));
+    }
+
+    #[test]
+    fn test_exec_show_ip_route_summary_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show ip route summary", tree, &mode);
+        assert!(matches!(result, crate::cmd_tree::ParseResult::Execute { .. }));
+    }
+
+    #[test]
     fn test_exec_write_memory_parses() {
         let tree = exec_tree();
         let mode = CliMode::PrivilegedExec;
@@ -2176,6 +2279,69 @@ mod tests {
         assert!(
             output.contains("neighbor"),
             "Expected 'neighbor' in 'show ip ospf ?' help, got: {:?}",
+            output
+        );
+    }
+
+    // --- show etherchannel summary tests ------------------------------------
+
+    /// `show etherchannel summary` parses successfully in privileged exec mode.
+    #[test]
+    fn test_show_etherchannel_summary_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show etherchannel summary", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "show etherchannel summary should parse in privileged exec"
+        );
+    }
+
+    /// `show etherchannel summary` output contains the flags legend and the
+    /// empty table header -- matching real IOS output with no port-channels.
+    #[test]
+    fn test_show_etherchannel_summary_output() {
+        let mut device = make_device();
+        handle_show_etherchannel_summary(&mut device, "show etherchannel summary");
+        let output = device.drain_output();
+        assert!(
+            output.contains("Number of channel-groups in use: 0"),
+            "Expected zero channel-groups line, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Number of aggregators:           0"),
+            "Expected zero aggregators line, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("Group  Port-channel  Protocol    Ports"),
+            "Expected table header, got: {:?}",
+            output
+        );
+        assert!(
+            output.contains("D - down"),
+            "Expected flags legend, got: {:?}",
+            output
+        );
+    }
+
+    /// `show etherchannel ?` help lists `summary` as a subcommand.
+    #[tokio::test]
+    async fn test_show_etherchannel_summary_in_help() {
+        use ayclic::raw_transport::RawTransport;
+        use std::time::Duration;
+
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+
+        device.send(b"show etherchannel ?").await.unwrap();
+        let out = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = String::from_utf8_lossy(&out);
+
+        assert!(
+            output.contains("summary"),
+            "Expected 'summary' in 'show etherchannel ?' help, got: {:?}",
             output
         );
     }

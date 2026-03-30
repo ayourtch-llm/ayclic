@@ -1164,6 +1164,68 @@ impl DeviceState {
         blocks.join("\n\n")
     }
 
+    /// Generate `show spanning-tree vlan <id>` output — a single VLAN block.
+    pub fn generate_show_spanning_tree_vlan(&self, vlan_id: u16) -> String {
+        // Check the requested VLAN exists, is active, and not unsupported.
+        match self.vlans.iter().find(|v| v.id == vlan_id) {
+            None => return format!("% VLAN{:04} is not a spanning tree vlan\n", vlan_id),
+            Some(v) if !v.active || v.unsupported => {
+                return format!("% VLAN{:04} is not a spanning tree vlan\n", vlan_id);
+            }
+            Some(_) => {}
+        }
+
+        // Re-use the full generation and filter for the specific VLAN block.
+        let full = self.generate_show_spanning_tree();
+        let target = format!("VLAN{:04}", vlan_id);
+
+        // Each block starts with "VLAN####\n" — split on blank lines between blocks.
+        let blocks: Vec<&str> = full.split("\n\n").collect();
+        for block in &blocks {
+            if block.starts_with(&target) {
+                return block.to_string();
+            }
+        }
+
+        format!("% VLAN{:04} is not a spanning tree vlan\n", vlan_id)
+    }
+
+    /// Generate `show spanning-tree summary` output matching real IOS format.
+    pub fn generate_show_spanning_tree_summary(&self) -> String {
+        let mode = &self.spanning_tree_mode;
+
+        // Collect VLANs for which we are root bridge (all active VLANs, since we
+        // always simulate this bridge as the root).
+        let root_vlans: Vec<String> = self
+            .vlans
+            .iter()
+            .filter(|v| v.active && !v.unsupported)
+            .map(|v| format!("VLAN{:04}", v.id))
+            .collect();
+
+        let root_bridge_for = if root_vlans.is_empty() {
+            "none".to_string()
+        } else {
+            root_vlans.join(", ")
+        };
+
+        format!(
+            "Switch is in {mode} mode\n\
+             Root bridge for: {root_bridge_for}\n\
+             Extended system ID           is enabled\n\
+             Portfast Default             is disabled\n\
+             PortFast BPDU Guard Default  is disabled\n\
+             Portfast BPDU Filter Default is disabled\n\
+             Loopguard Default            is disabled\n\
+             EtherChannel misconfig guard is enabled\n\
+             UplinkFast                   is disabled\n\
+             BackboneFast                 is disabled\n\
+             Configured Pathcost method used is short",
+            mode = mode,
+            root_bridge_for = root_bridge_for,
+        )
+    }
+
     /// Generate `show interfaces status` output matching real IOS format.
     pub fn generate_show_interfaces_status(&self) -> String {
         let header = "Port      Name               Status       Vlan       Duplex  Speed Type";
@@ -3230,5 +3292,57 @@ mod tests {
                 iface.name
             );
         }
+    }
+
+    #[test]
+    fn test_generate_show_spanning_tree_vlan_valid() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_spanning_tree_vlan(1);
+        assert!(output.starts_with("VLAN0001"), "Should start with VLAN0001, got: {:?}", output);
+        assert!(output.contains("Spanning tree enabled"), "Should contain STP header");
+        assert!(!output.contains("VLAN0002"), "Should not contain other VLANs");
+    }
+
+    #[test]
+    fn test_generate_show_spanning_tree_vlan_nonexistent() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_spanning_tree_vlan(999);
+        assert!(output.contains("not a spanning tree vlan"),
+            "Should report missing VLAN, got: {:?}", output);
+    }
+
+    #[test]
+    fn test_generate_show_spanning_tree_vlan_unsupported() {
+        let state = DeviceState::new("Switch1");
+        // VLAN 1002 is unsupported by default
+        let output = state.generate_show_spanning_tree_vlan(1002);
+        assert!(output.contains("not a spanning tree vlan"),
+            "Unsupported VLAN should not be a spanning tree VLAN, got: {:?}", output);
+    }
+
+    #[test]
+    fn test_generate_show_spanning_tree_summary() {
+        let state = DeviceState::new("Switch1");
+        let output = state.generate_show_spanning_tree_summary();
+        assert!(output.contains("Switch is in rapid-pvst mode"),
+            "Should show mode, got: {:?}", output);
+        assert!(output.contains("Root bridge for:"), "Should show root bridge line");
+        assert!(output.contains("VLAN0001"), "Should list VLAN0001 as root");
+        assert!(output.contains("Extended system ID           is enabled"),
+            "Should show extended system ID");
+        assert!(output.contains("Portfast Default             is disabled"),
+            "Should show portfast default");
+        assert!(output.contains("EtherChannel misconfig guard is enabled"),
+            "Should show EtherChannel misconfig guard");
+        assert!(!output.contains("VLAN1002"), "Should not include unsupported VLANs");
+    }
+
+    #[test]
+    fn test_generate_show_spanning_tree_summary_pvst_mode() {
+        let mut state = DeviceState::new("Switch1");
+        state.spanning_tree_mode = "pvst".to_string();
+        let output = state.generate_show_spanning_tree_summary();
+        assert!(output.contains("Switch is in pvst mode"),
+            "Should reflect pvst mode, got: {:?}", output);
     }
 }

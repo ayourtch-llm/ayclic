@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use crate::cmd_tree::{keyword, param, CliModeClass, CmdHandler, CommandNode, ModeFilter, ParamType};
 use crate::device_state::{AccessList, AccessListEntry, StaticRoute,
     Ipv6AddrConfig, Ipv6AddrType, Ipv6StaticRoute,
-    OspfV3Process, OspfV3Area, InterfaceOspfV3Config};
+    OspfV3Process, OspfV3Area, InterfaceOspfV3Config, VlanState};
 use crate::{CliMode, MockIosDevice};
 
 // ─── Mode helpers ─────────────────────────────────────────────────────────────
@@ -28,6 +28,7 @@ pub fn config_sub_tree(sub_mode: &str) -> &'static Vec<CommandNode> {
         "config-line" => config_line_tree(),
         "config-ext-nacl" => config_ext_nacl_tree(),
         "config-std-nacl" => config_std_nacl_tree(),
+        "config-vlan" => config_vlan_tree(),
         _ => conf_tree(), // unknown sub-modes fall back to full conf tree
     }
 }
@@ -674,8 +675,85 @@ pub fn handle_snmp_server(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("{}", p));
 }
 
+/// Parse and apply a `username ...` config line, or `no username <name>` to remove.
+/// Full `input` is the original line (may start with "no " for removal).
 pub fn handle_username(d: &mut MockIosDevice, input: &str) {
-    d.running_config.push(input.to_string());
+    use crate::device_state::UserAccount;
+
+    let trimmed = input.trim();
+
+    // no username <name>
+    if let Some(rest) = trimmed.strip_prefix("no ") {
+        let rest = rest.trim();
+        if let Some(name_part) = rest.strip_prefix("username ") {
+            let name = name_part.split_whitespace().next().unwrap_or("").to_string();
+            if !name.is_empty() {
+                d.state.users.retain(|u| u.username != name);
+            }
+        }
+        let p = d.prompt();
+        d.queue_output(&format!("{}", p));
+        return;
+    }
+
+    // username <name> [privilege <level>] [secret <pass>|password <pass>]
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    // parts[0] == "username", parts[1] == <name>, then optional keyword pairs
+    if parts.len() < 2 {
+        let p = d.prompt();
+        d.queue_output(&format!("{}", p));
+        return;
+    }
+    let name = parts[1].to_string();
+    let mut privilege: u8 = 0;
+    let mut secret: Option<String> = None;
+    let mut password: Option<String> = None;
+
+    let mut i = 2;
+    while i < parts.len() {
+        match parts[i] {
+            "privilege" => {
+                if let Some(lvl) = parts.get(i + 1) {
+                    if let Ok(n) = lvl.parse::<u8>() {
+                        privilege = n;
+                        i += 2;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            "secret" => {
+                // Accept optional "0 <pass>" or just "<pass>"
+                let (skip, val) = if parts.get(i + 1) == Some(&"0") {
+                    (3, parts.get(i + 2))
+                } else {
+                    (2, parts.get(i + 1))
+                };
+                secret = val.map(|s| s.to_string());
+                i += skip;
+            }
+            "password" => {
+                let (skip, val) = if parts.get(i + 1) == Some(&"0") {
+                    (3, parts.get(i + 2))
+                } else {
+                    (2, parts.get(i + 1))
+                };
+                password = val.map(|s| s.to_string());
+                i += skip;
+            }
+            _ => { i += 1; }
+        }
+    }
+
+    // Replace existing user or add new
+    if let Some(existing) = d.state.users.iter_mut().find(|u| u.username == name) {
+        existing.privilege = privilege;
+        existing.secret = secret;
+        existing.password = password;
+    } else {
+        d.state.users.push(UserAccount { username: name, privilege, secret, password });
+    }
+
     let p = d.prompt();
     d.queue_output(&format!("{}", p));
 }
@@ -824,7 +902,53 @@ pub fn handle_spanning_tree(d: &mut MockIosDevice, input: &str) {
 }
 
 pub fn handle_vlan(d: &mut MockIosDevice, input: &str) {
-    d.running_config.push(input.to_string());
+    // input is e.g. "vlan 100" — parse the VLAN ID from the last token
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let id_str = parts.last().copied().unwrap_or("0");
+    let vlan_id: u16 = id_str.parse().unwrap_or(0);
+    if vlan_id == 0 {
+        let p = d.prompt();
+        d.queue_output(&format!("{}", p));
+        return;
+    }
+    // Create the VLAN in state if it doesn't already exist
+    if !d.state.vlans.iter().any(|v| v.id == vlan_id) {
+        d.state.vlans.push(VlanState {
+            id: vlan_id,
+            name: format!("VLAN{:04}", vlan_id),
+            active: true,
+            ports: vec![],
+            unsupported: false,
+        });
+        d.state.vlans.sort_by_key(|v| v.id);
+    }
+    d.current_vlan_id = Some(vlan_id);
+    d.mode = CliMode::ConfigSub("config-vlan".to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_no_vlan(d: &mut MockIosDevice, input: &str) {
+    // input is e.g. "no vlan 100"
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let id_str = parts.last().copied().unwrap_or("0");
+    let vlan_id: u16 = id_str.parse().unwrap_or(0);
+    if vlan_id > 0 {
+        d.state.vlans.retain(|v| v.id != vlan_id);
+    }
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_vlan_name(d: &mut MockIosDevice, input: &str) {
+    // input is e.g. "name ENGINEERING"
+    let parts: Vec<&str> = input.splitn(2, char::is_whitespace).collect();
+    let name = if parts.len() >= 2 { parts[1].trim().to_string() } else { return; };
+    if let Some(vlan_id) = d.current_vlan_id {
+        if let Some(vlan) = d.state.vlans.iter_mut().find(|v| v.id == vlan_id) {
+            vlan.name = name;
+        }
+    }
     let p = d.prompt();
     d.queue_output(&format!("{}", p));
 }
@@ -1374,8 +1498,9 @@ fn build_conf_tree() -> Vec<CommandNode> {
         // username <rest>
         keyword("username", "Establish User Name Authentication")
             .mode(config_only())
+            .no_handler(handle_username)
             .children(vec![
-                param("<rest>", ParamType::RestOfLine, "Username parameters")
+                param("<rest>", ParamType::RestOfLine, "User configuration")
                     .handler(handle_username),
             ]),
 
@@ -1422,10 +1547,12 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     .handler(handle_spanning_tree),
             ]),
 
-        // vlan <rest>
+        // vlan <id>
         keyword("vlan", "VLAN commands")
+            .mode(config_only())
+            .no_handler(handle_no_vlan)
             .children(vec![
-                param("<rest>", ParamType::RestOfLine, "VLAN parameters")
+                param("<vlan-id>", ParamType::Number, "ISL VLAN IDs 1-4094")
                     .handler(handle_vlan),
             ]),
 
@@ -2141,6 +2268,42 @@ fn build_config_nacl_tree() -> Vec<CommandNode> {
             .children(vec![
                 param("<rest>", ParamType::RestOfLine, "Comment text")
                     .handler(handle_nacl_entry),
+            ]),
+    ];
+
+    main_commands.push(
+        keyword("no", "Negate a command or set its defaults"),
+    );
+    main_commands.push(
+        keyword("help", "Description of the interactive help system")
+            .handler(crate::cmd_tree_exec::handle_help_command),
+    );
+    main_commands.push(
+        keyword("exit", "Exit from current mode")
+            .handler(handle_config_exit),
+    );
+    main_commands.push(
+        keyword("end", "Exit to privileged EXEC mode")
+            .handler(handle_config_end),
+    );
+
+    main_commands
+}
+
+static CONFIG_VLAN_TREE: OnceLock<Vec<CommandNode>> = OnceLock::new();
+
+/// Command tree for config-vlan sub-mode (VLAN configuration).
+pub fn config_vlan_tree() -> &'static Vec<CommandNode> {
+    CONFIG_VLAN_TREE.get_or_init(build_config_vlan_tree)
+}
+
+fn build_config_vlan_tree() -> Vec<CommandNode> {
+    let mut main_commands: Vec<CommandNode> = vec![
+        // name <word>
+        keyword("name", "Ascii name of the VLAN")
+            .children(vec![
+                param("<name>", ParamType::Word, "The ascii name for the VLAN")
+                    .handler(handle_vlan_name),
             ]),
     ];
 
@@ -3015,6 +3178,140 @@ mod tests {
         let rc = device.state.generate_running_config();
         assert!(rc.contains("ip access-list extended MY_ACL"), "running-config should contain named ACL header");
         assert!(rc.contains(" permit ip any any"), "running-config should contain permit entry");
+    }
+
+    // --- username command tests ---
+
+    #[test]
+    fn test_username_privilege_secret_stored_in_state() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_username(&mut device, "username admin privilege 15 secret cisco123");
+        assert_eq!(device.state.users.len(), 1, "should have 1 user");
+        let u = &device.state.users[0];
+        assert_eq!(u.username, "admin");
+        assert_eq!(u.privilege, 15);
+        assert_eq!(u.secret, Some("cisco123".to_string()));
+        assert!(u.password.is_none());
+    }
+
+    #[test]
+    fn test_username_password_default_privilege() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_username(&mut device, "username guest password guest123");
+        assert_eq!(device.state.users.len(), 1);
+        let u = &device.state.users[0];
+        assert_eq!(u.username, "guest");
+        assert_eq!(u.privilege, 0, "default privilege should be 0");
+        assert_eq!(u.password, Some("guest123".to_string()));
+        assert!(u.secret.is_none());
+    }
+
+    #[test]
+    fn test_no_username_removes_user() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_username(&mut device, "username admin privilege 15 secret cisco123");
+        handle_username(&mut device, "username guest password guest123");
+        assert_eq!(device.state.users.len(), 2);
+        handle_username(&mut device, "no username admin");
+        assert_eq!(device.state.users.len(), 1, "admin should be removed");
+        assert_eq!(device.state.users[0].username, "guest");
+    }
+
+    #[test]
+    fn test_username_appears_in_running_config() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_username(&mut device, "username admin privilege 15 secret cisco123");
+        handle_username(&mut device, "username guest privilege 0 password guest123");
+        let rc = device.state.generate_running_config();
+        assert!(rc.contains("username admin privilege 15 secret 0 cisco123"),
+            "running-config should contain admin user line; got: {}", rc);
+        assert!(rc.contains("username guest privilege 0 password 0 guest123"),
+            "running-config should contain guest user line; got: {}", rc);
+    }
+
+    // ─── VLAN config tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_vlan_creates_entry_in_state() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_vlan(&mut device, "vlan 100");
+        assert!(
+            device.state.vlans.iter().any(|v| v.id == 100),
+            "VLAN 100 should exist in state after 'vlan 100'"
+        );
+        assert!(
+            matches!(&device.mode, CliMode::ConfigSub(s) if s == "config-vlan"),
+            "mode should be config-vlan after 'vlan 100', got: {:?}", device.mode
+        );
+        assert_eq!(device.current_vlan_id, Some(100));
+    }
+
+    #[test]
+    fn test_vlan_name_sets_vlan_name() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_vlan(&mut device, "vlan 100");
+        handle_vlan_name(&mut device, "name ENGINEERING");
+        let vlan = device.state.vlans.iter().find(|v| v.id == 100).expect("VLAN 100 not found");
+        assert_eq!(vlan.name, "ENGINEERING");
+    }
+
+    #[test]
+    fn test_no_vlan_removes_entry() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_vlan(&mut device, "vlan 100");
+        assert!(device.state.vlans.iter().any(|v| v.id == 100));
+        device.mode = CliMode::Config;
+        handle_no_vlan(&mut device, "no vlan 100");
+        assert!(
+            !device.state.vlans.iter().any(|v| v.id == 100),
+            "VLAN 100 should be removed after 'no vlan 100'"
+        );
+    }
+
+    #[test]
+    fn test_vlan_shows_in_show_vlan_brief() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_vlan(&mut device, "vlan 100");
+        handle_vlan_name(&mut device, "name ENGINEERING");
+        let output = device.state.generate_show_vlan_brief();
+        assert!(
+            output.contains("100"),
+            "show vlan brief should contain VLAN 100, got:\n{}", output
+        );
+        assert!(
+            output.contains("ENGINEERING"),
+            "show vlan brief should contain ENGINEERING, got:\n{}", output
+        );
+    }
+
+    #[test]
+    fn test_vlan_default_name() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_vlan(&mut device, "vlan 200");
+        let vlan = device.state.vlans.iter().find(|v| v.id == 200).expect("VLAN 200 not found");
+        assert_eq!(vlan.name, "VLAN0200", "Default name should be VLAN0200");
+    }
+
+    #[test]
+    fn test_vlan_existing_not_overwritten() {
+        let mut device = make_device();
+        device.mode = CliMode::Config;
+        handle_vlan(&mut device, "vlan 100");
+        handle_vlan_name(&mut device, "name FIRST");
+        device.mode = CliMode::Config;
+        // Enter vlan 100 again — should not reset the name
+        handle_vlan(&mut device, "vlan 100");
+        let vlan = device.state.vlans.iter().find(|v| v.id == 100).expect("VLAN 100 not found");
+        assert_eq!(vlan.name, "FIRST", "Re-entering vlan 100 should not reset the name");
     }
 
 }

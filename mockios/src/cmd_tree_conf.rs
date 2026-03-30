@@ -501,6 +501,84 @@ pub fn handle_banner_exec(d: &mut MockIosDevice, input: &str) {
     d.queue_output(&format!("{}", p));
 }
 
+pub fn handle_aaa(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_arp(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_class_map(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_clock(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_default(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_dot1x(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_lldp(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_monitor(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_policy_map(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_port_channel(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_power(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_privilege(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
+pub fn handle_tacacs_server(d: &mut MockIosDevice, input: &str) {
+    d.running_config.push(input.to_string());
+    let p = d.prompt();
+    d.queue_output(&format!("{}", p));
+}
+
 pub fn handle_boot_system(d: &mut MockIosDevice, input: &str) {
     d.running_config.push(input.to_string());
     let p = d.prompt();
@@ -1249,6 +1327,114 @@ fn build_conf_tree() -> Vec<CommandNode> {
                     ]),
             ]),
     ];
+
+    // ── IOS 15.2 stub commands (alphabetical) ────────────────────────────────
+    main_commands.insert(0, {
+        // aaa — insert at front; we'll sort by pushing in right positions below
+        keyword("aaa", "Authentication, Authorization and Accounting.")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "AAA parameters")
+                    .handler(handle_aaa),
+            ])
+    });
+
+    main_commands.push(
+        keyword("arp", "Set a static ARP entry")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "ARP parameters")
+                    .handler(handle_arp),
+            ]),
+    );
+    main_commands.push(
+        keyword("class-map", "Configure CPL Class Map")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Class map parameters")
+                    .handler(handle_class_map),
+            ]),
+    );
+    main_commands.push(
+        keyword("clock", "Configure time-of-day clock")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Clock parameters")
+                    .handler(handle_clock),
+            ]),
+    );
+    main_commands.push(
+        keyword("default", "Set a command to its defaults")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Command to set to defaults")
+                    .handler(handle_default),
+            ]),
+    );
+    main_commands.push(
+        keyword("dot1x", "IEEE 802.1X Global Configuration Commands")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "802.1X parameters")
+                    .handler(handle_dot1x),
+            ]),
+    );
+    main_commands.push(
+        keyword("lldp", "Global LLDP configuration subcommands")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "LLDP parameters")
+                    .handler(handle_lldp),
+            ]),
+    );
+    main_commands.push(
+        keyword("monitor", "Monitoring different system events")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Monitor parameters")
+                    .handler(handle_monitor),
+            ]),
+    );
+    main_commands.push(
+        keyword("policy-map", "Configure Policy Map")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Policy map parameters")
+                    .handler(handle_policy_map),
+            ]),
+    );
+    main_commands.push(
+        keyword("port-channel", "EtherChannel configuration")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Port-channel parameters")
+                    .handler(handle_port_channel),
+            ]),
+    );
+    main_commands.push(
+        keyword("power", "Power configure")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Power parameters")
+                    .handler(handle_power),
+            ]),
+    );
+    main_commands.push(
+        keyword("privilege", "Command privilege parameters")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "Privilege parameters")
+                    .handler(handle_privilege),
+            ]),
+    );
+    main_commands.push(
+        keyword("tacacs-server", "Modify TACACS query parameters")
+            .mode(config_only())
+            .children(vec![
+                param("<rest>", ParamType::RestOfLine, "TACACS server parameters")
+                    .handler(handle_tacacs_server),
+            ]),
+    );
 
     main_commands.push(
         keyword("no", "Negate a command or set its defaults"),
@@ -2057,6 +2243,47 @@ mod tests {
         ];
 
         for &cmd in expected {
+            assert!(
+                keywords.iter().any(|k| k == cmd),
+                "Config mode ? should include '{}', but got: {:?}",
+                cmd,
+                keywords,
+            );
+        }
+    }
+
+    /// Verify that newly added IOS 15.2 config mode stubs appear in ? help.
+    #[test]
+    fn test_config_mode_help_includes_ios152_stubs() {
+        use crate::cmd_tree::{help, HelpResult};
+
+        let tree = conf_tree();
+        let mode = CliMode::Config;
+
+        let result = help("", tree, &mode);
+
+        let keywords: Vec<String> = match result {
+            HelpResult::Subcommands(subs) => subs.into_iter().map(|(name, _)| name).collect(),
+            other => panic!("Expected Subcommands, got {:?}", other),
+        };
+
+        let expected_stubs = &[
+            "aaa",
+            "arp",
+            "class-map",
+            "clock",
+            "default",
+            "dot1x",
+            "lldp",
+            "monitor",
+            "policy-map",
+            "port-channel",
+            "power",
+            "privilege",
+            "tacacs-server",
+        ];
+
+        for &cmd in expected_stubs {
             assert!(
                 keywords.iter().any(|k| k == cmd),
                 "Config mode ? should include '{}', but got: {:?}",

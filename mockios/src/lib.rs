@@ -6374,6 +6374,72 @@ mod tests {
             assert!(line.contains("0.00%"), "Row should say 0.00%: {:?}", line);
         }
     }
+
+    // --- format_uptime unit tests (TDD) ---
+
+    #[test]
+    fn test_format_uptime_minutes_only() {
+        // Less than 1 hour → "N minutes"
+        assert_eq!(crate::format_uptime(Duration::from_secs(0)), "0 minutes");
+        assert_eq!(crate::format_uptime(Duration::from_secs(60)), "1 minute");
+        assert_eq!(crate::format_uptime(Duration::from_secs(5 * 60)), "5 minutes");
+        assert_eq!(crate::format_uptime(Duration::from_secs(59 * 60 + 59)), "59 minutes");
+    }
+
+    #[test]
+    fn test_format_uptime_hours_and_minutes() {
+        // Between 1 hour and 1 day → "N hours, M minutes"
+        assert_eq!(crate::format_uptime(Duration::from_secs(3600)), "1 hour, 0 minutes");
+        assert_eq!(crate::format_uptime(Duration::from_secs(3600 + 60)), "1 hour, 1 minute");
+        assert_eq!(crate::format_uptime(Duration::from_secs(2 * 3600 + 30 * 60)), "2 hours, 30 minutes");
+        assert_eq!(crate::format_uptime(Duration::from_secs(23 * 3600 + 59 * 60)), "23 hours, 59 minutes");
+    }
+
+    #[test]
+    fn test_format_uptime_days() {
+        // Between 1 day and 1 week → "N days, M hours, K minutes"
+        assert_eq!(crate::format_uptime(Duration::from_secs(86400)), "1 day, 0 hours, 0 minutes");
+        assert_eq!(crate::format_uptime(Duration::from_secs(86400 + 3600 + 60)), "1 day, 1 hour, 1 minute");
+        assert_eq!(crate::format_uptime(Duration::from_secs(2 * 86400 + 3 * 3600 + 17 * 60)), "2 days, 3 hours, 17 minutes");
+        assert_eq!(crate::format_uptime(Duration::from_secs(6 * 86400 + 23 * 3600 + 59 * 60)), "6 days, 23 hours, 59 minutes");
+    }
+
+    #[test]
+    fn test_format_uptime_weeks() {
+        // 1 week or more → "N week(s), D day(s), H hour(s), M minute(s)"
+        assert_eq!(crate::format_uptime(Duration::from_secs(7 * 86400)), "1 week, 0 days, 0 hours, 0 minutes");
+        assert_eq!(crate::format_uptime(Duration::from_secs(7 * 86400 + 86400 + 3600 + 60)), "1 week, 1 day, 1 hour, 1 minute");
+        assert_eq!(crate::format_uptime(Duration::from_secs(2 * 7 * 86400 + 3 * 86400)), "2 weeks, 3 days, 0 hours, 0 minutes");
+    }
+
+    // --- dynamic uptime in show version ---
+
+    #[tokio::test]
+    async fn test_show_version_uptime_not_static() {
+        // The uptime in show version should NOT be the old static string
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = send_cmd(&mut device, "show version").await;
+        assert!(!output.contains("42 days, 3 hours, 17 minutes"),
+            "show version should not contain the old static uptime string");
+        // Should contain "uptime is" followed by some dynamic value with "minutes"
+        assert!(output.contains("uptime is"),
+            "show version should contain 'uptime is'");
+        assert!(output.contains("minutes") || output.contains("minute"),
+            "show version uptime should contain minutes");
+    }
+
+    #[tokio::test]
+    async fn test_show_version_system_restarted_not_static() {
+        // "System restarted at" line should not show the old hardcoded year-2000 date
+        let mut device = MockIosDevice::new("Router1");
+        let _ = device.receive(Duration::from_secs(1)).await.unwrap();
+        let output = send_cmd(&mut device, "show version").await;
+        assert!(!output.contains("Feb 28 2000"),
+            "System restarted at should not contain the old hardcoded date");
+        assert!(output.contains("System restarted at"),
+            "show version should contain 'System restarted at'");
+    }
 }
 
 #[cfg(test)]

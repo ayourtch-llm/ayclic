@@ -908,7 +908,7 @@ pub fn handle_show_ip_pim(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_ip_ssh(d: &mut MockIosDevice, _input: &str) {
-    show_stub(d, "SSH Enabled - version 2.0\nAuthentication timeout: 120 secs; Authentication retries: 3\nMinimum expected Diffie Hellman key size : 1024 bits\nIOS Keys in SECSH format(ssh-rsa, base64 encoded): router_key\n ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC0000000000000000000000000000\n router_key");
+    show_stub(d, "SSH Enabled - version 2.0\nAuthentication methods:publickey,keyboard-interactive,password\nAuthentication Publickey Algorithms:x509v3-ssh-rsa,ssh-rsa\nHostkey Algorithms:x509v3-ssh-rsa,ssh-rsa\nEncryption Algorithms:aes128-ctr,aes192-ctr,aes256-ctr\nMAC Algorithms:hmac-sha2-256,hmac-sha2-512,hmac-sha1,hmac-sha1-96\nKEX Algorithms:diffie-hellman-group-exchange-sha1,diffie-hellman-group14-sha1\nAuthentication timeout: 120 secs; Authentication retries: 3\nMinimum expected Diffie Hellman key size : 1024 bits\nIOS Keys in SECSH format(ssh-rsa, 2048 bits): ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDJ5xCTpIOAFoW8BxGOSOFXbMJiJRSTJbp8b1T");
 }
 
 pub fn handle_show_ip_traffic(d: &mut MockIosDevice, _input: &str) {
@@ -1156,7 +1156,7 @@ pub fn handle_show_sessions(d: &mut MockIosDevice, _input: &str) {
 pub fn handle_show_ssh(d: &mut MockIosDevice, _input: &str) {
     show_stub(
         d,
-        "Connection   Version  Mode  Encryption  Hmac         State           Username\n0            2.0      IN    aes256-ctr  hmac-sha2-25 Session started  admin",
+        "Connection Version Mode Encryption  Hmac         State           Username\n0          2.0     IN   aes256-ctr  hmac-sha2-25 Session started  admin\n0          2.0     OUT  aes256-ctr  hmac-sha2-25 Session started  admin\n%No SSHv1 server connections running.",
     );
 }
 

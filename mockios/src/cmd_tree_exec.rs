@@ -538,12 +538,28 @@ Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID
 }
 
 pub fn handle_show_users(d: &mut MockIosDevice, _input: &str) {
-    let output = "\
-    Line       User       Host(s)              Idle       Location
-*  0 con 0                idle                 00:00:00
-";
+    // Build a realistic "show users" output matching Cisco IOS 15.2 format.
+    // The current session is always marked with '*'.
+    // If a username is configured (login required), show it on the VTY line
+    // with a simulated peer address; otherwise show an anonymous console session.
+    let header = "    Line       User       Host(s)              Idle       Location";
+    let footer = "\n  Interface    User               Mode         Idle     Peer Address";
+
+    let user = d.username.clone().unwrap_or_default();
+    let session_line = if user.is_empty() {
+        // No login — show as console session (anonymous)
+        "   0 con 0                idle                 00:00:00   ".to_string()
+    } else {
+        // Login configured — show as VTY 0 session with simulated peer address
+        format!(
+            " 66 vty 0     {:<10} idle                 00:00:00   192.168.1.1",
+            user
+        )
+    };
+
+    let output = format!("{}\n*{}\n{}", header, session_line, footer);
     let p = d.prompt();
-    d.queue_output(&format!("{}{}", output, p));
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_ip_ospf(d: &mut MockIosDevice, _input: &str) {
@@ -579,17 +595,27 @@ CPU utilization for five seconds: 5%/0%; one minute: 5%; five minutes: 5%
 
 pub fn handle_show_logging(d: &mut MockIosDevice, _input: &str) {
     let output = "\
-Syslog logging: enabled (0 messages dropped, 0 messages rate-limited,
-    0 flushes, 0 overruns, xml disabled, filtering disabled)
+Syslog logging: enabled (0 messages dropped, 0 messages rate-limited, 0 flushes, 0 overruns, xml disabled, filtering disabled)
+
+No Active Message Discriminator.
+
+
+No Inactive Message Discriminator.
+
 
     Console logging: level debugging, 0 messages logged, xml disabled,
                      filtering disabled
     Monitor logging: level debugging, 0 messages logged, xml disabled,
                      filtering disabled
-    Buffer logging:  disabled, xml disabled,
-                     filtering disabled
+    Buffer logging:  level debugging, 0 messages logged, xml disabled,
+                    filtering disabled
+    Exception Logging: size (4096 bytes)
+    Count and timestamp logging messages: disabled
+    Persistent logging: disabled
 
-Log Buffer (4096 bytes):
+No active filter modules.
+
+    Trap logging: level debugging, 0 facility, 0 severity
 ";
     let p = d.prompt();
     d.queue_output(&format!("{}{}", output, p));
@@ -868,10 +894,25 @@ pub fn handle_show_power(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_protocols(d: &mut MockIosDevice, _input: &str) {
-    show_stub(
-        d,
-        "Routing Protocol is \"application\"\n  Sending updates every 0 seconds\nRouting Protocol is \"connected\"\n  Sending updates every 0 seconds",
-    );
+    let mut output = String::new();
+    let routing = if d.state.ip_routing { "enabled" } else { "disabled" };
+    output.push_str(&format!("Global values:\n  Internet Protocol routing is {}\n", routing));
+    for iface in &d.state.interfaces {
+        let (status, protocol) = if !iface.admin_up {
+            ("administratively down", "down")
+        } else if iface.link_up {
+            ("up", "up")
+        } else {
+            ("down", "down")
+        };
+        output.push_str(&format!("{} is {}, line protocol is {}\n", iface.name, status, protocol));
+        if let Some((addr, mask)) = iface.ip_address {
+            let prefix_len = u32::from(mask).count_ones();
+            output.push_str(&format!("  Internet address is {}/{}\n", addr, prefix_len));
+        }
+    }
+    let p = d.prompt();
+    d.queue_output(&format!("{}{}", output, p));
 }
 
 pub fn handle_show_sessions(d: &mut MockIosDevice, _input: &str) {

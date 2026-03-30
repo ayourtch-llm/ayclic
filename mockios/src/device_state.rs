@@ -811,9 +811,7 @@ impl DeviceState {
             lines.push("!".to_string());
         }
 
-        // 5. Before spanning-tree: no ip source-route
-        lines.push("no ip source-route".to_string());
-        lines.push("!".to_string());
+        // 5. Before spanning-tree
 
         lines.push(format!("spanning-tree mode {}", self.spanning_tree_mode));
         lines.push("spanning-tree extend system-id".to_string());
@@ -944,21 +942,24 @@ impl DeviceState {
         }
 
         // 7. After ip route section, before line con
+        lines.push("ip forward-protocol nd".to_string());
         lines.push("ip http server".to_string());
         lines.push("ip http secure-server".to_string());
         lines.push("ip ssh version 2".to_string());
         lines.push("!".to_string());
 
-        // Line configuration (real IOS style)
+        // Line configuration (real IOS 15.2 style)
         lines.push("!".to_string());
         lines.push("line con 0".to_string());
-        lines.push(" stopbits 1".to_string());
+        lines.push(" privilege level 15".to_string());
         lines.push("line vty 0 4".to_string());
-        lines.push(" login local".to_string());
-        lines.push(" transport input ssh".to_string());
+        lines.push(" exec-timeout 0 0".to_string());
+        lines.push(" privilege level 15".to_string());
+        lines.push(" length 0".to_string());
+        lines.push(" transport input telnet ssh".to_string());
         lines.push("line vty 5 15".to_string());
-        lines.push(" login local".to_string());
-        lines.push(" transport input ssh".to_string());
+        lines.push(" privilege level 15".to_string());
+        lines.push(" transport input telnet ssh".to_string());
         lines.push("!".to_string());
 
         lines.push("end".to_string());
@@ -1915,10 +1916,28 @@ mod tests {
         assert!(config.contains("aaa authentication login default local"));
         assert!(config.contains("switch 1 provision ws-c3560cx-12pd-s"));
         assert!(config.contains("system mtu routing 1500"));
-        assert!(config.contains("no ip source-route"));
+        assert!(!config.contains("no ip source-route"), "no ip source-route should not appear");
+        assert!(config.contains("ip forward-protocol nd"));
         assert!(config.contains("lldp run"));
         assert!(config.contains("ip http server"));
         assert!(config.contains("ip ssh version 2"));
+    }
+
+    #[test]
+    fn test_running_config_line_section() {
+        let state = DeviceState::new("Switch1");
+        let config = state.generate_running_config();
+        // line con 0 should have privilege level 15 (no stopbits)
+        assert!(config.contains("line con 0\n privilege level 15"), "line con 0 should have privilege level 15");
+        assert!(!config.contains("stopbits"), "stopbits should not appear in line section");
+        // line vty 0 4 should have exec-timeout, privilege level, length, and transport input telnet ssh
+        assert!(config.contains("line vty 0 4\n exec-timeout 0 0\n privilege level 15\n length 0\n transport input telnet ssh"),
+            "line vty 0 4 should have correct real IOS format");
+        // line vty 5 15 should have privilege level and transport input telnet ssh (no exec-timeout)
+        assert!(config.contains("line vty 5 15\n privilege level 15\n transport input telnet ssh"),
+            "line vty 5 15 should have correct real IOS format");
+        // login local should not appear in line sections
+        assert!(!config.contains(" login local"), "login local should not appear in line sections");
     }
 
     #[test]

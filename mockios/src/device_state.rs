@@ -2338,6 +2338,43 @@ mod tests {
     }
 
     #[test]
+    fn test_show_run_byte_count_is_accurate() {
+        // The 'Current configuration : N bytes' header must reflect
+        // the actual byte length of the config body that follows.
+        let state = DeviceState::new("R1");
+        let output = state.generate_running_config();
+
+        // The format is:
+        //   "Building configuration...\n\nCurrent configuration : N bytes\n<body>"
+        // Split off the header (everything before and including the "N bytes\n" line)
+        // to get the body that N should describe.
+        let prefix = "Current configuration : ";
+        let header_pos = output
+            .find(prefix)
+            .expect("output should contain 'Current configuration : '");
+        let after_prefix = &output[header_pos + prefix.len()..];
+        let space_pos = after_prefix
+            .find(' ')
+            .expect("should find space after byte count");
+        let reported_bytes: usize = after_prefix[..space_pos]
+            .parse()
+            .expect("byte count should be a valid integer");
+
+        // The body starts after "Current configuration : N bytes\n"
+        let newline_pos = after_prefix
+            .find('\n')
+            .expect("should find newline after byte count line");
+        let body = &after_prefix[newline_pos + 1..];
+        let actual_bytes = body.len();
+
+        assert_eq!(
+            reported_bytes, actual_bytes,
+            "Reported byte count ({}) must equal actual body length ({})",
+            reported_bytes, actual_bytes
+        );
+    }
+
+    #[test]
     fn test_show_run_has_version_and_service() {
         let state = DeviceState::new("R1");
         let output = state.generate_running_config();

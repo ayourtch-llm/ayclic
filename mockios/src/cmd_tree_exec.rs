@@ -964,7 +964,45 @@ pub fn handle_show_dot1x(d: &mut MockIosDevice, _input: &str) {
 }
 
 pub fn handle_show_errdisable(d: &mut MockIosDevice, _input: &str) {
-    show_stub(d, "ErrDisable Reason\nTimeout\n---------\n---------");
+    show_stub(d, "");
+}
+
+pub fn handle_show_errdisable_recovery(d: &mut MockIosDevice, _input: &str) {
+    show_stub(
+        d,
+        "ErrDisable Reason            Timer Status\n\
+-----------------            --------------\n\
+arp-inspection               Disabled\n\
+bpduguard                    Disabled\n\
+channel-misconfig (STP)      Disabled\n\
+dhcp-rate-limit              Disabled\n\
+dtp-flap                     Disabled\n\
+gbic-invalid                 Disabled\n\
+inline-power                 Disabled\n\
+l2ptguard                    Disabled\n\
+link-flap                    Disabled\n\
+mac-limit                    Disabled\n\
+loopback                     Disabled\n\
+pagp-flap                    Disabled\n\
+port-mode-failure            Disabled\n\
+pppoe-ia-rate-limit          Disabled\n\
+psecure-violation            Disabled\n\
+security-violation           Disabled\n\
+sfp-config-mismatch          Disabled\n\
+small-frame                  Disabled\n\
+storm-control                Disabled\n\
+udld                         Disabled\n\
+unicast-flood                Disabled\n\
+vmps                         Disabled\n\
+psp                          Disabled\n\
+dual-active-recovery         Disabled\n\
+evc-lite input mapping fa    Disabled\n\
+Recovery command: \"clear     Disabled\n\
+\n\
+Timer interval: 300 seconds\n\
+\n\
+Interfaces that will be enabled at the next timeout:",
+    );
 }
 
 pub fn handle_show_etherchannel(d: &mut MockIosDevice, _input: &str) {
@@ -1560,7 +1598,11 @@ fn build_exec_tree() -> Vec<CommandNode> {
                 keyword("dot1x", "Dot1x information")
                     .handler(handle_show_dot1x),
                 keyword("errdisable", "Error disable")
-                    .handler(handle_show_errdisable),
+                    .handler(handle_show_errdisable as CmdHandler)
+                    .children(vec![
+                        keyword("recovery", "ErrDisable recovery timer")
+                            .handler(handle_show_errdisable_recovery),
+                    ]),
                 keyword("etherchannel", "EtherChannel information")
                     .handler(handle_show_etherchannel as CmdHandler)
                     .children(vec![
@@ -2782,6 +2824,96 @@ mod tests {
         assert!(
             matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
             "sh ip pro should match show ip protocols"
+        );
+    }
+
+    // ─── show errdisable recovery tests ──────────────────────────────────────
+
+    /// `show errdisable recovery` should parse as Execute.
+    #[test]
+    fn test_show_errdisable_recovery_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show errdisable recovery", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "show errdisable recovery should parse as Execute"
+        );
+    }
+
+    /// Abbreviated `sh errdis rec` should also parse.
+    #[test]
+    fn test_show_errdisable_recovery_abbreviation_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("sh errdis rec", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "sh errdis rec should match show errdisable recovery"
+        );
+    }
+
+    /// `show errdisable recovery` output should contain the IOS 15.2 header line.
+    #[test]
+    fn test_show_errdisable_recovery_output_header() {
+        let mut device = make_device();
+        handle_show_errdisable_recovery(&mut device, "show errdisable recovery");
+        let output = device.drain_output();
+        assert!(
+            output.contains("ErrDisable Reason            Timer Status"),
+            "show errdisable recovery should contain header line, got: {:?}",
+            output
+        );
+    }
+
+    /// Output should list bpduguard as Disabled.
+    #[test]
+    fn test_show_errdisable_recovery_bpduguard_disabled() {
+        let mut device = make_device();
+        handle_show_errdisable_recovery(&mut device, "show errdisable recovery");
+        let output = device.drain_output();
+        assert!(
+            output.contains("bpduguard                    Disabled"),
+            "output should show bpduguard Disabled, got: {:?}",
+            output
+        );
+    }
+
+    /// Output should contain the timer interval line.
+    #[test]
+    fn test_show_errdisable_recovery_timer_interval() {
+        let mut device = make_device();
+        handle_show_errdisable_recovery(&mut device, "show errdisable recovery");
+        let output = device.drain_output();
+        assert!(
+            output.contains("Timer interval: 300 seconds"),
+            "output should contain 'Timer interval: 300 seconds', got: {:?}",
+            output
+        );
+    }
+
+    /// Output should contain the "Interfaces that will be enabled" footer line.
+    #[test]
+    fn test_show_errdisable_recovery_interfaces_footer() {
+        let mut device = make_device();
+        handle_show_errdisable_recovery(&mut device, "show errdisable recovery");
+        let output = device.drain_output();
+        assert!(
+            output.contains("Interfaces that will be enabled at the next timeout:"),
+            "output should contain interfaces footer, got: {:?}",
+            output
+        );
+    }
+
+    /// `show errdisable` alone (without subcommand) should still parse as Execute.
+    #[test]
+    fn test_show_errdisable_alone_parses() {
+        let tree = exec_tree();
+        let mode = CliMode::PrivilegedExec;
+        let result = parse("show errdisable", tree, &mode);
+        assert!(
+            matches!(result, crate::cmd_tree::ParseResult::Execute { .. }),
+            "show errdisable should parse as Execute"
         );
     }
 }

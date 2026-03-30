@@ -1596,6 +1596,131 @@ Appliance trust: none\n",
         output
     }
 
+    // ─── Protocols Show Command ──────────────────────────────────────────────
+
+    /// Generate `show protocols` output matching real IOS 15.2 format.
+    ///
+    /// Format:
+    ///   Global values:
+    ///     Internet Protocol routing is enabled
+    ///   Vlan1 is up, line protocol is up
+    ///     Internet address is 10.1.0.254/24
+    ///   GigabitEthernet1/0/1 is down, line protocol is down
+    pub fn generate_show_protocols(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+
+        lines.push("Global values:".to_string());
+        if self.ip_routing {
+            lines.push("  Internet Protocol routing is enabled".to_string());
+        } else {
+            lines.push("  Internet Protocol routing is disabled".to_string());
+        }
+
+        for iface in &self.interfaces {
+            let (admin_status, proto_status) = if !iface.admin_up {
+                ("administratively down", "down")
+            } else if iface.link_up {
+                ("up", "up")
+            } else {
+                ("down", "down")
+            };
+
+            lines.push(format!(
+                "{} is {}, line protocol is {}",
+                iface.name, admin_status, proto_status
+            ));
+
+            if let Some((addr, mask)) = iface.ip_address {
+                let prefix_len = ipv4_mask_to_prefix_len(mask);
+                lines.push(format!("  Internet address is {}/{}", addr, prefix_len));
+            }
+        }
+
+        lines.join("\n")
+    }
+
+    // ─── IP Show Commands ────────────────────────────────────────────────────
+
+    /// Generate `show ip interface` (full detail) output matching real IOS 15.2 format.
+    ///
+    /// For interfaces with an IP address, shows the address and a set of common
+    /// settings (broadcast, MTU, helper, proxy ARP, ICMP, fast switching, etc.).
+    /// For interfaces with no IP address, shows "Internet protocol processing disabled".
+    pub fn generate_show_ip_interface(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        for iface in &self.interfaces {
+            let (status, protocol) = if !iface.admin_up {
+                ("administratively down", "down")
+            } else if iface.link_up {
+                ("up", "up")
+            } else {
+                ("down", "down")
+            };
+
+            let mut block = String::new();
+            block.push_str(&format!(
+                "{} is {}, line protocol is {}\n",
+                iface.name, status, protocol
+            ));
+
+            if let Some((addr, mask)) = iface.ip_address {
+                let prefix_len = ipv4_mask_to_prefix_len(mask);
+                // Derive broadcast: host bits all-ones
+                let addr_u32 = u32::from(addr);
+                let mask_u32 = u32::from(mask);
+                let bcast = Ipv4Addr::from(addr_u32 | !mask_u32);
+                block.push_str(&format!(
+                    "  Internet address is {}/{}\n",
+                    addr, prefix_len
+                ));
+                block.push_str(&format!("  Broadcast address is {}\n", bcast));
+                block.push_str("  Address determined by non-volatile memory\n");
+                block.push_str(&format!("  MTU is {} bytes\n", iface.mtu));
+                block.push_str("  Helper address is not set\n");
+                block.push_str("  Directed broadcast forwarding is disabled\n");
+                block.push_str("  Outgoing Common access list is not set\n");
+                block.push_str("  Outgoing access list is not set\n");
+                block.push_str("  Inbound  Common access list is not set\n");
+                block.push_str("  Inbound  access list is not set\n");
+                block.push_str("  Proxy ARP is enabled\n");
+                block.push_str("  Local Proxy ARP is disabled\n");
+                block.push_str("  Security level is default\n");
+                block.push_str("  Split horizon is enabled\n");
+                block.push_str("  ICMP redirects are always sent\n");
+                block.push_str("  ICMP unreachables are always sent\n");
+                block.push_str("  ICMP mask replies are never sent\n");
+                block.push_str("  IP fast switching is enabled\n");
+                block.push_str("  IP Flow switching is disabled\n");
+                block.push_str("  IP CEF switching is enabled\n");
+                block.push_str("  IP CEF switching turbo vector\n");
+                block.push_str("  IP Null turbo vector\n");
+                block.push_str("  IP multicast fast switching is enabled\n");
+                block.push_str("  IP multicast distributed fast switching is disabled\n");
+                block.push_str("  IP route-cache flags are Fast, CEF\n");
+                block.push_str("  Router Discovery is disabled\n");
+                block.push_str("  IP output packet accounting is disabled\n");
+                block.push_str("  IP access violation accounting is disabled\n");
+                block.push_str("  TCP/IP header compression is disabled\n");
+                block.push_str("  RTP/IP header compression is disabled\n");
+                block.push_str("  Probe proxy name replies are disabled\n");
+                block.push_str("  Policy routing is disabled\n");
+                block.push_str("  Network address translation is disabled\n");
+                block.push_str("  BGP Policy Mapping is disabled\n");
+                block.push_str("  Input features: MCI Check\n");
+                block.push_str("  IPv4 WCCP Redirect outbound is disabled\n");
+                block.push_str("  IPv4 WCCP Redirect inbound is disabled\n");
+                block.push_str("  IPv4 WCCP Redirect exclude is disabled\n");
+            } else {
+                block.push_str("  Internet protocol processing disabled\n");
+            }
+
+            parts.push(block);
+        }
+
+        parts.join("")
+    }
+
     // ─── IPv6 Show Commands ──────────────────────────────────────────────────
 
     /// Generate `show ipv6 interface brief` output matching real IOS format.
@@ -1824,6 +1949,93 @@ Appliance trust: none\n",
         }
 
         lines.join("\n")
+    }
+
+    /// Generate `show ip ospf` output matching real IOS format.
+    /// Uses OSPFv3 processes as a stand-in since this is a mock device.
+    pub fn generate_show_ip_ospf(&self) -> Option<String> {
+        if self.ospfv3_processes.is_empty() {
+            return None;
+        }
+
+        let mut lines: Vec<String> = Vec::new();
+        for proc in &self.ospfv3_processes {
+            let rid = proc.router_id
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "0.0.0.0".to_string());
+
+            lines.push(format!(" Routing Process \"ospf {}\" with ID {}", proc.process_id, rid));
+            lines.push(" Start time: 00:00:00.000, Time elapsed: 00:01:00.000".to_string());
+            lines.push(" Supports only single TOS(TOS0) routes".to_string());
+            lines.push(" Supports opaque LSA".to_string());
+            lines.push(" Supports Link-local Signaling (LLS)".to_string());
+            lines.push(" Supports area transit capability".to_string());
+            lines.push(" Supports NSSA (compatible with RFC 3101)".to_string());
+            lines.push(" Event-log enabled, Maximum number of events: 1000, Mode: cyclic".to_string());
+            lines.push(" Router is not originating router-LSAs with maximum metric".to_string());
+            lines.push(format!(" Initial SPF schedule delay {} msecs", proc.spf_delay));
+            lines.push(format!(" Minimum hold time between two consecutive SPFs {} msecs", proc.spf_hold));
+            lines.push(format!(" Maximum wait time between two consecutive SPFs {} msecs", proc.spf_max_wait));
+            lines.push(" Minimum LSA interval 5 secs".to_string());
+            lines.push(" Minimum LSA arrival 1000 msecs".to_string());
+            lines.push(" LSA group pacing timer 240 secs".to_string());
+            lines.push(" Interface flood pacing timer 33 msecs".to_string());
+            lines.push(" Retransmission pacing timer 66 msecs".to_string());
+            lines.push(" Number of external LSA 0. Checksum Sum 0x000000".to_string());
+            lines.push(" Number of opaque AS LSA 0. Checksum Sum 0x000000".to_string());
+            lines.push(" Number of DCbitless external and opaque AS LSA 0".to_string());
+            lines.push(" Number of DoNotAge external and opaque AS LSA 0".to_string());
+
+            let normal_count = proc.areas.iter().filter(|a| a.area_type == OspfV3AreaType::Normal).count();
+            let stub_count = proc.areas.iter().filter(|a| a.area_type == OspfV3AreaType::Stub).count();
+            let nssa_count = proc.areas.iter().filter(|a| a.area_type == OspfV3AreaType::Nssa).count();
+            lines.push(format!(" Number of areas in this router is {}. {} normal {} stub {} nssa",
+                proc.areas.len(), normal_count, stub_count, nssa_count));
+            lines.push(" All adjacency changes are logged".to_string());
+            lines.push(format!(" Reference bandwidth unit is {} mbps", proc.reference_bandwidth));
+
+            for area in &proc.areas {
+                let area_name = if area.area_id == 0 {
+                    "BACKBONE(0)".to_string()
+                } else {
+                    format!("{}", area.area_id)
+                };
+
+                let iface_count = self.interfaces.iter()
+                    .filter(|i| i.ospfv3_config.as_ref()
+                        .map(|c| c.process_id == proc.process_id && c.area_id == area.area_id)
+                        .unwrap_or(false))
+                    .count();
+
+                let active = if iface_count > 0 && self.interfaces.iter()
+                    .any(|i| i.ospfv3_config.as_ref()
+                        .map(|c| c.process_id == proc.process_id && c.area_id == area.area_id)
+                        .unwrap_or(false) && i.admin_up && i.link_up)
+                {
+                    ""
+                } else {
+                    " (Inactive)"
+                };
+
+                lines.push(format!("    Area {}{}", area_name, active));
+                lines.push(format!("        Number of interfaces in this area is {}", iface_count));
+                lines.push(format!("        SPF algorithm executed {} times", area.spf_executions));
+                lines.push(format!("        Number of LSA {}. Checksum Sum 0x{:06X}", area.lsa_count, area.lsa_checksum));
+                lines.push("        Number of DCbitless LSA 0".to_string());
+                lines.push("        Number of indication LSA 0".to_string());
+                lines.push("        Number of DoNotAge LSA 0".to_string());
+                lines.push("        Flood list length 0".to_string());
+            }
+        }
+
+        Some(lines.join("\n"))
+    }
+
+    /// Generate `show ip ospf neighbor` output matching real IOS format.
+    /// Returns a table with the standard header; neighbor rows are empty in
+    /// this mock since no dynamic adjacencies are tracked.
+    pub fn generate_show_ip_ospf_neighbor(&self) -> String {
+        "Neighbor ID     Pri   State           Dead Time   Address         Interface".to_string()
     }
 
     /// Generate `show ipv6 ospf interface brief` output.

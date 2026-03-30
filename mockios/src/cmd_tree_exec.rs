@@ -581,7 +581,16 @@ pub fn handle_show_users(d: &mut MockIosDevice, _input: &str) {
 
 pub fn handle_show_ip_ospf(d: &mut MockIosDevice, _input: &str) {
     let p = d.prompt();
-    d.queue_output(&format!("%% OSPF: No router process is configured\n{}", p));
+    match d.state.generate_show_ip_ospf() {
+        Some(output) => d.queue_output(&format!("{}\n{}", output, p)),
+        None => d.queue_output(&format!("%% OSPF: No router process is configured\n{}", p)),
+    }
+}
+
+pub fn handle_show_ip_ospf_neighbor(d: &mut MockIosDevice, _input: &str) {
+    let output = d.state.generate_show_ip_ospf_neighbor();
+    let p = d.prompt();
+    d.queue_output(&format!("{}\n{}", output, p));
 }
 
 pub fn handle_show_ip_protocols(d: &mut MockIosDevice, _input: &str) {

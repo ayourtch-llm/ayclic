@@ -8,73 +8,50 @@ We're improving the mockios crate to make it indistinguishable from a real Cisco
 6. docs/plans/rest-of-line-audit.md — audit of stub handlers that need proper implementation
 7. docs/plans/mockios-realism-batch1.md — live comparison with WS-C3560CX-12PD-S
 
-## Current state (302 tests, all passing)
+## Current state (568 tests, all passing)
 
 ### Architecture
-- **cmd_tree.rs** — command tree parser. Keywords use proper case, `find_matches()` lowercases both sides. Keywords beat params when both match. `?` help output is sorted alphabetically.
-- **cmd_tree_exec.rs** — exec mode. 50+ show commands including: version, run, startup, ip int brief, ip route (grouped, indented codes), interfaces (+ status subcommand), vlan, clock (real time), boot, history, terminal, cdp, users, logging, arp (self-entries), mac, spanning-tree (per-VLAN blocks), ip ospf, ip protocols, processes cpu, access-lists, flash, install, ntp, snmp, privilege, line, inventory, environment, aaa, authentication, crypto, debugging, dhcp, dot1x, errdisable, etherchannel, hosts, license, lldp, module, platform, policy-map, port-security, power, protocols, sessions, ssh, standby, storm-control, switch, vtp. Exec commands: help, enable, debug/undebug, clock set, clear, ssh, telnet, ping, traceroute, copy, delete, verify, dir, reload, write, configure.
-- **cmd_tree_conf.rs** — config mode with sub-mode trees (config-if, config-router, config-line). **`no` is a prefix modifier** — its children are a clone of the parent tree. Interface command accepts abbreviated forms: `g1/0/9` → `GigabitEthernet1/0/9`, `te1/0/1` → `TenGigabitEthernet1/0/1`, plus both space-separated and concatenated forms.
-- **device_state.rs** — DeviceState model: WS-C3560CX-12PD-S defaults with Vlan1 + Gi1/0/1..16 + Te1/0/1..2, default VLANs 1-5 + 1002-1005, base_mac, sw_image, spanning_tree_mode, vtp_mode, aaa_new_model, ip_routing, service_password_encryption. Helpers: abbreviate_interface_name(), short_interface_name(), mac_to_cisco_format(). Methods: generate_running_config(), generate_show_vlan_brief() (with port wrapping), generate_show_interfaces_status(), generate_show_spanning_tree(), generate_show_arp().
-- **lib.rs** — MockIosDevice with send()/receive(), character echo, CLI editing (Emacs keys, arrows, history), tab completion. show version (~60 lines matching real device), show ip interface brief (correct abbreviation, method unset/NVRAM, admin down).
+- **cmd_tree.rs** — command tree parser. Keywords use proper case, `find_matches()` lowercases both sides. Keywords beat params when both match. `?` help output is sorted alphabetically. `ParamType::NumberRange(min, max)` for range-validated numeric params.
+- **cmd_tree_exec.rs** — exec mode. 50+ show commands including: version, run, startup, ip int brief, ip route (grouped, indented codes), interfaces (+ status subcommand), vlan, clock (real time), boot, history, terminal, cdp, users, logging (dynamic from state), arp (self-entries), mac (real format with VLAN/MAC/Type/Ports), spanning-tree (per-VLAN blocks), ip ospf, ip protocols, processes cpu, access-lists, flash, install, ntp, snmp, privilege, line, inventory, environment, aaa, authentication, crypto, debugging, dhcp, dot1x, errdisable, etherchannel, hosts, license, lldp, module, platform, policy-map, port-security, power, protocols, sessions, ssh, standby, storm-control, switch, vtp. Exec commands: help, enable, debug/undebug, clock set, clear, ssh, telnet, ping, traceroute, copy, delete, verify, dir, reload, write, configure.
+- **cmd_tree_conf.rs** — config mode with sub-mode trees (config-if, config-router, config-line, config-ext-nacl, config-std-nacl, config-vlan). **`no` is a prefix modifier** — its children are a clone of the parent tree. Interface command accepts abbreviated forms: `g1/0/9` → `GigabitEthernet1/0/9`, `te1/0/1` → `TenGigabitEthernet1/0/1`, plus both space-separated and concatenated forms.
+- **device_state.rs** — DeviceState model: WS-C3560CX-12PD-S defaults with Vlan1 + Gi1/0/1..16 + Te1/0/1..2, default VLANs 1-5 + 1002-1005, base_mac, sw_image, spanning_tree_mode, vtp_mode, aaa_new_model, ip_routing, service_password_encryption. UserAccount model. Logging state (buffered_size, console, monitor, hosts). Helpers: abbreviate_interface_name(), short_interface_name(), mac_to_cisco_format(). Methods: generate_running_config(), generate_show_vlan_brief() (with port wrapping), generate_show_interfaces_status(), generate_show_spanning_tree(), generate_show_arp().
+- **lib.rs** — MockIosDevice with send()/receive(), character echo, CLI editing (Emacs keys, arrows, history), tab completion, pipe filtering (`| include`, `| exclude`, `| begin`, `| section`, `| count`). show version (~60 lines matching real device), show ip interface brief (correct abbreviation, method unset/NVRAM, admin down).
 
-### What was done this session (2026-03-28, session 2)
-- **Fixed interface name abbreviation bug**: `g1/0/9` → `GigabitEthernet1/0/9`, `te1/0/1` → `TenGigabitEthernet1/0/1`. `normalize_interface_name` now splits at alpha→digit boundary before matching. Also fixed `show interfaces g1/0/9` to normalize the filter name. 9 new tests.
-- **Removed extra blank lines**: Real IOS has no blank line between command and output. Removed ~99 leading `\n` from queue_output calls across all 3 source files (cmd_tree_exec.rs, cmd_tree_conf.rs, lib.rs). The Enter key echo already provides `\r\n`.
+### What was done this session (2026-03-30)
+- **Fixed `access-list ?`**: Now shows proper number ranges (`<1-99>`, `<100-199>`, etc.) instead of `<rest>`. Added `ParamType::NumberRange(min, max)` to cmd_tree.rs. 4 new tests.
+- **Added `ip access-list extended/standard <name>`**: Enters config-ext-nacl / config-std-nacl sub-mode. Permit/deny/remark entries stored in AccessList model. Named ACLs render in block format in show running-config. `no ip access-list` removes. 14 new tests.
+- **Fixed speed/duplex stubs**: Now write to InterfaceState. `speed 100` / `duplex full` reflected in `show interfaces`. Tree has proper keyword children (10/100/1000/auto, auto/full/half). 10 new tests.
+- **Added vlan config sub-mode**: `vlan 100` enters config-vlan, creates VlanState. `name <word>` sets VLAN name. `no vlan` removes. Shows in `show vlan brief`. 6 new tests.
+- **Added username state handler**: Parses `username <name> [privilege <n>] secret/password <pw>`. UserAccount model in DeviceState. Shows in running-config. 4 new tests.
+- **Added logging config state**: `logging buffered/console/monitor/host` write to DeviceState. `show logging` reflects dynamic state. 12 new tests.
+- **Fixed pipe filter CR/LF bug**: Filtered output was bypassing `queue_output()`, causing concatenated lines in telnet. 1 new test.
+- **Fixed `?` help column width**: Narrowed from 17 to 15 chars to match real IOS.
+- 7 commits, tests 517 → 568
+
+### What was done previous session (2026-03-28, session 2)
+- Fixed interface name abbreviation bug, removed extra blank lines
 - 3 commits, tests 293 → 302
-
-### What was done previous session (2026-03-28, session 1)
-- Switch-correct interfaces: Vlan1 + Gi1/0/1..16 + Te1/0/1..2 (replacing router-style Gi0/X)
-- Default VLANs 1002-1005 with act/unsup status
-- Show version overhaul (~60 lines matching real WS-C3560CX output)
-- Interface name abbreviation only when >= 23 chars (real IOS behavior)
-- Method unset/NVRAM in show ip interface brief
-- VLAN port list wrapping at 52 chars with 48-col indent
-- Removed spurious .SPA from system image filename
-- Default shutdown state for unconnected ports (Gi1/0/5-16, Te1/0/1-2)
-- Sanitized serials/MACs to plausible but fictional values
-- New show interfaces status command
-- Running-config enrichment (no service pad, aaa auth, switch provision, system mtu, lldp, ip http/ssh)
-- Spanning-tree per-VLAN blocks with priority calculation and interface table
-- Fixed interface command to accept concatenated type+number (GigabitEthernet1/0/1)
-- IP route codes header 7-space indentation
-- Show arp self-entries with per-interface MAC
-- Show interfaces status column alignment fix
-- Show clock using real system time
-- 26 new stub show commands (50+ total)
-- Alphabetical sorting of ? help output
-- Show mac address-table and 20 config-if stub commands
-- Switchport mode/access vlan handlers
-- 15+ commits, tests 242 → 293
 
 ## What to work on next (priority order)
 
-### P0 — Bugs and high-impact fixes
-1. **access-list ?** shows `<rest>` placeholder — needs proper argument help (e.g., `<1-99>`, `<100-199>`)
-2. **ip access-list extended** — not present in config mode, needs adding
-3. **show running-config interface <name>** — `show run int gi1/0/9` fails with Invalid input; needs interface filter support
-4. **show interfaces formatting** — missing 2-space indentation, wrong rate interval (5 min vs 30 sec real IOS), missing detail lines (dribble, unknown protocol drops, babbles, etc.)
-
-### P0 — Remaining stub handlers that should write to DeviceState
-5. **speed/duplex** — InterfaceState has fields but handler stubs
-6. **vlan config** — should update VlanState for show vlan brief
-7. **username** — needed for auth simulation
-8. **logging** — model for show logging accuracy
+### P0 — All original P0 items are DONE
 
 ### P1 — Feature gaps
-9. **Remove old running_config Vec<String>** — superseded by DeviceState, but still referenced
-10. **IPv6 support** — ipv6 address, show ipv6 interface brief, show ipv6 route
-11. **Sub-submodes** (config-router-af etc.)
-12. **--More-- pagination** for long output
-13. **show mac address-table** — needs real format with VLAN/MAC/Type/Ports
-14. **More config-if commands** — real IOS has ~60, mockios has ~20
-15. **More config mode commands** — real IOS has ~180, mockios has fewer
-16. **Parameter value completion** — `int <TAB>` should list interfaces from device state
+1. **Remove old running_config Vec<String>** — superseded by DeviceState, still 112 references (big refactor)
+2. **IPv6 support** — ipv6 address, show ipv6 interface brief, show ipv6 route
+3. **Sub-submodes** (config-router-af etc.)
+4. **--More-- pagination** for long output
+5. **More config-if commands** — real IOS has ~60, mockios has ~25
+6. **More config mode commands** — real IOS has ~180, mockios has fewer
+7. **Parameter value completion** — `int <TAB>` should list interfaces from device state
 
 ### P2 — Polish
-17. **show inventory spacing** — minor differences vs real device
-18. **Compiler warnings** — fix remaining warnings from build
-19. **Pipe filtering** — `| include`, `| exclude`, `| begin`
-20. **Dynamic help column width** — currently fixed at ~17 chars
+8. **show inventory spacing** — minor differences vs real device
+9. **Dynamic help column width** — currently fixed at 15 chars
+10. **show ip interface brief trailing space padding** — real IOS pads Status/Protocol columns
+
+### P3 — Cleanup
+11. **Remove old running_config Vec<String> references** from handlers that still push to it
 
 ## The workflow
 1. Connect to real IOS devices (192.168.0.113 via SSH, user ayourtch/cisco123 — lab device; .130 is LIVE read-only) and observe behavior

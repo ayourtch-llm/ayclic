@@ -217,6 +217,24 @@ pub fn parse_verify_md5(output: &str) -> Option<String> {
     None
 }
 
+/// Parse the processor serial number from Cisco IOS `show version` output.
+///
+/// Looks for a line containing "Processor board ID " and returns the
+/// first whitespace-delimited token that follows it.
+pub fn parse_serial_from_show_version(output: &str) -> Option<String> {
+    const NEEDLE: &str = "Processor board ID ";
+    for line in output.lines() {
+        if let Some(pos) = line.find(NEEDLE) {
+            let after = line[pos + NEEDLE.len()..].trim();
+            let serial: String = after.split_whitespace().next()?.to_string();
+            if !serial.is_empty() {
+                return Some(serial);
+            }
+        }
+    }
+    None
+}
+
 /// Escape a string for use inside TCL double quotes.
 /// Escapes: backslash, double quote, dollar sign, square brackets.
 pub fn tcl_escape(s: &str) -> String {
@@ -989,6 +1007,26 @@ impl CiscoIosConn {
     pub fn read_timeout(&self) -> Duration {
         self.config.read_timeout
     }
+
+    /// Run `show version` and verify the device serial number matches `expected`.
+    ///
+    /// Returns `Ok(())` if the serial matches. Returns `CiscoIosError::SerialMismatch`
+    /// if the serial is present but doesn't match. Returns `CiscoIosError::Md5ParseError`
+    /// if the serial could not be parsed from the output.
+    pub async fn verify_serial(&mut self, expected: &str) -> Result<(), CiscoIosError> {
+        let output = self.run_cmd("show version").await?;
+        match parse_serial_from_show_version(&output) {
+            None => Err(CiscoIosError::Md5ParseError(
+                "could not parse serial from show version output".to_string(),
+            )),
+            Some(actual) if actual == expected => Ok(()),
+            Some(actual) => Err(CiscoIosError::SerialMismatch {
+                expected: expected.to_string(),
+                actual,
+                show_version_output: output,
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1692,5 +1730,36 @@ mod tests {
         let s = format!("{:?}", ChangeSafety::DelayedReload { minutes: 5 });
         assert!(s.contains("DelayedReload"));
         assert!(s.contains("5"));
+    }
+
+    // === parse_serial_from_show_version tests ===
+
+    #[test]
+    fn test_parse_serial_c9300() {
+        let output = r#"Cisco IOS XE Software, Version 17.03.04a
+Cisco IOS Software [Amsterdam], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.03.04a, RELEASE SOFTWARE (fc2)
+Technical Support: http://www.cisco.com/techsupport
+...
+Processor board ID FCW2145L0NH
+...
+"#;
+        assert_eq!(parse_serial_from_show_version(output), Some("FCW2145L0NH".to_string()));
+    }
+
+    #[test]
+    fn test_parse_serial_isr() {
+        let output = "Cisco IOS Software\nProcessor board ID FTX1234ABCD\nSome other line\n";
+        assert_eq!(parse_serial_from_show_version(output), Some("FTX1234ABCD".to_string()));
+    }
+
+    #[test]
+    fn test_parse_serial_missing() {
+        let output = "Some random output without the board ID line";
+        assert_eq!(parse_serial_from_show_version(output), None);
+    }
+
+    #[test]
+    fn test_parse_serial_empty() {
+        assert_eq!(parse_serial_from_show_version(""), None);
     }
 }

@@ -25,4 +25,7 @@ pub enum CiscoIosError {
 
     #[error("Operation timed out ({} bytes accumulated)", accumulated.len())]
     Timeout { accumulated: Vec<u8> },
+
+    #[error("Serial mismatch: expected {expected}, got {actual}")]
+    SerialMismatch { expected: String, actual: String, show_version_output: String },
 }

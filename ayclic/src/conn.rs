@@ -1016,10 +1016,10 @@ impl CiscoIosConn {
     pub async fn verify_serial(&mut self, expected: &str) -> Result<(), CiscoIosError> {
         let output = self.run_cmd("show version").await?;
         match parse_serial_from_show_version(&output) {
-            None => Err(CiscoIosError::Md5ParseError(
-                "could not parse serial from show version output".to_string(),
+            None => Err(CiscoIosError::SerialParseError(
+                "Could not parse serial from show version output".to_string(),
             )),
-            Some(actual) if actual == expected => Ok(()),
+            Some(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
             Some(actual) => Err(CiscoIosError::SerialMismatch {
                 expected: expected.to_string(),
                 actual,
@@ -1761,5 +1761,19 @@ Processor board ID FCW2145L0NH
     #[test]
     fn test_parse_serial_empty() {
         assert_eq!(parse_serial_from_show_version(""), None);
+    }
+
+    #[test]
+    fn test_parse_serial_whitespace_only_after_needle() {
+        // "Processor board ID " followed by only whitespace should return None
+        assert_eq!(parse_serial_from_show_version("Processor board ID \n"), None);
+    }
+
+    #[test]
+    fn test_parse_serial_case_insensitive_comparison() {
+        // verify_serial uses eq_ignore_ascii_case, so lowercase should match uppercase serial
+        let output = "Cisco IOS Software\nProcessor board ID FCW2145L0NH\n";
+        let parsed = parse_serial_from_show_version(output).unwrap();
+        assert!(parsed.eq_ignore_ascii_case("fcw2145l0nh"));
     }
 }

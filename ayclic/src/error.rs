@@ -28,4 +28,7 @@ pub enum CiscoIosError {
 
     #[error("Serial mismatch: expected {expected}, got {actual}")]
     SerialMismatch { expected: String, actual: String, show_version_output: String },
+
+    #[error("Failed to parse serial from device output: {0}")]
+    SerialParseError(String),
 }
